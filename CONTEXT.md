@@ -41,7 +41,10 @@ A prediction that a reminder will come due at a given time, such as tomorrow's 7
 _Avoid_: Upcoming occurrence, scheduled occurrence
 
 **Open**:
-Said of an occurrence that has fired and has not yet been completed, skipped or missed. A reminder has at most one open occurrence at a time.
+Said of an occurrence that has fired and has not yet been completed, skipped or missed. A reminder has at most one open occurrence at a time. An open occurrence is either due or overdue.
+
+**Due**:
+Said of an open occurrence that is not yet overdue.
 
 **Overdue**:
 Said of an open occurrence that is past the time it should have been done by.
@@ -53,7 +56,11 @@ To close an occurrence by recording that it was done, by whom and when.
 To close an occurrence without doing it, optionally recording a reason.
 
 **Missed**:
-Said of an occurrence the app closed because nobody completed or skipped it in time. Unlike a skip, nobody chose it.
+Said of an occurrence the app closed because it expired before anyone completed or skipped it. Unlike a skip, nobody chose it.
+
+**Expiry**:
+The triggers that make a reminder's open occurrence missed, whichever occurs first. The reminder firing again is always one of them.
+_Avoid_: Timeout (that is an alert stopping by itself)
 
 ### Alerts
 
