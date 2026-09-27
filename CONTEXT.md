@@ -36,6 +36,10 @@ _Avoid_: Source type, provider, plugin
 **Occurrence**:
 One instance of a reminder coming due, such as this morning's 7:00 medicine. Snoozing, completing and skipping apply to an occurrence, not to the reminder.
 
+**Expected occurrence**:
+A prediction that a reminder will come due at a given time, such as tomorrow's 7:00 medicine. When that time comes it becomes an occurrence only if the reminder fires.
+_Avoid_: Upcoming occurrence, scheduled occurrence
+
 **Open**:
 Said of an occurrence that has fired and has not yet been completed or skipped.
 
