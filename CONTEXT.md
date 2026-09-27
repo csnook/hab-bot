@@ -41,7 +41,7 @@ A prediction that a reminder will come due at a given time, such as tomorrow's 7
 _Avoid_: Upcoming occurrence, scheduled occurrence
 
 **Open**:
-Said of an occurrence that has fired and has not yet been completed or skipped.
+Said of an occurrence that has fired and has not yet been completed, skipped or missed. A reminder has at most one open occurrence at a time.
 
 **Overdue**:
 Said of an open occurrence that is past the time it should have been done by.
@@ -52,8 +52,15 @@ To close an occurrence by recording that it was done, by whom and when.
 **Skip**:
 To close an occurrence without doing it, optionally recording a reason.
 
+**Missed**:
+Said of an occurrence the app closed because nobody completed or skipped it in time. Unlike a skip, nobody chose it.
+
 ### Alerts
 
 **Alert**:
 How an occurrence gets someone's attention, anywhere from a quiet notification to a loud alarm.
 _Avoid_: Alarm, notification (each is one kind of alert)
+
+**Priority**:
+The level chosen for a reminder that sets how insistently its open occurrences alert, from a silent notification up to an alarm that breaks through Do Not Disturb. Some priorities are built in (minimum, low, medium, high, maximum); users can define their own.
+_Avoid_: Urgency, importance, severity (severity belongs to weather warnings)
