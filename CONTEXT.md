@@ -16,6 +16,10 @@ Whatever prompts an evaluation of a reminder: a schedule reaching its time, arri
 **Condition**:
 Something else that must be true at evaluation for a reminder to fire, such as being at home. A condition changing never prompts an evaluation by itself.
 
+**Source**:
+A kind of information the app can watch, such as time, location or weather, supplying triggers, conditions or both. New sources can be added over time.
+_Avoid_: Trigger source, provider, plugin
+
 **Evaluation**:
 One check, prompted by a trigger, of whether a reminder's conditions are met and so whether it should fire.
 
