@@ -53,6 +53,12 @@ _Avoid_: Role (roles belong to groups)
 **Claim**:
 To take on an open occurrence of a shared reminder, telling everyone else it is shared with that you will do it. When several users claim the same occurrence, the first claim the server receives wins.
 
+**Assign**:
+To claim a shared reminder's occurrences ahead of time on another user's behalf.
+
+**Rotation**:
+Users taking turns on a shared reminder. The next turn goes to whoever in the rotation did it least recently, and each turn is an assignment.
+
 ### Sources
 
 **Source**:
