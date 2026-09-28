@@ -22,6 +22,14 @@ One check, prompted by a trigger, of whether a reminder's conditions are met and
 **Fire**:
 What a reminder does when an evaluation finds its conditions met: it produces an occurrence and alerts.
 
+**Schedule**:
+A trigger that occurs at set times by the calendar and clock, such as every weekday at 7:00 or the first Monday of the month.
+_Avoid_: Recurrence
+
+**Countdown**:
+A trigger that occurs a set time after the reminder's last occurrence was closed, such as 3 days after the plants were last watered. Completing, skipping or missing an occurrence restarts it.
+_Avoid_: Interval, rolling repeat
+
 ### Sources
 
 **Source**:
