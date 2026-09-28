@@ -14,13 +14,16 @@ _Avoid_: Task, alarm
 Whatever prompts an evaluation of a reminder: a schedule reaching its time, arriving at a place, a severe-storm warning being issued. A reminder is evaluated only when one of its triggers occurs.
 
 **Condition**:
-Something else that must be true at evaluation for a reminder to fire, such as being at home. A condition changing never prompts an evaluation by itself.
+Something else that must be true at evaluation for a reminder to fire, such as being at home. A condition changing never prompts an evaluation by itself, except while the reminder is waiting.
 
 **Evaluation**:
 One check, prompted by a trigger, of whether a reminder's conditions are met and so whether it should fire.
 
 **Fire**:
 What a reminder does when an evaluation finds its conditions met: it produces an occurrence and alerts.
+
+**Waiting**:
+Said of a reminder whose trigger occurred while its conditions were not met, and which will fire as soon as they are, until its wait ends. Each reminder chooses whether to wait or let the trigger pass.
 
 **Schedule**:
 A trigger that occurs at set times by the calendar and clock, such as every weekday at 7:00 or the first Monday of the month.
