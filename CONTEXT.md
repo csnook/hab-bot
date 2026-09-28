@@ -42,6 +42,14 @@ _Avoid_: Household (one kind of group), family, team
 **Member**:
 A user who belongs to a group. Use "member" only when talking about a group, and "user" otherwise.
 
+**Reminder list**:
+A named collection that every reminder belongs to exactly one of, like a calendar in a calendar app. Each user has a private personal list; other lists can be shared with users and groups.
+_Avoid_: Calendar, project, board
+
+**Access**:
+What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access).
+_Avoid_: Role (roles belong to groups)
+
 **Claim**:
 To take on an open occurrence of a shared reminder, telling everyone else it is shared with that you will do it. When several users claim the same occurrence, the first claim the server receives wins.
 
