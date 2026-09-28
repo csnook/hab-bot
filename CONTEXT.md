@@ -30,14 +30,20 @@ _Avoid_: Recurrence
 A trigger that occurs a set time after the reminder's last occurrence was closed, such as 3 days after the plants were last watered. Completing, skipping or missing an occurrence restarts it.
 _Avoid_: Interval, rolling repeat
 
-### Groups
+### Sharing
+
+**User**:
+A person who uses the app. A reminder can be shared with users individually, without any group.
 
 **Group**:
-A set of people who can share reminders with each other, such as a household.
+A defined set of users, such as a household, that reminders can be shared with as a whole.
 _Avoid_: Household (one kind of group), family, team
 
+**Member**:
+A user who belongs to a group. Use "member" only when talking about a group, and "user" otherwise.
+
 **Claim**:
-To take on an open occurrence of a shared reminder, telling the rest of the group you will do it. When several people claim the same occurrence, the first claim the server receives wins.
+To take on an open occurrence of a shared reminder, telling everyone else it is shared with that you will do it. When several users claim the same occurrence, the first claim the server receives wins.
 
 ### Sources
 
