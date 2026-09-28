@@ -9,5 +9,5 @@ When a reminder fires while its previous occurrence is still open, the previous 
 
 ## Consequences
 
-- An occurrence can be missed without anyone seeing it, if the reminder fires again before its alerts reach anyone. The history records which expiry trigger closed it.
+- An occurrence can be missed without anyone seeing it, if the reminder fires again before its alerts reach anyone.
 - Reminders that repeat from the last completion never fire again on their own, so without an added expiry their occurrence stays open until someone closes it.
