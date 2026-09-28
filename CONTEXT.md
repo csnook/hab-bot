@@ -47,7 +47,7 @@ Said of an occurrence that has fired and has not yet been completed, skipped or 
 Said of an open occurrence that is not yet overdue.
 
 **Overdue**:
-Said of an open occurrence that is past the time it should have been done by.
+Said of an open occurrence that has stayed open longer than its reminder allows. Its priority sets how long by default, and a reminder can override it.
 
 **Complete**:
 To close an occurrence by recording that it was done, by whom and when.
@@ -67,6 +67,10 @@ _Avoid_: Timeout (that is an alert stopping by itself)
 **Alert**:
 How an occurrence gets someone's attention, anywhere from a quiet notification to a loud alarm.
 _Avoid_: Alarm, notification (each is one kind of alert)
+
+**Acknowledge**:
+To silence an occurrence's current alert without closing it. The occurrence stays open and can still become overdue or missed.
+_Avoid_: Dismiss
 
 **Priority**:
 The level chosen for a reminder that sets how insistently its open occurrences alert, from a silent notification up to an alarm that breaks through Do Not Disturb. Some priorities are built in (minimum, low, medium, high, maximum); users can define their own.
