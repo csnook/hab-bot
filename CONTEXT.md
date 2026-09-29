@@ -50,11 +50,15 @@ A named collection that every reminder belongs to exactly one of, like a calenda
 _Avoid_: Calendar, project, board
 
 **Access**:
-What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access).
+What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, decline, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access).
 _Avoid_: Role (roles belong to groups)
 
 **Claim**:
 To take on an open occurrence of a shared reminder, telling everyone else it is shared with that you will do it. When several users claim the same occurrence, the first claim the server receives wins.
+
+**Decline**:
+To step out of an open or expected occurrence of a shared reminder yourself, stopping your alerts and leaving it to the others. Unlike a skip, it does not close the occurrence.
+_Avoid_: Pass, skip for me
 
 **Assign**:
 To claim a shared reminder's occurrences ahead of time on another user's behalf.
@@ -94,6 +98,9 @@ To close an occurrence by recording that it was done, by whom and when.
 
 **Skip**:
 To close an occurrence without doing it, optionally with a note. An expected occurrence can be skipped ahead of time.
+
+**Pause**:
+To set a reminder or a reminder list aside for a period, skipping its occurrences in that period. On a shared reminder a user can instead pause just for themselves, declining them.
 
 **Missed**:
 Said of an occurrence the app closed because it expired before anyone completed or skipped it. Unlike a skip, nobody chose it.
