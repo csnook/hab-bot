@@ -7,7 +7,7 @@ A reminder app that prompts people to do things at the right moment (at a time, 
 ### Reminders and firing
 
 **Reminder**:
-A standing rule for prompting someone to do something, such as "take medicine every day at 7:00".
+A rule for prompting someone to do something, either repeatedly, such as "take medicine every day at 7:00", or once, such as "call the plumber tomorrow at 9:00". A one-off reminder is finished once its occurrence is closed.
 _Avoid_: Task, alarm
 
 **Trigger**:
@@ -93,10 +93,13 @@ Said of an open occurrence that has stayed open longer than its reminder allows.
 To close an occurrence by recording that it was done, by whom and when.
 
 **Skip**:
-To close an occurrence without doing it, optionally recording a reason.
+To close an occurrence without doing it, optionally with a note. An expected occurrence can be skipped ahead of time.
 
 **Missed**:
 Said of an occurrence the app closed because it expired before anyone completed or skipped it. Unlike a skip, nobody chose it.
+
+**Correct**:
+To change how or when a closed occurrence was closed, such as turning a missed occurrence into one completed at 9:40. The original closing stays in the history.
 
 **Expiry**:
 The triggers that make a reminder's open occurrence missed, whichever occurs first. The reminder firing again is always one of them.
