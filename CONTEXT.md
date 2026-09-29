@@ -119,7 +119,7 @@ How an occurrence gets someone's attention, anywhere from a quiet notification t
 _Avoid_: Alarm, notification (each is one kind of alert)
 
 **Snooze**:
-To quiet an occurrence's alerts for yourself until a chosen time or trigger. The occurrence stays open and still goes overdue on schedule. An expected occurrence can be snoozed ahead of time.
+To quiet an occurrence's alerts for yourself until a chosen time or trigger. The occurrence stays open and still goes overdue on schedule. An expected occurrence can be snoozed ahead of time. Snoozing all of a user's reminders, or one reminder list, at once also covers anything that fires before the snooze ends.
 _Avoid_: Postpone, delay
 
 **Acknowledge**:
