@@ -118,6 +118,10 @@ _Avoid_: Timeout (that is an alert stopping by itself)
 How an occurrence gets someone's attention, anywhere from a quiet notification to a loud alarm.
 _Avoid_: Alarm, notification (each is one kind of alert)
 
+**Snooze**:
+To quiet an occurrence's alerts for yourself until a chosen time or trigger. The occurrence stays open and still goes overdue on schedule. An expected occurrence can be snoozed ahead of time.
+_Avoid_: Postpone, delay
+
 **Acknowledge**:
 To silence an occurrence's current alert without closing it. The occurrence stays open and can still become overdue or missed.
 _Avoid_: Dismiss
