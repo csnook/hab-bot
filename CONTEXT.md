@@ -89,6 +89,10 @@ Something configured that the app watches, such as a specific calendar, the car'
 A kind of source as the app implements it (calendar, Bluetooth, weather), before any configuration. Only developers deal in source classes; new ones arrive with app updates.
 _Avoid_: Source type, provider, plugin
 
+**Place**:
+A source that is a named area, with a centre and a radius, such as Home or the gym. Like any source it belongs to a reminder list or to one user, so a shared list's Home is one place for everyone using that list.
+_Avoid_: Location (that is where a device is), geofence
+
 ### Occurrences
 
 **Occurrence**:
