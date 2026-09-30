@@ -93,6 +93,9 @@ _Avoid_: Source type, provider, plugin
 A source that is a named area, with a centre and a radius, such as Home or the gym. Like any source it belongs to a reminder list or to one user, so a shared list's Home is one place for everyone using that list.
 _Avoid_: Location (that is where a device is), geofence
 
+**Portable**:
+Said of a device that goes where its user goes, such as a phone, so its connections and location say something about where the user is. Other devices, such as a desktop, are stationary. By default only portable devices count for Wi-Fi and Bluetooth sources.
+
 **Weather warning**:
 An official watch, warning or advisory issued by a weather agency for an area, such as a Severe Thunderstorm Warning. Issuing one can trigger a reminder; it is not itself an alert.
 _Avoid_: Weather alert (alert means how an occurrence gets attention)
