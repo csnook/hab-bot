@@ -41,6 +41,10 @@ Someone who uses the app, usually a person. A screen that several people share, 
 **Account**:
 A user's registration on a server. A standalone user has no account, and a user has at most one. Say "account" only when joining, signing in, recovering or deleting, and "user" otherwise.
 
+**Invite**:
+A single-use link or QR code that lets someone create an account on a server. Only server admins make them.
+_Avoid_: Invitation (that is for groups and shares)
+
 **Device**:
 A phone or computer running the app, belonging to exactly one user. Whatever a user does to an occurrence applies on all of their devices.
 
@@ -63,12 +67,16 @@ A user who belongs to a group. Use "member" only when talking about a group, and
 A member who can add and remove the group's members and make other members group admins. A group has no other roles.
 _Avoid_: Admin on its own
 
+**Invitation**:
+An offer to join a group, or to receive a reminder list or reminder shared with you individually, which you accept or refuse. A list shared with a group reaches its members without one.
+_Avoid_: Invite (that is for accounts), decline (that is for occurrences)
+
 **Reminder list**:
 A named collection that every reminder belongs to exactly one of, like a calendar in a calendar app. Each user has a private personal list; other lists can be shared with users and groups.
 _Avoid_: Calendar, project, board
 
 **Access**:
-What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, decline, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access).
+What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, decline, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access). A user with access in several ways, such as through a group and individually, gets the highest. Everyone with access can see who else has it.
 _Avoid_: Role (roles belong to groups)
 
 **Claim**:
@@ -97,6 +105,9 @@ The secret a user remembers, from which their devices derive the key that unlock
 
 **Escrow**:
 An optional arrangement where the server keeps a copy of a user's personal keys and releases it after verifying the user, for someone who can no longer unlock them. It lets whoever runs the server read that user's personal data.
+
+**Verify**:
+To confirm that a user is who they say they are. A server admin verifies a user before releasing their escrow; someone with manage access verifies a user whose account was reset before a list comes back to them. Until then, that user is unverified on that list.
 
 ### Sources
 
