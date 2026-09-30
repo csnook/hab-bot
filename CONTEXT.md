@@ -106,6 +106,9 @@ The secret a user remembers, from which their devices derive the key that unlock
 **Escrow**:
 An optional arrangement where the server keeps a copy of a user's personal keys and releases it after verifying the user, for someone who can no longer unlock them. It lets whoever runs the server read that user's personal data.
 
+**Retention limit**:
+How far back history is kept, if not forever. A user sets one for their personal list, a group's admins set one for lists shared with the group, and a server's admins set one that caps everything on it. A list or reminder shared with individual users rather than a group is kept on the server for the server's limit, while each user's devices keep it for that user's own limit.
+
 **Verify**:
 To confirm that a user is who they say they are. A server admin verifies a user before releasing their escrow; someone with manage access verifies a user whose account was reset before a list comes back to them. Until then, that user is unverified on that list.
 
