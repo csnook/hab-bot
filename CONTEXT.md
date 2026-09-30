@@ -25,6 +25,10 @@ What a reminder does when an evaluation finds its conditions met: it produces an
 **Waiting**:
 Said of a reminder whose trigger occurred while its conditions were not met, and which will fire as soon as they are, until its wait ends. Each reminder chooses whether to wait or let the trigger pass.
 
+**Watching**:
+Said of a reminder that has nothing open or expected and fires only when an event trigger occurs, such as arriving home, a weather warning or a webhook.
+_Avoid_: Waiting (that is a trigger that occurred while the conditions weren't met), listening
+
 **Schedule**:
 A trigger that occurs at set times by the calendar and clock, such as every weekday at 7:00 or the first Monday of the month.
 _Avoid_: Recurrence
