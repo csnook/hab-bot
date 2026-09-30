@@ -68,12 +68,11 @@ Users taking turns on a shared reminder. The next turn goes to whoever in the ro
 
 ### Privacy
 
-**Readable**:
-Said of a reminder list or source whose content the server may read. Everything else a user creates is encrypted so that only the devices of users with access can read it. Accounts, groups, access and timing are always readable.
-_Avoid_: Public, trusted, plaintext
-
 **Server trust**:
-A device's limit, set per server, on how much it lets that server read. A device refuses to create, join or upload anything more readable than its server trust allows.
+A device's limit, set per server, on how much it lets that server read. Reminder content, history and source settings are always encrypted so that only the devices of users with access can read them; the server reads only accounts, groups, access and timing. Server trust decides whether the device allows anything more, such as escrow.
+
+**Standalone**:
+Said of the app used on a device with no server. Everything works on that device; sharing, several devices and recovery need a server.
 
 **Recovery key**:
 A secret a user keeps outside the app, such as on paper, that restores their encrypted personal data after losing all their devices.
