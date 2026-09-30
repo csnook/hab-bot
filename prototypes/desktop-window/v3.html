@@ -363,59 +363,6 @@ textarea.inp { resize: vertical; }
 .pickrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 0; background: transparent; text-align: left; padding: 6px 8px; border-radius: 4px; cursor: pointer; width: 100%; }
 .pickrow:hover { background: var(--accent-soft); }
 .warntext { color: var(--wait); }
-/* ---------- version 4: settings, sharing, joining ---------- */
-.modal.settings { width: 820px; height: 600px; max-height: none; grid-template-rows: auto minmax(0, 1fr); }
-.setgrid { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 0; }
-.setnav { background: var(--win); border-right: 1px solid var(--line); padding: 10px 8px; display: grid; gap: 2px; align-content: start; }
-.setbody { overflow: auto; padding: 14px 18px 24px; }
-.setpage { display: grid; gap: 10px; }
-.setpage h4 { margin: 8px 0 0; font-size: 13px; }
-.setrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--cal); }
-.setctl { display: grid; gap: 4px; justify-items: start; }
-.tog { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
-.note { font-size: 12px; color: var(--muted); background: var(--cal); border-radius: 5px; padding: 8px 10px; line-height: 1.5; }
-.warnbox { font-size: 12px; background: var(--wait-soft); border-radius: 5px; padding: 8px 10px; line-height: 1.5; }
-.ltable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.ltable td { padding: 6px 6px; border-bottom: 1px solid var(--cal); vertical-align: middle; }
-.ltable td:last-child { text-align: right; }
-.invite { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-soft); font-size: 12.5px; }
-.qrbox { display: flex; gap: 14px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
-.qr { flex: none; border-radius: 4px; }
-.btn.danger { color: var(--neg); }
-.addshare { display: flex; gap: 6px; }
-.choices { display: grid; gap: 8px; }
-.choice { display: grid; gap: 3px; text-align: left; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--win); cursor: pointer; }
-.choice:hover { border-color: var(--accent); }
-.meter { height: 6px; border-radius: 3px; background: var(--cal); overflow: hidden; }
-.meter .lvl { display: block; height: 100%; }
-.lvl.l1, .lvl.l2 { background: var(--neg); } .lvl.l3 { background: var(--wait); } .lvl.l4 { background: var(--pos); }
-.banner.info { background: var(--accent-soft); }
-.listmore { margin-left: auto; border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 0 4px; border-radius: 3px; }
-.listmore:hover { background: var(--cal); color: var(--fg); }
-/* ---------- version 5: sources, priorities, snooze all, notices, alarm ---------- */
-.clickrow { cursor: pointer; }
-.clickrow:hover td { background: var(--cal); }
-.map { display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; padding-bottom: 6px; }
-.map .meta { padding: 0 8px; }
-.copyrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.mono { font-family: var(--proto); font-size: 11.5px; background: var(--cal); padding: 2px 6px; border-radius: 3px; }
-.filters { display: grid; gap: 6px; width: 100%; }
-.srow { display: grid; grid-template-columns: 80px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
-.frow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; gap: 6px; align-items: center; }
-.pairs { display: grid; gap: 6px; width: 100%; }
-.occnote { font-size: 12px; padding: 6px 10px; border-left: 3px solid var(--wait); background: var(--wait-soft); border-radius: 0 4px 4px 0; }
-.unsent { font-size: 11px; color: var(--wait); border: 1px dashed var(--wait); border-radius: 3px; padding: 0 5px; margin-left: 4px; }
-.confirm { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--win); }
-.snzchip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--wait-soft); border: 1px solid var(--wait); white-space: nowrap; }
-.alarmwrap { position: absolute; inset: 34px 0 0 0; z-index: 70; background: rgba(15, 20, 25, 0.25); display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 24px; align-items: start; }
-.alarm { justify-self: center; align-self: center; width: 440px; background: var(--win); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); display: grid; grid-template-rows: 34px auto; overflow: hidden; }
-.alarmbody { padding: 18px 22px 20px; display: grid; gap: 10px; text-align: center; background: var(--view); }
-.ring { font-size: 12px; font-weight: 600; color: var(--neg); letter-spacing: 0.03em; }
-.alarmtitle { font-size: 24px; font-weight: 700; text-wrap: balance; }
-.btn.big { font-size: 16px; padding: 10px; }
-.knotif { width: 300px; background: var(--view); border: 1px solid var(--line); border-left: 4px solid var(--neg); border-radius: 6px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 4px; font-size: 12.5px; grid-column: 2; }
-.knotif.gentle { border-left-color: var(--accent); }
-.knhead { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
 @media (prefers-reduced-motion: no-preference) { .pill, .orow, .irow, .arow, .ncard { transition: background-color .12s, border-color .12s; } }
 </style>
 
@@ -864,7 +811,7 @@ function ReminderDetail({ id, occ, act }) {
 }
 
 // ---------- version 3: hooks the prototype shell sets ----------
-const HOOKS = { edit: () => {}, go: () => {}, settings: () => {}, share: () => {}, tip: () => {}, snoozeAll: () => {}, snoozed: null, endSnooze: () => {} };
+const HOOKS = { edit: () => {}, go: () => {} };
 
 // ---------- History data (sample, generated from fixed seeds) ----------
 function seeded(seed) { let s = seed; return () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; }; }
@@ -1106,373 +1053,6 @@ function Editor({ ed, variant, close }) {
 }
 
 
-// ---------- version 4: settings, account, groups, server admin, sharing, joining ----------
-const SECTIONS = [["you", "You"], ["priorities", "Priorities"], ["sources", "Sources"], ["device", "This computer"], ["account", "Account"], ["groups", "Groups"], ["server", "Server"], ["calendars", "Calendars"], ["about", "About"]];
-function Toggle({ id, on, label }) { return html`<label class="tog"><input type="checkbox" id=${id} checked=${on}/> ${label}</label>`; }
-function SetRow({ label, hint, children }) {
-  return html`<div class="setrow"><div><div class="row-title">${label}</div>${hint ? html`<div class="meta">${hint}</div>` : null}</div><div class="setctl">${children}</div></div>`;
-}
-function SettingsYou() {
-  const [cap, setCap] = useState("Maximum");
-  const [ret, setRet] = useState("No limit");
-  return html`<div class="setpage">
-    <h4>Reminders from other users</h4>
-    <${SetRow} label="Highest priority others can reach you at" hint="Others' reminders above this are treated as this. Your own overrides aren't capped.">
-      <select class="inp" id="cap" value=${cap} onChange=${(e) => setCap(e.target.value)}>${PRIS.map((p) => html`<option>${p}</option>`)}</select></${SetRow}>
-    ${["Minimum", "Low"].includes(cap) ? html`<div class="warnbox">Reminders from others may be easy to miss at ${cap}. Medium or higher is recommended.</div>` : null}
-    <h4>Quiet hours</h4>
-    <${SetRow} label="Weeknights, 22:00 to 07:00" hint="A snooze-all that repeats on a schedule. Your phone's own Do Not Disturb schedule is honoured too."><button class="btn sm">Change…</button></${SetRow}>
-    <${SetRow} label="Weekends, 23:00 to 08:30"><button class="btn sm">Change…</button></${SetRow}>
-    <${SetRow} label="Include maximum priority" hint="Off: maximum-priority reminders still get through."><${Toggle} id="qh-max" on=${false} label=""/></${SetRow}>
-    <button class="btn sm ghost" style="justify-self: start;">+ Add quiet hours</button>
-    <h4>History</h4>
-    <${SetRow} label="Retention limit for your personal list" hint="Older history is deleted. Current reminders are kept.">
-      <select class="inp" id="ret" value=${ret} onChange=${(e) => setRet(e.target.value)}>${["No limit", "30 days", "90 days", "1 year", "2 years", "Custom…"].map((x) => html`<option>${x}</option>`)}</select></${SetRow}>
-    <div class="note">History you share, on lists shared with others, may be kept longer on the server and on other people's devices. A group's lists follow the group's limit.</div>
-    ${ret !== "No limit" ? html`<div class="warnbox">Nothing is deleted for 7 days. On 7 October, history on your personal list older than ${ret} will be deleted.</div>` : null}
-  </div>`;
-}
-function SettingsDevice() {
-  return html`<div class="setpage">
-    <${SetRow} label="Name" hint="Only your own devices see it."><input class="inp" id="devname" value="Desk computer"/></${SetRow}>
-    <${SetRow} label="This computer is" hint="Only portable devices count for Wi-Fi and Bluetooth sources, unless a source says otherwise.">
-      <div class="radios"><label><input type="radio" name="port" id="port-s" checked/> Stationary: it stays in one place</label><label><input type="radio" name="port" id="port-p"/> Portable: it goes where I go</label></div></${SetRow}>
-    <${SetRow} label="Loudest alert on this computer" hint="For example, no alarms here while your phone still rings.">
-      <select class="inp" id="loudest"><option>Alarm</option><option selected>Insistent</option><option>Gentle</option><option>Silent</option></select></${SetRow}>
-    <${SetRow} label="Quiet this computer" hint="Only this computer goes silent. Your other devices still alert."><button class="btn sm">Quiet until…</button></${SetRow}>
-    <${SetRow} label="Reminder lists on this computer">${LISTS.map((l) => html`<label class="tog"><input type="checkbox" id=${"hold-" + l.id} checked/> ${l.name}</label>`)}</${SetRow}>
-    <${SetRow} label="Start at login"><${Toggle} id="autostart" on=${true} label=""/></${SetRow}>
-  </div>`;
-}
-function SettingsAccount() {
-  const [code, setCode] = useState(false);
-  return html`<div class="setpage">
-    <${SetRow} label="You" hint="Your username, display name and avatar are what others see."><button class="btn sm">Edit profile…</button></${SetRow}>
-    <${SetRow} label="Password" hint="It unlocks your keys on a new device. The server never sees it."><button class="btn sm">Change password…</button></${SetRow}>
-    <h4>Your devices</h4>
-    <table class="ltable"><tbody>
-      <tr><td><b>Desk computer</b> <span class="meta">this computer</span></td><td class="meta">Stationary</td><td class="meta">Now</td><td></td></tr>
-      <tr><td><b>Pixel 9</b></td><td class="meta">Portable</td><td class="meta">3 minutes ago</td><td><button class="btn sm ghost">Remove…</button></td></tr>
-      <tr><td><b>Old laptop</b></td><td class="meta">Portable</td><td class="meta">41 days ago</td><td><button class="btn sm ghost">Remove…</button></td></tr>
-    </tbody></table>
-    <div class="note">Removing a device changes the keys of every list it held, so it can't read anything new.</div>
-    <${SetRow} label="Sign in on another device" hint="Scan this code from the new device, or open the link. It carries this server's certificate fingerprint."><button class="btn sm" onClick=${() => setCode(!code)}>${code ? "Hide code" : "Show sign-in code"}</button></${SetRow}>
-    ${code ? html`<div class="qrbox"><${FakeQR}/><div class="meta">hab://home.lan:8443/join?fp=4F:9A:…:C2<br/>The new device still needs your password, or your approval here.</div></div>` : null}
-    <h4>Recovery</h4>
-    <${SetRow} label="Escrow is off" hint="If you forget your password and lose every device, your personal reminders can't be recovered."><button class="btn sm">Turn on escrow…</button></${SetRow}>
-    <h4>Leaving</h4>
-    <${SetRow} label="Leave this server" hint="This computer keeps your personal lists and becomes standalone. You can keep copies of shared lists without their history."><button class="btn sm ghost">Leave server…</button></${SetRow}>
-    <${SetRow} label="Delete your account" hint="Removes you from every shared list and deletes your data on the server."><button class="btn sm ghost danger">Delete account…</button></${SetRow}>
-  </div>`;
-}
-function SettingsGroups() {
-  return html`<div class="setpage">
-    <h4>Invitations</h4>
-    <div class="invite"><div><b>Sam</b> invited you to the group <b>Allotment</b><div class="meta">3 members · you'd see its lists and its members</div></div><div class="acts"><button class="btn sm primary">Accept</button><button class="btn sm">Decline</button></div></div>
-    <h4>Household <span class="meta" style="font-weight: 400;">You're a group admin</span></h4>
-    <table class="ltable"><tbody>
-      <tr><td><b>You</b></td><td class="meta">Group admin</td><td></td></tr>
-      <tr><td><b>Sam</b></td><td class="meta">Group admin</td><td><button class="btn sm ghost">⋯</button></td></tr>
-      <tr><td><b>Robin</b></td><td class="meta">Member</td><td><button class="btn sm ghost">⋯</button></td></tr>
-      <tr><td><b>Kitchen</b> <span class="meta">shared screen</span></td><td class="meta">Member</td><td><button class="btn sm ghost">⋯</button></td></tr>
-      <tr><td><b>Jo</b></td><td class="meta">Invited, not answered yet</td><td><button class="btn sm ghost">Cancel</button></td></tr>
-    </tbody></table>
-    <div class="acts"><button class="btn sm">Invite someone…</button><button class="btn sm ghost">Leave group…</button></div>
-    <${SetRow} label="Retention limit for Household's lists" hint="Group admins set it. Changes are announced 7 days ahead."><select class="inp" id="gret"><option>No limit</option><option selected>1 year</option><option>2 years</option></select></${SetRow}>
-    <button class="btn sm ghost" style="justify-self: start;">+ Create a group</button>
-  </div>`;
-}
-function SettingsServer() {
-  const [inv, setInv] = useState(false);
-  return html`<div class="setpage">
-    <div class="note">You're a server admin on home.lan. You can't read anyone's reminders, or change who can see a list.</div>
-    <h4>Invites</h4>
-    <div class="acts"><button class="btn sm" onClick=${() => setInv(!inv)}>${inv ? "Hide" : "Make an invite…"}</button></div>
-    ${inv ? html`<div class="qrbox"><${FakeQR}/><div class="meta">Single use · expires 7 October<br/>Also add them to: <label class="tog"><input type="checkbox" id="inv-house" checked/> Household</label></div></div>` : null}
-    <table class="ltable"><tbody><tr><td>Invite for Jo</td><td class="meta">expires 5 October</td><td><button class="btn sm ghost">Revoke</button></td></tr></tbody></table>
-    <h4>Accounts</h4>
-    <table class="ltable"><tbody>
-      <tr><td><b>You</b></td><td class="meta">3 devices</td><td class="meta">Server admin</td><td></td></tr>
-      <tr><td><b>Sam</b></td><td class="meta">2 devices</td><td class="meta">Server admin</td><td><button class="btn sm ghost">⋯</button></td></tr>
-      <tr><td><b>Robin</b></td><td class="meta">1 device · reset 28 September</td><td></td><td><button class="btn sm ghost">⋯</button></td></tr>
-      <tr><td><b>Kitchen</b></td><td class="meta">1 device · shared screen</td><td></td><td><button class="btn sm ghost">⋯</button></td></tr>
-    </tbody></table>
-    <div class="note">Reset is for someone who has lost every device and their password and has no escrow. They start again with new keys, and each shared list's managers verify them before it comes back.</div>
-    <h4>Escrow requests</h4>
-    <div class="invite"><div><b>Robin</b> asks to recover their personal reminders<div class="meta">Confirm it's really Robin, in person, before releasing.</div></div><div class="acts"><button class="btn sm">Release…</button><button class="btn sm ghost">Decline</button></div></div>
-    <h4>History</h4>
-    <${SetRow} label="Server retention limit" hint="Caps every list on this server. Shown to people when they join."><select class="inp" id="sret"><option>No limit</option><option>1 year</option><option selected>2 years</option></select></${SetRow}>
-  </div>`;
-}
-function SettingsCalendars() {
-  return html`<div class="setpage">
-    <div class="warnbox">Google Calendar needs you to sign in again on this computer.</div>
-    <${SetRow} label="Google account" hint="Signing in opens your web browser."><button class="btn sm primary">Sign in again…</button></${SetRow}>
-    <${SetRow} label="Calendars laid over the timeline">${["Personal", "Work", "Family", "US holidays"].map((c, i) => html`<label class="tog"><input type="checkbox" id=${"cal-" + i} checked=${i < 3}/> ${c}</label>`)}</${SetRow}>
-    <${SetRow} label="Use your own Google OAuth client" hint="For people running their own server who don't want to use the app's client."><input class="inp" id="oauth" placeholder="Client ID"/></${SetRow}>
-  </div>`;
-}
-function SettingsAbout() {
-  return html`<div class="setpage">
-    <${SetRow} label="Reminders" hint="Version 0.1 (prototype)"><span></span></${SetRow}>
-    <${SetRow} label="Server" hint="home.lan · connected · certificate 4F:9A:…:C2"><span></span></${SetRow}>
-    <div class="note">Weather warnings from the US National Weather Service. Forecasts from <a href="https://open-meteo.com/">Open-Meteo</a>, used under CC BY 4.0.</div>
-  </div>`;
-}
-function FakeQR() {
-  const cells = [], rnd = seeded(4242);
-  const finder = (x, y, ox, oy) => { const dx = x - ox, dy = y - oy; if (dx < 0 || dy < 0 || dx > 6 || dy > 6) return null; return dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4); };
-  for (let y = 0; y < 21; y++) for (let x = 0; x < 21; x++) {
-    const f = [finder(x, y, 0, 0), finder(x, y, 14, 0), finder(x, y, 0, 14)].find((v) => v !== null);
-    const on = f !== undefined ? f : rnd() > 0.55;
-    if (on) cells.push(html`<rect x=${x} y=${y} width="1" height="1"/>`);
-  }
-  return html`<svg class="qr" viewBox="-1 -1 23 23" width="120" height="120" role="img" aria-label="Sign-in code (sample)"><rect x="-1" y="-1" width="23" height="23" fill="#fff"/><g fill="#111">${cells}</g></svg>`;
-}
-function SettingsDialog({ sec, setSec, close }) {
-  const Page = { priorities: SettingsPriorities, sources: SettingsSources, you: SettingsYou, device: SettingsDevice, account: SettingsAccount, groups: SettingsGroups, server: SettingsServer, calendars: SettingsCalendars, about: SettingsAbout }[sec];
-  return html`<div class="modal settings" role="dialog" aria-label="Settings">
-    <div class="edhead"><b>Settings</b><span class="meta">${SECTIONS.find((s) => s[0] === sec)[1]}</span><button class="btn sm ghost" style="margin-left: auto;" onClick=${close} aria-label="Close">✕</button></div>
-    <div class="setgrid">
-      <nav class="setnav">${SECTIONS.map(([k, n]) => html`<button class="navlink" aria-current=${sec === k} onClick=${() => setSec(k)}><span>${n}</span>${k === "groups" ? html`<span class="tag due">1</span>` : k === "calendars" ? html`<span class="tag waiting">!</span>` : null}</button>`)}</nav>
-      <div class="setbody"><${Page}/></div>
-    </div>
-  </div>`;
-}
-
-function ShareDialog({ list, close }) {
-  const l = LISTS.find((x) => x.id === list);
-  const rows = {
-    household: [["Household", "group · 4 members", "Act"], ["You", "", "Manage"], ["Sam", "", "Edit"], ["Robin", "unverified since their account was reset on 28 September", "Act", true]],
-    garden: [["You", "", "Manage"], ["Sam", "", "Edit"]],
-    personal: [],
-  }[list];
-  return html`<div class="modal" role="dialog" aria-label=${"Share " + l.name}>
-    <div class="edhead"><b>Share “${l.name}”</b><button class="btn sm ghost" style="margin-left: auto;" onClick=${close} aria-label="Close">✕</button></div>
-    <div class="edbody">
-      ${list === "personal" ? html`<div class="note">Your personal list is only yours and can't be shared. To share a reminder from it, open the reminder and choose "Share this reminder with someone else…".</div>` : html`
-      <div class="addshare"><input class="inp" id="share-who" placeholder="Exact username, or a group"/><select class="inp" id="share-level" style="width: 110px;"><option>View</option><option selected>Act</option><option>Edit</option><option>Manage</option></select><button class="btn primary">Share</button><button class="btn ghost">Scan code</button></div>
-      <div class="meta">View: sees it, never alerted. Act: also alerted, can claim, complete, skip and snooze. Edit: also changes reminders. Manage: also shares it. Someone shared with in two ways gets the higher level.</div>
-      <table class="ltable"><tbody>${rows.map(([who, note, lvl, unv]) => html`<tr>
-        <td><b>${who}</b>${note ? html`<div class=${"meta" + (unv ? " warntext" : "")}>${note}</div>` : null}</td>
-        <td>${unv ? html`<button class="btn sm">Verify…</button>` : null}</td>
-        <td><select class="inp sm" style="width: 100px;"><option selected=${lvl === "View"}>View</option><option selected=${lvl === "Act"}>Act</option><option selected=${lvl === "Edit"}>Edit</option><option selected=${lvl === "Manage"}>Manage</option></select></td>
-        <td>${who === "You" ? null : html`<button class="btn sm ghost" aria-label=${"Remove " + who}>✕</button>`}</td></tr>`)}
-        ${list === "household" ? html`<tr><td><b>Jo</b><div class="meta">Invitation sent, not accepted yet</div></td><td></td><td class="meta">Act</td><td><button class="btn sm ghost">Cancel</button></td></tr>` : null}
-      </tbody></table>
-      ${list === "household" ? html`<div class="warnbox">Robin's list access is on hold until someone with manage access compares a short code with Robin in person. Until then Robin gets no new reminders from this list.</div>` : null}
-      <div class="meta">Everyone with access sees who else has it. History is kept for ${list === "household" ? "1 year, from Household" : "2 years, from the server"}. Removing someone changes the list's key, and they keep what they've already seen.</div>`}
-    </div>
-  </div>`;
-}
-
-const JOIN_STEPS = ["Start", "Server", "You", "Password", "Recovery", "Others' reminders", "This computer", "Done"];
-function JoinFlow({ close }) {
-  const [step, setStep] = useState(0);
-  const [pw, setPw] = useState("");
-  const strength = pw.length >= 20 ? 4 : pw.length >= 14 ? 3 : pw.length >= 10 ? 2 : pw.length ? 1 : 0;
-  const next = () => setStep(Math.min(step + 1, JOIN_STEPS.length - 1));
-  return html`<div class="modal" role="dialog" aria-label="Get started">
-    <div class="edhead"><b>Get started</b><span class="meta">${step > 0 ? `Step ${step} of ${JOIN_STEPS.length - 2}: ${JOIN_STEPS[step]}` : ""}</span><span class="proto-tag">First start</span></div>
-    <div class="edbody">
-      ${step === 0 ? html`<div class="choices">
-        <button class="choice" onClick=${close}><b>Use it on this computer only</b><span class="meta">Everything works here with no server. You can join a server later and bring it all with you.</span></button>
-        <button class="choice" onClick=${next}><b>Join a server with an invite</b><span class="meta">Someone who runs a server gave you a link or code.</span></button>
-        <button class="choice" onClick=${() => setStep(3)}><b>Sign in to your account</b><span class="meta">You already use it on another device.</span></button>
-      </div>` : null}
-      ${step === 1 ? html`<${Field} label="Invite link or code"><input class="inp" id="invite" value="hab://home.lan:8443/invite/Q7K2-M9XW?fp=4F:9A:…:C2"/></${Field}>
-        <div class="note">Server home.lan · certificate 4F:9A:…:C2 · keeps history for 2 years · adds you to Household</div>` : null}
-      ${step === 2 ? html`<${Field} label="Username" hint="Others type this exactly to share with you."><input class="inp" id="uname" value="pat"/></${Field}><${Field} label="Display name"><input class="inp" id="dname" value="Pat"/></${Field}>` : null}
-      ${step === 3 ? html`<${Field} label="Password" hint="It unlocks your reminders on new devices. The server never sees it, so choose one nobody could guess."><input class="inp" id="pw" type="password" value=${pw} onInput=${(e) => setPw(e.target.value)}/></${Field}>
-        <div class="meter"><span class=${"lvl l" + strength} style=${`width: ${strength * 25}%`}></span></div>
-        <div class="meta">${["", "Too easy to guess", "Still too easy to guess", "Good", "Strong"][strength]}${strength && strength < 3 ? ". Try four or more random words." : ""}</div>
-        <button class="btn sm ghost" style="justify-self: start;" onClick=${() => setPw("lantern-orbit-pebble-quartz")}>Suggest a passphrase</button>` : null}
-      ${step === 4 ? html`<div class="note">If you forget your password and lose every device, your personal reminders are gone. Lists shared with others come back once their managers verify you.</div>
-        <label class="tog"><input type="checkbox" id="escrow"/> Let the server keep a copy of my keys, released after the server's admin confirms it's me</label>
-        <div class="warnbox">With this on, whoever runs home.lan could read your personal reminders.</div>` : null}
-      ${step === 5 ? html`<${Field} label="Highest priority other people's reminders can reach you at" hint="Maximum lets a shared reminder ring through Do Not Disturb."><select class="inp" id="jcap">${PRIS.map((p) => html`<option selected=${p === "Maximum"}>${p}</option>`)}</select></${Field}>` : null}
-      ${step === 6 ? html`<${Field} label="This computer is"><div class="radios"><label><input type="radio" name="jport" id="jport-s" checked/> Stationary: it stays in one place</label><label><input type="radio" name="jport" id="jport-p"/> Portable: it goes where I go</label></div></${Field}>` : null}
-      ${step === 7 ? html`<div class="note">You're in. Household's lists will appear once someone with manage access comes online.</div>` : null}
-    </div>
-    <div class="edfoot">${step > 0 && step < 7 ? html`<button class="btn ghost" onClick=${() => setStep(step - 1)}>Back</button>` : null}<span class="grow"></span>
-      ${step === 0 ? html`<button class="btn" onClick=${close}>Close</button>` : step === 7 ? html`<button class="btn primary" onClick=${() => { close(); HOOKS.tip(); }}>Open Reminders</button>` : html`<button class="btn primary" disabled=${step === 3 && strength < 3} onClick=${next}>Continue</button>`}</div>
-  </div>`;
-}
-function Dialogs({ dlg, setDlg }) {
-  if (!dlg) return null;
-  const close = () => setDlg(null);
-  return html`<div class="overlay" onClick=${(e) => { if (e.target === e.currentTarget) close(); }}>
-    ${dlg.k === "settings" ? html`<${SettingsDialog} sec=${dlg.sec} setSec=${(s) => setDlg({ k: "settings", sec: s })} close=${close}/>` : null}
-    ${dlg.k === "share" ? html`<${ShareDialog} list=${dlg.list} close=${close}/>` : null}
-    ${dlg.k === "join" ? html`<${JoinFlow} close=${close}/>` : null}
-    ${dlg.k === "snooze" ? html`<${SnoozeAll} close=${close} setActive=${HOOKS.setSnoozed}/>` : null}
-    ${dlg.k === "notices" ? html`<${Notices} close=${close}/>` : null}
-  </div>`;
-}
-function InviteBanner() {
-  const [gone, setGone] = useState(false);
-  if (gone) return null;
-  return html`<div class="banner info"><span class="grow"><b>Sam</b> invited you to the group <b>Allotment</b>.</span><button class="btn sm primary" onClick=${() => setGone(true)}>Accept</button><button class="btn sm" onClick=${() => setGone(true)}>Decline</button><button class="btn sm ghost" onClick=${() => HOOKS.settings("groups")}>Details</button></div>`;
-}
-
-
-// ---------- version 5: sources, snooze all, priorities, notices, the alarm window ----------
-const SOURCES = [
-  { k: "place", name: "Home", owner: "Household", detail: "150 m around 12 Elm Row · Wi-Fi “Elm Row” counts as arriving", health: "ok", fake: "difficult" },
-  { k: "place", name: "High Street", owner: "Personal", detail: "200 m around High Street", health: "ok", fake: "difficult" },
-  { k: "bt", name: "Car", owner: "Personal", detail: "Bluetooth “Model 3” · portable devices only", health: "ok", fake: "moderate" },
-  { k: "wifi", name: "Elm Row Wi-Fi", owner: "Household", detail: "“Elm Row”, password-secured", health: "ok", fake: "moderate" },
-  { k: "webhook", name: "Dishwasher", owner: "Household", detail: "Webhook with a signature", health: "ok", fake: "difficult" },
-  { k: "calendar", name: "Google Calendar", owner: "You", detail: "3 calendars", health: "attention", fake: "none" },
-  { k: "weather", name: "Weather at Home", owner: "Household", detail: "NWS warnings, Severe and Extreme", health: "ok", fake: "none" },
-];
-const SRC_WORD = { place: "Place", bt: "Bluetooth", wifi: "Wi-Fi", usb: "USB", webhook: "Webhook", calendar: "Calendar", weather: "Weather" };
-function SettingsSources() {
-  const [open, setOpen] = useState(null);
-  const s = open != null ? SOURCES[open] : null;
-  return html`<div class="setpage">
-    ${s ? html`<button class="btn sm ghost" style="justify-self: start;" onClick=${() => setOpen(null)}>‹ All sources</button>
-      ${s.k === "place" ? html`<${PlaceEditor} s=${s}/>` : s.k === "bt" || s.k === "wifi" ? html`<${ConnEditor} s=${s}/>` : s.k === "webhook" ? html`<${WebhookEditor} s=${s}/>` : html`<div class="note">This source's settings live in its own section.</div>`}` : html`
-    <div class="note">Sources are what the app watches. Each belongs to a reminder list, whose members share it, or to you alone.</div>
-    <table class="ltable"><tbody>${SOURCES.map((x, i) => html`<tr class="clickrow" onClick=${() => setOpen(i)}>
-      <td><b>${x.name}</b><div class="meta">${SRC_WORD[x.k]} · ${x.detail}</div></td>
-      <td class="meta">${x.owner}</td>
-      <td>${x.health === "ok" ? html`<span class="meta">Working</span>` : html`<span class="tag waiting">Needs attention</span>`}</td>
-      <td><span class=${"fake " + x.fake}>${x.fake === "none" ? "Can't be faked" : x.fake[0].toUpperCase() + x.fake.slice(1) + " to fake"}</span></td></tr>`)}</tbody></table>
-    <div class="acts"><button class="btn sm">+ Place</button><button class="btn sm">+ Bluetooth</button><button class="btn sm">+ Wi-Fi</button><button class="btn sm">+ USB</button><button class="btn sm">+ Webhook</button><button class="btn sm">+ Weather</button></div>`}
-  </div>`;
-}
-function PlaceEditor({ s }) {
-  const [r, setR] = useState(150);
-  return html`<div class="setpage">
-    <h4>Place: ${s.name}</h4>
-    <div class="map" role="img" aria-label="Map with the place's circle">
-      <svg viewBox="0 0 400 200" width="100%" height="200" preserveAspectRatio="xMidYMid slice"><rect width="400" height="200" fill="var(--cal)"/>
-        <path d="M0 120 L400 90 M130 0 L170 200 M260 0 L240 200 M0 40 L400 60" stroke="var(--line)" stroke-width="10" fill="none"/>
-        <circle cx="200" cy="100" r=${r / 3} fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/><circle cx="200" cy="100" r="4" fill="var(--accent)"/></svg>
-      <span class="meta">Drag the map to move the centre. Search for an address above it.</span>
-    </div>
-    <${SetRow} label="Radius" hint="Smaller than about 100 m may not register on some phones."><span class="tnum"><input type="range" id="radius" min="50" max="500" step="10" value=${r} onInput=${(e) => setR(+e.target.value)}/> ${r} m</span></${SetRow}>
-    <${SetRow} label="Belongs to" hint="Everyone with access to that list shares this place."><select class="inp" id="pl-owner"><option>Household</option><option>Personal</option><option>Garden</option></select></${SetRow}>
-    <${SetRow} label="Wi-Fi networks that count as arriving" hint="Joining one counts as arriving and being here, but not leaving."><div class="chips"><span class="tchip">Elm Row<button aria-label="Remove">✕</button></span><button class="btn sm ghost">+ Network</button></div></${SetRow}>
-    <div class="note">On phones without Google Play Services, arriving may be noticed about 30 minutes late unless precise mode is on for that phone. Desktops don't sense places.</div>
-  </div>`;
-}
-function ConnEditor({ s }) {
-  const [kind, setKind] = useState(s.k === "bt" ? "bt" : "wifi");
-  return html`<div class="setpage">
-    <h4>Connection: ${s.name}</h4>
-    <div class="seg" style="justify-self: start;"><button aria-pressed=${kind === "bt"} onClick=${() => setKind("bt")}>Bluetooth</button><button aria-pressed=${kind === "wifi"} onClick=${() => setKind("wifi")}>Wi-Fi</button><button aria-pressed=${kind === "usb"} onClick=${() => setKind("usb")}>USB</button></div>
-    ${kind === "bt" ? html`<${SetRow} label="Paired device" hint="Identified by its address. Someone nearby could fake it with moderate effort."><select class="inp" id="bt-dev"><option>Model 3 (car)</option><option>Pixel Buds</option><option>Kitchen speaker</option></select></${SetRow}>` : null}
-    ${kind === "wifi" ? html`<${SetRow} label="Network name"><input class="inp" id="wifi-name" value="Elm Row"/></${SetRow}>
-      <${SetRow} label="Security" hint="Detected from this computer's connection."><div class="radios"><label><input type="radio" name="sec" id="sec-open"/> Open: easy to fake</label><label><input type="radio" name="sec" id="sec-pw" checked/> Password: moderate to fake</label><label><input type="radio" name="sec" id="sec-cert"/> Certificate (enterprise): difficult to fake</label></div></${SetRow}>
-      <${SetRow} label="Only these access points" hint="Optional. Harder to fake, but replacing the router breaks it."><label class="tog"><input type="checkbox" id="pin-ap"/> Pin the 2 access points seen now</label></${SetRow}>` : null}
-    ${kind === "usb" ? html`<${SetRow} label="Device" hint="Plugged into this computer now."><select class="inp" id="usb-dev"><option>YubiKey 5 (serial 1234…)</option><option>USB audio adapter (no serial number)</option></select></${SetRow}>
-      <div class="warnbox">A device with no serial number can't be told apart from another of the same model.</div>` : null}
-    ${kind !== "usb" ? html`<${SetRow} label="Which devices count" hint="By default only portable devices, because a desktop's connections say little about where you are."><select class="inp" id="conn-count"><option>Portable devices only</option><option>All devices</option><option>Choose devices…</option></select></${SetRow}>` : null}
-    <${SetRow} label="Belongs to"><select class="inp" id="conn-owner"><option>Personal</option><option>Household</option></select></${SetRow}>
-    ${kind === "wifi" ? html`<div class="note">Leaving a Wi-Fi network may be noticed late on a phone.</div>` : null}
-  </div>`;
-}
-function WebhookEditor({ s }) {
-  const [listen, setListen] = useState(false);
-  return html`<div class="setpage">
-    <h4>Webhook: ${s.name}</h4>
-    <${SetRow} label="Address" hint="Reachable only on your home network while the server isn't on the internet."><div class="copyrow"><code class="mono">https://home.lan:8443/hook/7f3c…a91e</code><button class="btn sm">Copy</button><button class="btn sm ghost">Change address…</button></div></${SetRow}>
-    <${SetRow} label="Signature secret" hint="With a secret, calls must be signed (HMAC), which makes them difficult to fake. Without one, anyone with the address can trigger it."><div class="copyrow"><code class="mono">whsec_••••••••</code><button class="btn sm">Show</button></div></${SetRow}>
-    <${SetRow} label="Only when the payload has" hint="Exact matches on fields. All must match."><div class="filters"><div class="frow"><input class="inp" value="event"/><span>=</span><input class="inp" value="cycle_finished"/><button class="btn sm ghost" aria-label="Remove">✕</button></div><button class="btn sm ghost" style="justify-self: start;">+ Field</button></div></${SetRow}>
-    <${SetRow} label="Also listen on this computer" hint="Works without a server, for apps on this computer only."><label class="tog"><input type="checkbox" id="listen" checked=${listen} onChange=${() => setListen(!listen)}/> ${listen ? "http://127.0.0.1:47380/hook/dishwasher" : "Off"}</label></${SetRow}>
-    <${SetRow} label="Belongs to"><select class="inp" id="wh-owner"><option>Household</option><option>Personal</option></select></${SetRow}>
-  </div>`;
-}
-const BUILTIN = [
-  ["Minimum", "Silent", "1 day", "Silent", "1 day", "yes", "no"],
-  ["Low", "Gentle", "1 day", "Silent", "1 day", "yes", "no"],
-  ["Medium", "Gentle", "1 hour", "Insistent, then Alarm after 1 hour", "10 min", "yes", "no"],
-  ["High", "Alarm", "0", "Alarm", "10 min", "no", "no"],
-  ["Maximum", "Alarm", "0", "Alarm", "10 min", "no", "yes"],
-];
-function SettingsPriorities() {
-  const [edit, setEdit] = useState(false);
-  return html`<div class="setpage">
-    ${edit ? html`<button class="btn sm ghost" style="justify-self: start;" onClick=${() => setEdit(false)}>‹ All priorities</button>
-      <h4>Custom priority</h4>
-      <${SetRow} label="Name"><input class="inp" id="pr-name" value="Medicine"/></${SetRow}>
-      <${SetRow} label="While due" hint="How it alerts, and for how long before it goes overdue. The interval is also one tap of Snooze."><div class="pairs"><select class="inp" id="pr-due-style"><option>Silent</option><option>Gentle</option><option>Insistent</option><option selected>Alarm</option></select><select class="inp" id="pr-due-int"><option>0 (overdue at once)</option><option selected>15 minutes</option><option>1 hour</option><option>1 day</option></select></div></${SetRow}>
-      <${SetRow} label="Once overdue" hint="Add steps to escalate the longer it stays overdue."><div class="filters"><div class="srow"><span class="meta">At first</span><select class="inp" id="pr-od-style"><option selected>Alarm</option><option>Insistent</option></select></div><div class="srow"><span class="meta">After 30 min</span><select class="inp"><option>Alarm, breaking Do Not Disturb</option></select><button class="btn sm ghost" aria-label="Remove">✕</button></div><button class="btn sm ghost" style="justify-self: start;">+ Step</button></div></${SetRow}>
-      <${SetRow} label="Overdue interval" hint="Repeat, snooze and quiet-after-acknowledging length once overdue."><select class="inp" id="pr-od-int"><option>5 minutes</option><option selected>10 minutes</option><option>30 minutes</option></select></${SetRow}>
-      <${SetRow} label="An alarm rings for"><select class="inp" id="pr-ring"><option selected>The whole interval</option><option>1 minute</option><option>5 minutes</option></select></${SetRow}>
-      <${SetRow} label="Wait for the server before alerting" hint="Up to this long, to learn whether someone already did it."><select class="inp" id="pr-wait"><option>None</option><option>10 seconds</option><option selected>60 seconds</option></select></${SetRow}>
-      <${SetRow} label="On Android"><label class="tog"><input type="checkbox" id="pr-swipe" checked/> Swiping it away snoozes it</label><label class="tog"><input type="checkbox" id="pr-dnd"/> Break through Do Not Disturb</label></${SetRow}>
-      <div class="note">Custom priorities are yours alone. A shared reminder must use a built-in priority, but you can override it with this one for yourself.</div>`
-    : html`<div class="tablewrap"><table class="htable"><thead><tr><th>Priority</th><th>While due</th><th>Overdue after</th><th>Once overdue</th><th>Interval</th><th>Swipe</th><th>Breaks DND</th><th></th></tr></thead>
-      <tbody>${BUILTIN.map((b) => html`<tr><td><b>${b[0]}</b></td><td>${b[1]}</td><td>${b[2]}</td><td>${b[3]}</td><td>${b[4]}</td><td>${b[5]}</td><td>${b[6]}</td><td><button class="btn sm ghost">Copy</button></td></tr>`)}
-        <tr><td><b>Medicine</b> <span class="meta">yours</span></td><td>Alarm</td><td>15 minutes</td><td>Alarm, breaking DND after 30 min</td><td>10 min</td><td>yes</td><td>after 30 min</td><td><button class="btn sm" onClick=${() => setEdit(true)}>Edit</button></td></tr></tbody></table></div>
-      <div class="meta">Built-in priorities can't be changed. Copy one to make your own.</div>`}
-  </div>`;
-}
-function SnoozeAll({ close, setActive }) {
-  const [scope, setScope] = useState("all");
-  const [until, setUntil] = useState("19:00");
-  const [max, setMax] = useState(false);
-  return html`<div class="modal" role="dialog" aria-label="Snooze all">
-    <div class="edhead"><b>Snooze all</b><button class="btn sm ghost" style="margin-left: auto;" onClick=${close} aria-label="Close">✕</button></div>
-    <div class="edbody">
-      <${Field} label="What"><div class="radios"><label><input type="radio" name="sa" id="sa-all" checked=${scope === "all"} onChange=${() => setScope("all")}/> All my reminders</label><label><input type="radio" name="sa" id="sa-list" checked=${scope === "list"} onChange=${() => setScope("list")}/> One list: <select class="inp sm" style="width: 130px;"><option>Household</option><option>Personal</option><option>Garden</option></select></label></div></${Field}>
-      <${Field} label="Until"><div class="chips">${["30 minutes", "1 hour", "19:00", "Tomorrow 07:00", "I get home"].map((u) => html`<button class=${"btn sm" + (until === u ? " primary" : "")} onClick=${() => setUntil(u)}>${u}</button>`)}<button class="btn sm ghost">Pick…</button></div></${Field}>
-      <label class="tog"><input type="checkbox" id="sa-max" checked=${max} onChange=${() => setMax(!max)}/> Include maximum priority</label>
-      <div class="note">Only your alerts are quieted, on all your devices. Anything that fires before then waits silently in your lists, and occurrences still go overdue on time. A reminder that would expire meanwhile gets its last-chance alert.</div>
-    </div>
-    <div class="edfoot"><span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn primary" onClick=${() => { setActive(until); close(); }}>Snooze</button></div>
-  </div>`;
-}
-function Notices({ close }) {
-  return html`<div class="modal wide" role="dialog" aria-label="Notices">
-    <div class="edhead"><b>Notices, as they appear</b><span class="proto-tag">Examples</span><button class="btn sm ghost" onClick=${close} aria-label="Close">✕</button></div>
-    <div class="edbody">
-      <div class="sechead">On an occurrence</div>
-      <div class="occnote">Couldn't check “at Home”: this phone had no location for 2 hours, so it counted as met.</div>
-      <div class="occnote">The forecast came from Open-Meteo because the National Weather Service had no data for Garden.</div>
-      <div class="occnote">The calendar event “Dentist” was cancelled after this fired.</div>
-      <div class="sechead">After syncing</div>
-      <div class="irow" style="cursor: default;"><span class="tm">17:32</span><span class="dot" style="background: var(--l-personal)"></span><span><div class="row-title">Call the plumber</div><div class="meta">Completed <span class="unsent">not sent yet</span></div></span><span></span></div>
-      <div class="banner info" style="border-radius: 6px;"><span class="grow">Your phone skipped “Stretch for 10 minutes” while you completed it here. It counts as completed.</span><button class="btn sm ghost">OK</button></div>
-      <div class="banner" style="border-radius: 6px;"><span class="grow">Update the app to see recent changes to Household. Someone is using a newer version.</span><button class="btn sm">Update</button></div>
-      <div class="sechead">Retention</div>
-      <div class="banner" style="border-radius: 6px;"><span class="grow">On 7 October, Household's history older than 1 year will be deleted. A group admin changed the limit.</span><button class="btn sm ghost">Details</button></div>
-      <div class="sechead">Deleting a reminder</div>
-      <div class="confirm"><b>Delete “Water the lawn”?</b><div class="radios"><label><input type="radio" name="del" id="del-keep" checked/> Keep its history, marked deleted</label><label><input type="radio" name="del" id="del-all"/> Delete its history too, for everyone</label></div><div class="meta">Copies already on removed members' devices can't be recalled.</div><div class="acts"><button class="btn sm">Cancel</button><button class="btn sm danger">Delete</button></div></div>
-    </div>
-  </div>`;
-}
-function AlarmWindow({ close }) {
-  const [snz, setSnz] = useState(false);
-  return html`<div class="alarmwrap">
-    <div class="alarm" role="alertdialog" aria-label="Alarm">
-      <div class="titlebar"><${AppIcon}/><span class="t">Reminder</span><span class="wbtns" aria-hidden="true"><span></span></span></div>
-      <div class="alarmbody">
-        <div class="ring">RINGING · Household · High priority</div>
-        <div class="alarmtitle">Take the bins out</div>
-        <div class="meta">Due 18:00 · Robin's turn · Robin can't this time</div>
-        <button class="btn primary big" onClick=${close}>Done</button>
-        <div class="acts" style="justify-content: center;">${snz ? html`${["5 min", "10 min", "30 min", "Until…"].map((x) => html`<button class="btn" onClick=${close}>${x}</button>`)}` : html`<button class="btn" onClick=${() => setSnz(true)}>Snooze ▾</button><button class="btn" onClick=${close}>Claim</button><button class="btn ghost" onClick=${close}>Acknowledge</button><button class="btn ghost" onClick=${close}>Skip…</button>`}</div>
-        <div class="meta">Closing this window or the notification silences both.</div>
-      </div>
-    </div>
-    <div class="knotif" role="status">
-      <div class="knhead"><${AppIcon} size=${14}/><span>Reminders</span><span class="meta" style="margin-left: auto;">now</span></div>
-      <div class="row-title">Take the bins out</div><div class="meta">Due 18:00 · Household</div>
-      <div class="acts"><button class="btn sm" onClick=${close}>Done</button><button class="btn sm" onClick=${close}>Snooze</button><button class="btn sm" onClick=${close}>Claim</button></div>
-    </div>
-    <div class="knotif gentle" role="status">
-      <div class="knhead"><${AppIcon} size=${14}/><span>Reminders</span><span class="meta" style="margin-left: auto;">23:49</span></div>
-      <div class="row-title">Last chance: Call the plumber</div><div class="meta">Expires at 23:59 · snoozed until tomorrow</div>
-      <div class="acts"><button class="btn sm" onClick=${close}>Done</button><button class="btn sm" onClick=${close}>Snooze</button><button class="btn sm" onClick=${close}>Skip</button></div>
-    </div>
-  </div>`;
-}
-
-
 // ---------- the window ----------
 const VIEWS = [
   { k: "inbox", name: "Inbox", icon: "M2 4h12M2 8h12M2 12h8" },
@@ -1494,7 +1074,7 @@ function Window({ occ, act, filt, setFilt, sel, setSel, view, setView, tip, setT
       ${view === "calendar" ? html`<div><div class="sechead" style="margin-bottom: 6px;">September 2026</div>
         <div class="mini tnum">${["S", "M", "T", "W", "T", "F", "S"].map((x) => html`<div class="h">${x}</div>`)}${monthDays.map((d) => html`<div class=${"d" + (d === 30 ? " today" : d === 29 ? " inview" : "")}>${d || ""}</div>`)}</div></div>` : null}
       <div class="lists"><div class="sechead">Reminder lists</div>
-        ${LISTS.map((l) => html`<label title=${l.note}><input type="checkbox" id=${"list-" + l.id} checked=${!filt.lists[l.id]} onChange=${() => toggle("lists", l.id)} style=${`accent-color: ${lc(l.id)}`}/>${l.name}<button class="listmore" aria-label=${"Share " + l.name} title="Share…" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); HOOKS.share(l.id); }}>⋯</button></label>`)}
+        ${LISTS.map((l) => html`<label><input type="checkbox" id=${"list-" + l.id} checked=${!filt.lists[l.id]} onChange=${() => toggle("lists", l.id)} style=${`accent-color: ${lc(l.id)}`}/>${l.name}<span class="sub">${l.note}</span></label>`)}
       </div>
       <div class="lists"><div class="sechead">Priorities</div>
         ${PRIS.map((p) => html`<label><input type="checkbox" id=${"pri-" + p} checked=${!filt.pris[p]} onChange=${() => toggle("pris", p)}/>${p}<span class="sub tnum">${Object.keys(R).filter((id) => R[id].pri === p).length}</span></label>`)}
@@ -1508,9 +1088,8 @@ function Window({ occ, act, filt, setFilt, sel, setSel, view, setView, tip, setT
         ${view === "calendar" ? html`<button class="btn sm">Today</button><button class="btn sm ghost" aria-label="Previous">‹</button><button class="btn sm ghost" aria-label="Next">›</button>` : null}
         <span class="t">${title}</span>
         ${view === "calendar" ? html`<div class="seg"><button aria-pressed="false">Day</button><button aria-pressed="true">3 days</button><button aria-pressed="false">Week</button></div>` : null}
-        ${HOOKS.snoozed ? html`<span class="snzchip">All snoozed until ${HOOKS.snoozed}<button class="btn sm ghost" onClick=${() => HOOKS.endSnooze()}>End now</button></span>` : html`<button class="btn" onClick=${() => HOOKS.snoozeAll()}>Snooze all…</button>`}
+        <button class="btn">Snooze all…</button>
         <button class="btn primary" onClick=${() => HOOKS.edit(null)}>New reminder</button>
-        <button class="btn ghost" aria-label="Settings" title="Settings" onClick=${() => HOOKS.settings("you")}>⚙</button>
         ${tip ? html`<div class="coach" role="dialog" aria-label="Tip">
           <b>Four ways to see your reminders</b>
           <span>Inbox puts what needs you first. Calendar lays them over your calendar. Agenda reads in time order. Board shows every reminder, including waiting and paused ones, so you can edit them.</span>
@@ -1518,7 +1097,6 @@ function Window({ occ, act, filt, setFilt, sel, setSel, view, setView, tip, setT
           <button class="btn sm" onClick=${() => setTip(false)}>Got it</button></div>` : null}
       </div>
       <${SourcesBanner}/>
-      <${InviteBanner}/>
       <div class="viewbody">
         ${view === "inbox" ? html`<${InboxView} occ=${vis} act=${act} sel=${sel} setSel=${setSel}/>` : null}
         ${view === "calendar" ? html`<${CalendarView} occ=${vis} act=${act} sel=${sel} setSel=${setSel}/>` : null}
@@ -1576,14 +1154,6 @@ function App() {
   const [ed, setEd] = useState(null);
   const [edV, setEdV] = useState("A");
   HOOKS.edit = (id) => { setTip(false); setEd({ id }); };
-  const [dlg, setDlg] = useState(null);
-  HOOKS.settings = (sec) => { setTip(false); setDlg({ k: "settings", sec }); };
-  HOOKS.share = (list) => { setTip(false); setDlg({ k: "share", list }); };
-  HOOKS.tip = () => setTip(true);
-  const [snoozed, setSnoozed] = useState(null);
-  const [alarm, setAlarm] = useState(false);
-  HOOKS.snoozed = snoozed; HOOKS.setSnoozed = setSnoozed; HOOKS.endSnooze = () => setSnoozed(null);
-  HOOKS.snoozeAll = () => setDlg({ k: "snooze" });
   HOOKS.go = (k) => setView(k);
   const setView = (k) => { setViewRaw(k); setSel(null); try { history.replaceState(null, "", "#" + k); } catch (e) {} try { localStorage.setItem("proto-last-view", k); } catch (e) {} };
   const idx = VIEWS.findIndex((x) => x.k === view);
@@ -1596,18 +1166,16 @@ function App() {
   });
   return html`
     <header class="proto-head">
-      <div class="proto-eyebrow">Throwaway prototype, version 5 · csnook/hab-bot#29 · sample data</div>
+      <div class="proto-eyebrow">Throwaway prototype, version 3 · csnook/hab-bot#29 · sample data</div>
       <h1>Reminders desktop window</h1>
-      <p>Version 5 adds the last batch from <a href="https://github.com/csnook/hab-bot/issues/29">Desktop dialogs and settings</a>. Settings (⚙) now also has Priorities, with the custom-priority editor, and Sources, with the place, connection and webhook editors. Snooze all… opens its dialog and shows a chip while it's active. In the bar at the bottom, "Alarm" shows the Linux alarm window with its critical notification and a last-chance alert, and "Notices" shows every notice as it would appear.</p>
-      <p>Earlier batches are still here: the History view, the editor variants (A was chosen), settings, sharing, invitations and first start. It is Wednesday 30 September at 17:40, with sample data, and nothing is saved.</p>
+      <p>Version 3 adds two things from <a href="https://github.com/csnook/hab-bot/issues/29">Desktop dialogs and settings</a>. The History view (the fifth button in the switcher) has Reliability and Group tabs. The reminder editor comes in three variants. Open it with New reminder, or with Edit reminder… on any card or occurrence, and switch variants with the "Editor" button in the bar at the bottom. Each variant has the trigger and condition picker behind "+ Trigger" and "+ Condition".</p>
+      <p>It is Wednesday 30 September at 17:40, with sample data, and nothing is saved. Still to come: settings, account, server admin, groups and sharing; then the source editors, snooze all, the priority editor, notices and the Linux alarm window.</p>
     </header>
     <div class="desk-scroll"><div class="desk">
       <div class="win" role="application" aria-label="Reminders window">
         <div class="titlebar"><${AppIcon}/><span class="t">Reminders</span><span class="wbtns" aria-hidden="true"><span></span><span></span><span></span></span></div>
         <${Window} occ=${occ} act=${act} filt=${filt} setFilt=${setFilt} sel=${sel} setSel=${setSel} view=${view} setView=${setView} tip=${tip} setTip=${setTip}/>
         <${Editor} ed=${ed} variant=${edV} close=${() => setEd(null)}/>
-        <${Dialogs} dlg=${dlg} setDlg=${setDlg}/>
-        ${alarm ? html`<${AlarmWindow} close=${() => setAlarm(false)}/>` : null}
       </div>
       <${Tray} occ=${occ} open=${tray} setOpen=${setTray}/>
     </div></div>
@@ -1617,10 +1185,7 @@ function App() {
       <button onClick=${() => step(1)} aria-label="Next view">→</button>
       <span class="sep"></span>
       <button onClick=${() => { if (!ed) setEd({ id: "bins" }); else setEdV({ A: "B", B: "C", C: "A" }[edV]); }} title="Open the reminder editor, then cycle its variants">Editor ${edV}${ed ? " →" : ""}</button>
-      <button onClick=${() => { setEd(null); setDlg({ k: "join" }); }}>First start</button>
-      <button onClick=${() => setAlarm(!alarm)} aria-pressed=${alarm}>Alarm</button>
-      <button onClick=${() => { setEd(null); setDlg({ k: "notices" }); }}>Notices</button>
-      <button onClick=${() => setTip(!tip)} aria-pressed=${tip}>Tip</button>
+      <button onClick=${() => setTip(!tip)} aria-pressed=${tip}>First-run tip</button>
       <button onClick=${() => setTray(!tray)} aria-pressed=${tray}>Tray menu</button>
     </div>`;
 }

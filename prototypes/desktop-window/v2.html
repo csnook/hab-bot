@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>Reminders Desktop Window</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* PROTOTYPE, throwaway, version 2. One window for csnook/hab-bot#26 with four views (#inbox, #calendar, #agenda, #board).
+   Layout: a Plasma desk holding one Breeze-styled app window and a tray; prototype controls sit outside the window in mono type. */
+:root {
+  --desk: #cfd6dd;
+  --win: #eff0f1;
+  --view: #fcfcfc;
+  --line: #d3d7db;
+  --fg: #232629;
+  --muted: #677079;
+  --faint: #9aa1a8;
+  --accent: #2c93cf;
+  --accent-soft: rgba(61, 174, 233, 0.14);
+  --neg: #d33a4b;
+  --neg-soft: rgba(218, 68, 83, 0.12);
+  --pos: #238a4f;
+  --wait: #b86a00;
+  --wait-soft: rgba(246, 116, 0, 0.12);
+  --cal: rgba(35, 38, 41, 0.06);
+  --cal-edge: rgba(35, 38, 41, 0.28);
+  --l-personal: #1d99f3;
+  --l-household: #9b59b6;
+  --l-garden: #11a08a;
+  --chrome-bg: #1d2126;
+  --chrome-fg: #f3f5f7;
+  --chrome-muted: #aab2ba;
+  --shadow: 0 18px 50px rgba(20, 30, 40, 0.22), 0 2px 6px rgba(20, 30, 40, 0.12);
+  --ui: "Noto Sans", "Noto Sans UI", system-ui, sans-serif;
+  --proto: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --desk: #121417; --win: #2a2e32; --view: #1e2124; --line: #3b4148; --fg: #f2f4f5; --muted: #a3acb4; --faint: #6d757d;
+    --accent: #3daee9; --accent-soft: rgba(61, 174, 233, 0.18); --neg: #f0596a; --neg-soft: rgba(240, 89, 106, 0.16);
+    --pos: #46c27a; --wait: #f39c3c; --wait-soft: rgba(243, 156, 60, 0.16); --cal: rgba(252, 252, 252, 0.06); --cal-edge: rgba(252, 252, 252, 0.3);
+    --l-personal: #3daee9; --l-household: #b77fd0; --l-garden: #2ec4a6;
+    --chrome-bg: #eef1f4; --chrome-fg: #16191c; --chrome-muted: #4f575f;
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --desk: #121417; --win: #2a2e32; --view: #1e2124; --line: #3b4148; --fg: #f2f4f5; --muted: #a3acb4; --faint: #6d757d;
+  --accent: #3daee9; --accent-soft: rgba(61, 174, 233, 0.18); --neg: #f0596a; --neg-soft: rgba(240, 89, 106, 0.16);
+  --pos: #46c27a; --wait: #f39c3c; --wait-soft: rgba(243, 156, 60, 0.16); --cal: rgba(252, 252, 252, 0.06); --cal-edge: rgba(252, 252, 252, 0.3);
+  --l-personal: #3daee9; --l-household: #b77fd0; --l-garden: #2ec4a6;
+  --chrome-bg: #eef1f4; --chrome-fg: #16191c; --chrome-muted: #4f575f;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+html, body { background: var(--desk); color: var(--fg); }
+body { font-family: var(--ui); padding: 0 16px 96px; }
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; }
+button:focus-visible, [tabindex]:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* ---------- prototype chrome (not part of the design) ---------- */
+.proto-head { max-width: 1180px; margin: 0 auto; padding-block: 28px 18px; display: grid; gap: 10px; font-family: var(--proto); }
+.proto-eyebrow { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.proto-head h1 { font-family: var(--ui); font-size: 26px; font-weight: 700; margin: 0; text-wrap: balance; }
+.proto-head p { margin: 0; max-width: 78ch; font-size: 13px; line-height: 1.6; color: var(--muted); }
+.proto-variants { display: flex; flex-wrap: wrap; gap: 8px; }
+.proto-variants button { border: 1px solid var(--line); background: var(--view); border-radius: 6px; padding: 8px 12px; cursor: pointer; text-align: left; font-family: var(--proto); font-size: 12px; line-height: 1.45; max-width: 360px; min-width: 0; }
+.proto-variants button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.proto-variants b { font-family: var(--ui); font-size: 13px; }
+.desk-scroll { overflow-x: auto; padding-block: 8px 24px; }
+.desk { width: 1212px; margin: 0 auto; display: grid; gap: 14px; justify-items: center; }
+.switcher { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 50;
+  display: flex; align-items: center; gap: 4px; padding: 6px; border-radius: 999px; background: var(--chrome-bg); color: var(--chrome-fg);
+  font-family: var(--proto); font-size: 13px; box-shadow: 0 8px 28px rgba(0,0,0,0.35); max-width: calc(100vw - 32px); }
+.switcher button { background: transparent; border: 0; color: inherit; cursor: pointer; padding: 6px 10px; border-radius: 999px; }
+.switcher button:hover { background: rgba(127,127,127,0.25); }
+.switcher .lbl { padding: 0 8px; white-space: nowrap; }
+.switcher .sep { width: 1px; height: 20px; background: var(--chrome-muted); opacity: 0.5; }
+
+/* ---------- the app window ---------- */
+.win { width: 1180px; height: 720px; background: var(--win); border: 1px solid var(--line); border-radius: 8px 8px 6px 6px; box-shadow: var(--shadow);
+  display: grid; grid-template-rows: 34px minmax(0, 1fr); overflow: hidden; font-size: 13px; }
+.titlebar { display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.titlebar .appicon { width: 18px; height: 18px; }
+.titlebar .t { flex: 1; text-align: center; font-weight: 500; color: var(--muted); }
+.wbtns { display: flex; gap: 10px; }
+.wbtns span { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--faint); }
+.body { min-height: 0; display: grid; }
+.pane { background: var(--view); min-height: 0; min-width: 0; }
+.scroll { overflow: auto; min-height: 0; }
+
+/* shared bits */
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+.btn { border: 1px solid var(--line); background: var(--win); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12.5px; line-height: 1.4; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 2px 8px; font-size: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+.tag.overdue { color: var(--neg); background: var(--neg-soft); }
+.tag.due { color: var(--accent); background: var(--accent-soft); }
+.tag.waiting { color: var(--wait); background: var(--wait-soft); }
+.tag.plain { color: var(--muted); background: var(--cal); }
+.banner { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--wait-soft); border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.banner .grow { flex: 1; min-width: 0; }
+.sechead { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.meta { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.row-title { font-weight: 500; }
+.done-title { color: var(--muted); }
+.strike { text-decoration: line-through; }
+
+/* detail */
+.detail { display: grid; gap: 12px; padding: 14px 16px; align-content: start; }
+.detail h3 { margin: 0; font-size: 16px; line-height: 1.3; text-wrap: balance; }
+.detail dl { margin: 0; display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; font-size: 12.5px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; min-width: 0; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.menu { position: absolute; z-index: 20; background: var(--view); border: 1px solid var(--line); border-radius: 5px; box-shadow: var(--shadow); padding: 4px; display: grid; min-width: 190px; }
+.menu button { border: 0; background: transparent; text-align: left; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12.5px; }
+.menu button:hover { background: var(--accent-soft); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.hist { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+
+/* ---------- Variant A: calendar ---------- */
+.A { grid-template-columns: 214px minmax(0, 1fr) 286px; }
+.A .side { background: var(--win); border-right: 1px solid var(--line); padding: 12px; display: grid; gap: 16px; align-content: start; }
+.mini { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; font-size: 11px; }
+.mini .h { color: var(--faint); font-weight: 600; }
+.mini .d { padding: 3px 0; border-radius: 3px; }
+.mini .d.today { background: var(--accent); color: #fff; font-weight: 600; }
+.mini .d.inview { background: var(--accent-soft); }
+.lists { display: grid; gap: 4px; }
+.lists label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 3px; cursor: pointer; font-size: 12.5px; }
+.lists label:hover { background: var(--cal); }
+.lists .sub { font-size: 11px; color: var(--muted); margin-left: auto; }
+.navlink { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px; cursor: pointer; border: 0; background: transparent; width: 100%; text-align: left; font-size: 12.5px; }
+.navlink:hover, .navlink[aria-current="true"] { background: var(--accent-soft); }
+.A .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); border-right: 1px solid var(--line); }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--win); }
+.toolbar .t { font-size: 15px; font-weight: 600; flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button { border: 0; background: var(--win); padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.dayheads { display: grid; grid-template-columns: 52px repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--view); }
+.dayheads div { padding: 6px 8px; font-size: 12px; font-weight: 600; border-left: 1px solid var(--line); }
+.dayheads div.today { color: var(--accent); }
+.grid { display: grid; grid-template-columns: 52px repeat(3, 1fr); position: relative; }
+.hours { position: relative; }
+.hours span { position: absolute; right: 6px; font-size: 10.5px; color: var(--faint); transform: translateY(-6px); }
+.col { position: relative; border-left: 1px solid var(--line); background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 46px); background-position: 0 0; }
+.col.past { background-color: rgba(127,127,127,0.035); }
+.calblk { position: absolute; left: 3px; right: 3px; background: var(--cal); border-left: 3px solid var(--cal-edge); border-radius: 3px; font-size: 10.5px; color: var(--muted); padding: 2px 6px; text-align: right; overflow: hidden; }
+.pill { position: absolute; height: 22px; border-radius: 4px; font-size: 11.5px; padding: 0 6px; display: flex; align-items: center; gap: 5px; cursor: pointer; overflow: hidden; white-space: nowrap; border: 1px solid transparent; text-align: left; }
+.pill .tm { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pill.st-due { background: var(--lc-soft); border-color: var(--lc); color: var(--fg); }
+.pill.st-overdue { background: var(--lc-soft); border-color: var(--neg); color: var(--fg); box-shadow: inset 3px 0 0 var(--neg); }
+.pill.st-waiting { background: var(--wait-soft); border: 1px dashed var(--wait); color: var(--fg); }
+.pill.st-expected { background: var(--view); border-color: var(--lc); color: var(--fg); }
+.pill.st-tentative { background: var(--view); border: 1px dashed var(--lc); color: var(--muted); }
+.pill.st-completed { background: transparent; border-color: var(--line); color: var(--muted); }
+.pill.st-skipped { background: transparent; border-color: var(--line); color: var(--faint); text-decoration: line-through; }
+.pill.st-missed { background: transparent; border: 1px solid var(--neg); color: var(--neg); }
+.pill.st-nofire { background: transparent; border: 1px dotted var(--faint); color: var(--faint); height: 18px; font-size: 10.5px; }
+.pill.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nowline { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--neg); z-index: 5; pointer-events: none; }
+.nowline::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--neg); }
+.A .rail { background: var(--view); display: grid; grid-template-rows: minmax(0, 1fr); }
+.railsec { display: grid; gap: 6px; padding: 12px 12px 4px; }
+.orow { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; text-align: left; background: transparent; width: 100%; }
+.orow:hover { background: var(--cal); }
+.orow.sel { border-color: var(--accent); background: var(--accent-soft); }
+.orow .dot { margin-top: 5px; }
+
+/* ---------- Variant B: inbox ---------- */
+.B { grid-template-columns: 188px minmax(0, 1fr) auto; }
+.B .nav { background: var(--win); border-right: 1px solid var(--line); padding: 12px 10px; display: grid; gap: 14px; align-content: start; }
+.B .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.ribbon { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); background: var(--view); display: grid; gap: 6px; }
+.rib { position: relative; height: 54px; }
+.rib .axis { position: absolute; left: 0; right: 0; top: 26px; border-top: 1px solid var(--line); }
+.rib .day { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); font-size: 10.5px; color: var(--muted); padding-left: 4px; }
+.rib .busy { position: absolute; top: 34px; height: 8px; background: var(--cal-edge); opacity: 0.45; border-radius: 2px; }
+.rib .tick { position: absolute; top: 20px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; border: 2px solid var(--lc); background: var(--view); cursor: pointer; padding: 0; }
+.rib .tick.st-due { background: var(--lc); }
+.rib .tick.st-overdue { background: var(--neg); border-color: var(--neg); }
+.rib .tick.st-waiting { border-style: dashed; border-color: var(--wait); }
+.rib .tick.st-completed { background: var(--pos); border-color: var(--pos); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-skipped { border-color: var(--faint); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-missed { border-color: var(--neg); background: var(--view); }
+.rib .tick.st-nofire { border: 1px dotted var(--faint); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-tentative { border-style: dashed; }
+.rib .now { position: absolute; top: 12px; bottom: 6px; border-left: 2px solid var(--neg); }
+.rib .now span { position: absolute; top: -12px; left: -16px; font-size: 10px; color: var(--neg); font-weight: 600; }
+.inbox { padding: 6px 16px 24px; display: grid; gap: 18px; align-content: start; }
+.igroup { display: grid; gap: 2px; }
+.irow { display: grid; grid-template-columns: 48px 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 8px; border-radius: 5px; border: 1px solid transparent; cursor: pointer; }
+.irow:hover { background: var(--cal); }
+.irow.sel { border-color: var(--accent); background: var(--accent-soft); }
+.irow .tm { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+.drawer { width: 320px; border-left: 1px solid var(--line); background: var(--view); display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+
+/* ---------- Variant C: agenda ---------- */
+.C { grid-template-rows: auto auto minmax(0, 1fr); }
+.chead { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; padding: 12px 20px 10px; background: var(--win); border-bottom: 1px solid var(--line); }
+.chead .date { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+.chead .grow { flex: 1; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--view); font-size: 12px; cursor: pointer; }
+.fchip[aria-pressed="false"] { opacity: 0.45; }
+.nowband { display: flex; gap: 8px; padding: 10px 20px; background: var(--view); border-bottom: 1px solid var(--line); overflow-x: auto; align-items: stretch; }
+.nowband .lbl { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; color: var(--neg); text-transform: uppercase; align-self: center; padding-right: 4px; white-space: nowrap; }
+.ncard { display: grid; gap: 2px; min-width: 190px; max-width: 230px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); border-left: 4px solid var(--lc); background: var(--win); cursor: pointer; text-align: left; }
+.ncard.st-overdue { border-left-color: var(--neg); }
+.ncard.st-waiting { border-left-style: dashed; border-left-color: var(--wait); }
+.ncard.sel { box-shadow: 0 0 0 2px var(--accent); }
+.agenda { max-width: 760px; margin: 0 auto; padding: 4px 20px 40px; }
+.dhead { position: sticky; top: 0; z-index: 3; background: var(--view); padding: 14px 0 6px; font-size: 13px; font-weight: 700; display: flex; gap: 8px; align-items: baseline; border-bottom: 1px solid var(--line); }
+.arow { display: grid; grid-template-columns: 54px 22px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 8px 6px; border-bottom: 1px solid var(--cal); cursor: pointer; }
+.arow:hover { background: var(--cal); }
+.arow.sel { background: var(--accent-soft); }
+.arow .tm { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; padding-top: 1px; }
+.arow.cal { cursor: default; color: var(--muted); }
+.arow.cal:hover { background: transparent; }
+.glyph { width: 16px; height: 16px; display: inline-grid; place-items: center; margin-top: 1px; }
+.nowrule { display: flex; align-items: center; gap: 8px; color: var(--neg); font-size: 11px; font-weight: 700; padding: 6px 0; }
+.nowrule::after { content: ""; flex: 1; border-top: 2px solid var(--neg); }
+.expand { grid-column: 3 / -1; margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--win); cursor: default; }
+
+/* ---------- not time-based table (shared) ---------- */
+.ntb { padding: 16px; display: grid; gap: 10px; align-content: start; }
+.ntb table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ntb th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.ntb td { padding: 8px; border-bottom: 1px solid var(--cal); vertical-align: top; }
+.fake { font-size: 11px; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.fake.easy { border-color: var(--neg); color: var(--neg); }
+.fake.moderate { border-color: var(--wait); color: var(--wait); }
+
+/* ---------- tray ---------- */
+.panel { width: 1180px; height: 38px; border-radius: 6px; background: var(--win); border: 1px solid var(--line); display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 0 12px; position: relative; font-size: 12.5px; }
+.panel .ticon { width: 16px; height: 16px; border-radius: 3px; background: var(--faint); opacity: 0.6; }
+.trayme { position: relative; border: 0; background: transparent; padding: 2px; cursor: pointer; display: grid; place-items: center; }
+.trayme .badge { position: absolute; top: -5px; right: -7px; min-width: 15px; height: 15px; border-radius: 8px; background: var(--neg); color: #fff; font-size: 9.5px; font-weight: 700; display: grid; place-items: center; padding: 0 3px; }
+.traymenu { position: absolute; right: 70px; bottom: 44px; width: 300px; background: var(--view); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); padding: 6px; display: grid; font-size: 12.5px; z-index: 30; }
+.traymenu .mi { display: flex; justify-content: space-between; gap: 8px; padding: 5px 10px; border-radius: 3px; border: 0; background: transparent; text-align: left; cursor: pointer; width: 100%; }
+.traymenu .mi:hover { background: var(--accent-soft); }
+.traymenu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.traymenu .cap { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+/* ---------- version 2: one window, four views ---------- */
+.shell { grid-template-columns: 200px minmax(0, 1fr); }
+.shell .side { background: var(--win); border-right: 1px solid var(--line); padding: 12px; display: grid; gap: 16px; align-content: start; overflow: auto; }
+.shell .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; }
+.shell .toolbar { position: relative; flex-wrap: nowrap; }
+.shell .toolbar .t { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.views button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; }
+.viewbody { min-height: 0; display: grid; }
+.calview { display: grid; grid-template-columns: minmax(0, 1fr) 270px; min-height: 0; }
+.calview .rail { border-left: 1px solid var(--line); background: var(--view); }
+.inview, .agview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: 200px; gap: 10px; padding: 12px; overflow: auto; align-items: start; min-height: 0; background: var(--view); }
+.bcol { background: var(--win); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 6px; padding: 8px; align-content: start; }
+.bhead { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; padding: 2px 2px 4px; }
+.c-overdue .bhead span:first-child { color: var(--neg); }
+.c-due .bhead span:first-child { color: var(--accent); }
+.c-waiting .bhead span:first-child { color: var(--wait); }
+.c-finished .bcard, .c-paused .bcard { opacity: 0.8; }
+.bcard { display: grid; gap: 4px; text-align: left; background: var(--view); border: 1px solid var(--line); border-left: 3px solid var(--lc); border-radius: 5px; padding: 7px 8px; cursor: pointer; width: 100%; }
+.bcard:hover { border-color: var(--accent); border-left-color: var(--lc); }
+.bcard.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.coach { position: absolute; top: calc(100% - 2px); left: 10px; z-index: 40; width: 320px; background: var(--chrome-bg); color: var(--chrome-fg); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.5; }
+.coach::before { content: ""; position: absolute; top: -6px; left: 40px; width: 12px; height: 12px; background: var(--chrome-bg); transform: rotate(45deg); }
+.coach .btn { justify-self: start; background: var(--chrome-fg); color: var(--chrome-bg); border-color: var(--chrome-fg); }
+@media (prefers-reduced-motion: no-preference) { .pill, .orow, .irow, .arow, .ncard { transition: background-color .12s, border-color .12s; } }
+</style>
+
+<div id="app"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/preact@10.29.8/dist/preact.min.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/preact@10.29.8/hooks/dist/hooks.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/htm@3.1.1/dist/htm.umd.js"></script>
+<script>
+// PROTOTYPE, throwaway. Sample data only; nothing is saved. "Now" is fixed at Wed 30 Sep 2026, 17:40.
+const { h, render } = preact;
+const { useState, useEffect, useRef } = preactHooks;
+const html = htm.bind(h);
+
+const NOW = { d: 0, m: 17 * 60 + 40 };
+const DAYS = { "-1": "Tuesday 29 September", "0": "Wednesday 30 September", "1": "Thursday 1 October" };
+const SHORT = { "-1": "Tue 29", "0": "Wed 30", "1": "Thu 1" };
+const REL = { "-1": "Yesterday", "0": "Today", "1": "Tomorrow" };
+const fmt = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+
+const LISTS = [
+  { id: "personal", name: "Personal", note: "Only you" },
+  { id: "household", name: "Household", note: "Household group · 3" },
+  { id: "garden", name: "Garden", note: "Shared with Sam" },
+];
+const lc = (id) => `var(--l-${id})`;
+const lcStyle = (id) => `--lc: ${lc(id)}; --lc-soft: color-mix(in srgb, ${lc(id)} 16%, transparent);`;
+
+const R = {
+  bp: { title: "Blood-pressure pill", list: "personal", pri: "High", trig: "Every day at 07:00 and 19:00", exp: "When it fires again" },
+  vitd: { title: "Vitamin D", list: "personal", pri: "Minimum", trig: "Every day at 08:00", exp: "When it fires again" },
+  plumber: { title: "Call the plumber", list: "personal", pri: "Low", trig: "Once, today at 10:00", exp: "None", note: "Kitchen tap drips. Number is on the fridge." },
+  stretch: { title: "Stretch for 10 minutes", list: "personal", pri: "Low", trig: "Weekdays at 12:30", exp: "End of the day" },
+  tomatoes: { title: "Water the tomatoes", list: "garden", pri: "Medium", trig: "3 days after it was last done", exp: "When it fires again", shared: true },
+  dish: { title: "Unload the dishwasher", list: "household", pri: "Medium", trig: "When the dishwasher says it's finished (webhook)", exp: "At 22:00", shared: true, fake: ["difficult", "Difficult to fake (signed)"] },
+  bins: { title: "Take the bins out", list: "household", pri: "Medium", trig: "Wednesdays at 18:00, if someone is home; waits until 23:59", exp: "When it fires again", shared: true, rotation: "Robin → you → Sam" },
+  sprinkler: { title: "Run the sprinklers", list: "garden", pri: "Low", trig: "Every day at 06:00, unless rain is forecast; lets the trigger pass", exp: "End of the day", shared: true },
+  cushions: { title: "Bring in the cushions", list: "garden", pri: "High", trig: "Severe Thunderstorm Warning issued for Home", exp: "When the warning ends", shared: true, fake: ["none", "Can't be faked"] },
+  car: { title: "Plug in the car", list: "personal", pri: "Medium", trig: "Car's Bluetooth disconnects after 18:00, at Home", exp: "At 23:00", fake: ["moderate", "Moderate to fake (Bluetooth)"] },
+  keys: { title: "Take your keys", list: "personal", pri: "Low", trig: "Leaving Home", exp: "10 minutes after leaving", fake: ["difficult", "Difficult to fake (location)"] },
+  cleaning: { title: "Pick up the dry cleaning", list: "personal", pri: "Low", trig: "Today at 17:00, when at High Street; waits until 20:00", exp: "When the wait ends" },
+  rent: { title: "Pay the rent", list: "personal", pri: "High", trig: "1st of every month at 09:00", exp: "When it fires again" },
+  door: { title: "Lock the back door", list: "household", pri: "Low", trig: "Every day at 21:00", exp: "When it fires again", shared: true },
+};
+
+const INITIAL = [
+  { id: 1, r: "bp", d: -1, m: 420, st: "completed", by: "You", at: "07:04" },
+  { id: 2, r: "vitd", d: -1, m: 480, st: "completed", by: "You", at: "09:10" },
+  { id: 3, r: "stretch", d: -1, m: 750, st: "missed", why: "Expired at the end of the day" },
+  { id: 4, r: "cushions", d: -1, m: 920, st: "completed", by: "Sam", at: "15:31", why: "Severe Thunderstorm Warning for Home" },
+  { id: 5, r: "bp", d: -1, m: 1140, st: "completed", by: "You", at: "19:02" },
+  { id: 6, r: "car", d: -1, m: 1215, st: "completed", by: "You", at: "20:21" },
+  { id: 7, r: "door", d: -1, m: 1260, st: "completed", by: "Robin", at: "21:05" },
+  { id: 10, r: "sprinkler", d: 0, m: 360, st: "nofire", why: "Rain forecast (80%)" },
+  { id: 11, r: "bp", d: 0, m: 420, st: "completed", by: "You", at: "07:12" },
+  { id: 12, r: "vitd", d: 0, m: 480, st: "due", why: "Silent: minimum priority" },
+  { id: 13, r: "plumber", d: 0, m: 600, st: "due", snoozed: "18:30" },
+  { id: 14, r: "stretch", d: 0, m: 750, st: "skipped", by: "You", note: "Gym at lunch instead" },
+  { id: 15, r: "tomatoes", d: 0, m: 960, st: "overdue", since: "17:00", claim: "Sam", claimAt: "16:20" },
+  { id: 16, r: "cleaning", d: 0, m: 1020, st: "waiting", why: "Waiting for: at High Street, until 20:00" },
+  { id: 17, r: "dish", d: 0, m: 1025, st: "due", declined: ["Robin"], why: "Everyone is alerted" },
+  { id: 18, r: "bins", d: 0, m: 1080, st: "tentative", turn: "Robin", why: "If someone is home" },
+  { id: 19, r: "bp", d: 0, m: 1140, st: "expected" },
+  { id: 20, r: "door", d: 0, m: 1260, st: "expected" },
+  { id: 30, r: "bp", d: 1, m: 420, st: "expected" },
+  { id: 31, r: "vitd", d: 1, m: 480, st: "expected" },
+  { id: 32, r: "rent", d: 1, m: 540, st: "expected" },
+  { id: 33, r: "stretch", d: 1, m: 750, st: "expected" },
+  { id: 34, r: "bp", d: 1, m: 1140, st: "expected" },
+  { id: 35, r: "door", d: 1, m: 1260, st: "expected" },
+];
+
+const CAL = [
+  { d: -1, s: 1110, e: 1170, t: "Yoga" },
+  { d: 0, s: 570, e: 585, t: "Standup" },
+  { d: 0, s: 840, e: 900, t: "Dentist" },
+  { d: 0, s: 1170, e: 1290, t: "Dinner with Jo" },
+  { d: 1, s: 600, e: 660, t: "Budget review" },
+];
+
+const NTB = [
+  { r: "cushions", last: "Yesterday 15:31 by Sam" },
+  { r: "dish", last: "Open now" },
+  { r: "car", last: "Yesterday 20:21 by you" },
+  { r: "keys", last: "This morning 08:32 by you" },
+];
+
+const OPEN = ["overdue", "due"];
+const stateWord = { completed: "Completed", skipped: "Skipped", missed: "Missed", nofire: "Didn't fire", due: "Due", overdue: "Overdue", waiting: "Waiting", expected: "Expected", tentative: "Expected" };
+
+function metaLine(o) {
+  const bits = [];
+  if (o.st === "completed") bits.push(`${o.by === "You" ? "You" : o.by} completed it at ${o.at}`);
+  if (o.st === "skipped") bits.push(`Skipped by ${o.by === "You" ? "you" : o.by}${o.note ? `: "${o.note}"` : ""}`);
+  if (o.st === "overdue") bits.push(`Overdue since ${o.since}`);
+  if (o.claim) bits.push(o.claim === "You" ? `You claimed it` : `${o.claim} claimed it at ${o.claimAt}`);
+  if (o.turn) bits.push(`${o.turn}'s turn`);
+  if (o.snoozed) bits.push(`Snoozed until ${o.snoozed}`);
+  if (o.declined && o.declined.length) bits.push(`${o.declined.join(", ")} can't this time`);
+  if (o.why) bits.push(o.why);
+  if (o.undone) bits.push("Undone");
+  return bits.join(" · ");
+}
+function tagFor(o) {
+  if (o.st === "overdue") return html`<span class="tag overdue">Overdue</span>`;
+  if (o.st === "due") return html`<span class="tag due">Due</span>`;
+  if (o.st === "waiting") return html`<span class="tag waiting">Waiting</span>`;
+  if (o.st === "tentative") return html`<span class="tag plain">If someone is home</span>`;
+  return null;
+}
+function Glyph({ o }) {
+  const c = { completed: "var(--pos)", skipped: "var(--faint)", missed: "var(--neg)", nofire: "var(--faint)", overdue: "var(--neg)", due: "var(--accent)", waiting: "var(--wait)", expected: lc(R[o.r].list), tentative: lc(R[o.r].list) }[o.st];
+  const s = { width: 14, height: 14, viewBox: "0 0 14 14", fill: "none", stroke: c, "stroke-width": 1.6 };
+  if (o.st === "completed") return html`<svg ...${s}><circle cx="7" cy="7" r="6" fill=${c} stroke="none"/><path d="M4 7.2l2 2 4-4.4" stroke="#fff"/></svg>`;
+  if (o.st === "skipped") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5"/><path d="M4.5 7h5"/></svg>`;
+  if (o.st === "missed") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5"/><path d="M5 5l4 4M9 5l-4 4"/></svg>`;
+  if (o.st === "nofire") return html`<svg ...${s} stroke-dasharray="1.6 1.8"><circle cx="7" cy="7" r="5.5"/></svg>`;
+  if (o.st === "waiting") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5" stroke-dasharray="2.4 1.6"/><path d="M7 4.2V7l1.8 1.2"/></svg>`;
+  if (o.st === "expected" || o.st === "tentative") return html`<svg ...${s} stroke-dasharray=${o.st === "tentative" ? "2 1.6" : null}><circle cx="7" cy="7" r="5.5"/></svg>`;
+  return html`<svg ...${s}><circle cx="7" cy="7" r="6" fill=${c} stroke="none"/><path d="M7 3.8v3.8" stroke="#fff"/><circle cx="7" cy="10" r=".6" fill="#fff" stroke="#fff"/></svg>`;
+}
+function AppIcon({ size = 18 }) {
+  return html`<svg class="appicon" width=${size} height=${size} viewBox="0 0 18 18"><rect x="1" y="1" width="16" height="16" rx="4" fill="var(--accent)"/><path d="M5 9.3l2.6 2.6L13 6.3" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+// ---------- actions (in-memory stubs) ----------
+function useOccurrences() {
+  const [occ, setOcc] = useState(INITIAL.map((o) => ({ ...o })));
+  const act = (id, kind, arg) => setOcc((all) => all.map((o) => {
+    if (o.id !== id) return o;
+    const prev = o.prev || { ...o };
+    switch (kind) {
+      case "done": return { ...o, prev, st: "completed", by: "You", at: fmt(NOW.m), snoozed: null, since: null, why: null, undone: false };
+      case "done-early": return { ...o, prev, st: "completed", by: "You", at: "Wed " + fmt(NOW.m), why: "Completed early" };
+      case "skip": return { ...o, prev, st: "skipped", by: "You", note: arg || null, snoozed: null, since: null, why: null };
+      case "snooze": return { ...o, prev, snoozed: arg };
+      case "claim": return { ...o, prev, claim: "You", claimAt: fmt(NOW.m) };
+      case "release": return { ...o, prev, claim: null };
+      case "decline": return { ...o, prev, declined: [...(o.declined || []), "You"] };
+      case "stopwait": return { ...o, prev, st: "nofire", why: "You stopped the wait" };
+      case "undo": return { ...o.prev, prev: null, undone: true };
+      default: return o;
+    }
+  }));
+  return [occ, act];
+}
+
+function SnoozeMenu({ o, act, close }) {
+  const r = R[o.r];
+  const one = r.pri === "Medium" && o.st === "overdue" ? "10 minutes" : r.pri === "Medium" ? "1 hour" : r.pri === "Low" || r.pri === "Minimum" ? "1 day" : "10 minutes";
+  const pick = (v) => { act(o.id, "snooze", v); close(); };
+  return html`<div class="menu" role="menu" style="top: 100%; left: 0; margin-top: 4px;">
+    <button role="menuitem" onClick=${() => pick(one === "10 minutes" ? "17:50" : one === "1 hour" ? "18:40" : "tomorrow 17:40")}>${one} (this priority's interval)</button>
+    <button role="menuitem" onClick=${() => pick("18:40")}>1 hour</button>
+    <button role="menuitem" onClick=${() => pick("20:00")}>Until 20:00</button>
+    <button role="menuitem" onClick=${() => pick("you get home")}>Until I get home</button>
+    <button role="menuitem" onClick=${() => pick("tomorrow 07:00")}>Until tomorrow 07:00</button>
+    <hr/>
+    <button role="menuitem" class="faint" onClick=${close}>Pick a time…</button>
+    ${r.exp !== "None" && r.exp !== "When it fires again" ? html`<div class="meta" style="padding: 4px 10px;">Expires ${r.exp.toLowerCase()}. You'll get a last-chance alert 10 minutes before.</div>` : null}
+    ${o.claim && o.claim !== "You" ? html`<div class="meta" style="padding: 4px 10px; color: var(--wait);">${o.claim} has claimed this. Snoozing only quiets your alerts.</div>` : null}
+  </div>`;
+}
+
+function Actions({ o, act, compact }) {
+  const [menu, setMenu] = useState(null);
+  const r = R[o.r];
+  const cls = compact ? "btn sm" : "btn";
+  if (OPEN.includes(o.st)) {
+    const third = r.shared
+      ? (o.claim === "You" ? html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "release"); }}>Release</button>`
+        : o.claim ? html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "decline"); }}>Can't do it</button>`
+        : html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "claim"); }}>Claim</button>`)
+      : html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "skip"); }}>Skip</button>`;
+    return html`<div class="acts" style="position: relative;" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls + " primary"} onClick=${() => act(o.id, "done")}>Done</button>
+      <span style="position: relative;"><button class=${cls} aria-haspopup="menu" aria-expanded=${menu === "snooze"} onClick=${() => setMenu(menu === "snooze" ? null : "snooze")}>Snooze ▾</button>
+        ${menu === "snooze" ? html`<${SnoozeMenu} o=${o} act=${act} close=${() => setMenu(null)} />` : null}</span>
+      ${third}
+      ${!compact ? html`<span style="position: relative;"><button class=${cls + " ghost"} aria-haspopup="menu" onClick=${() => setMenu(menu === "more" ? null : "more")}>More ▾</button>
+        ${menu === "more" ? html`<div class="menu" role="menu" style="top: 100%; right: 0; margin-top: 4px;">
+          ${r.shared ? html`<button role="menuitem" onClick=${() => { act(o.id, "skip", "Not needed today"); setMenu(null); }}>Skip for everyone…</button>
+            <button role="menuitem" onClick=${() => { act(o.id, "decline"); setMenu(null); }}>I can't do it this time</button>` : null}
+          <button role="menuitem" onClick=${() => { act(o.id, "done"); setMenu(null); }}>Done at a different time…</button>
+          <button role="menuitem" onClick=${() => setMenu(null)}>Pause this reminder…</button>
+          <hr/><button role="menuitem" onClick=${() => setMenu(null)}>Edit reminder…</button>
+        </div>` : null}</span>` : null}
+    </div>`;
+  }
+  if (o.st === "waiting") {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls} onClick=${() => act(o.id, "done")}>Done anyway</button>
+      <button class=${cls + " ghost"} onClick=${() => act(o.id, "stopwait")}>Stop waiting</button>
+    </div>`;
+  }
+  if (o.st === "expected" || o.st === "tentative") {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls} onClick=${() => act(o.id, "done-early")}>Complete early</button>
+      <button class=${cls} onClick=${() => act(o.id, "skip", "Skipped ahead of time")}>Skip ahead</button>
+      <button class=${cls + " ghost"} onClick=${() => act(o.id, "snooze", "its time + 1 hour")}>Snooze ahead</button>
+      ${r.shared ? html`<button class=${cls + " ghost"} onClick=${() => act(o.id, "decline")}>I can't</button>` : null}
+    </div>`;
+  }
+  if (o.st === "completed" || o.st === "skipped" || o.st === "missed" || (o.st === "nofire" && o.prev)) {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      ${o.prev ? html`<button class=${cls} onClick=${() => act(o.id, "undo")}>Undo</button>` : null}
+      <button class=${cls + " ghost"}>${o.st === "missed" ? "It was done… (correct)" : "Correct the time…"}</button>
+    </div>`;
+  }
+  return null;
+}
+
+function Detail({ o, act }) {
+  if (!o) return null;
+  const r = R[o.r];
+  const list = LISTS.find((l) => l.id === r.list);
+  return html`<div class="detail">
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <span class="chip"><span class="dot" style=${`background: ${lc(r.list)}`}></span>${list.name}</span>
+      <span class="chip">·</span><span class="chip">${r.pri} priority</span>
+      ${tagFor(o)}
+    </div>
+    <h3>${r.title}</h3>
+    <div class="meta">${REL[o.d]}, ${fmt(o.m)} · ${stateWord[o.st]}${metaLine(o) ? " · " + metaLine(o) : ""}</div>
+    <${Actions} o=${o} act=${act} />
+    <dl>
+      <dt>Trigger</dt><dd>${r.trig}</dd>
+      <dt>Expires</dt><dd>${r.exp}</dd>
+      ${r.rotation ? html`<dt>Rotation</dt><dd>${r.rotation}</dd>` : null}
+      <dt>Shared</dt><dd>${list.note}</dd>
+      ${r.fake ? html`<dt>Can it be faked?</dt><dd><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></dd>` : null}
+      ${r.note ? html`<dt>Note</dt><dd>${r.note}</dd>` : null}
+    </dl>
+    <div class="hist"><div class="sechead">Recently</div>
+      ${o.r === "tomatoes" ? html`<div>Sun 16:05 · completed by Sam</div><div>Thu 17:40 · completed by you, 40 min late</div>` : null}
+      ${o.r === "dish" ? html`<div>Mon 21:10 · completed by Robin</div><div>Sat 13:02 · completed by you</div>` : null}
+      ${o.r === "bp" ? html`<div>Today 07:12 · completed by you</div><div>Yesterday 19:02 · completed by you</div>` : null}
+      ${!["tomatoes", "dish", "bp"].includes(o.r) ? html`<div>No earlier occurrences in the last 30 days</div>` : null}
+    </div>
+  </div>`;
+}
+
+function SourcesBanner() {
+  return html`<div class="banner"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1l6 11H1z" fill="var(--wait)"/><path d="M7 5v3.2" stroke="#fff" stroke-width="1.5"/><circle cx="7" cy="10" r=".8" fill="#fff"/></svg>
+    <span class="grow">Google Calendar needs you to sign in again on this computer. Calendar events and calendar triggers are paused here.</span>
+    <button class="btn sm">Sign in</button></div>`;
+}
+
+function NotTimeBased() {
+  return html`<div class="ntb">
+    <div class="sechead">Reminders that aren't time-based</div>
+    <table><thead><tr><th>Reminder</th><th>When</th><th>Last</th><th>Faking</th></tr></thead>
+      <tbody>${NTB.map((n) => { const r = R[n.r]; return html`<tr>
+        <td><span style="display: inline-flex; gap: 7px; align-items: center;"><span class="dot" style=${`background: ${lc(r.list)}`}></span><span class="row-title">${r.title}</span></span></td>
+        <td>${r.trig}</td><td class="muted">${n.last}</td><td><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></td></tr>`; })}</tbody></table>
+  </div>`;
+}
+
+const PRIS = ["Minimum", "Low", "Medium", "High", "Maximum"];
+R.lawn = { title: "Water the lawn", list: "garden", pri: "Medium", trig: "Every 2 days at 07:30", exp: "When it fires again", shared: true };
+R.passport = { title: "Book a passport photo", list: "personal", pri: "Low", trig: "Once, Monday 28 September at 12:00", exp: "None" };
+const BOARD_STATIC = {
+  bp: ["expected", "Next: today 19:00"], vitd: ["expected", "Next: tomorrow 08:00"], plumber: ["finished", "Finished today, by you"],
+  stretch: ["expected", "Next: tomorrow 12:30"], tomatoes: ["expected", "Next: Saturday, 3 days after it's done"], dish: ["watching", "Watching: the dishwasher's webhook"],
+  bins: ["expected", "Next: today 18:00, if someone is home · Robin's turn"], sprinkler: ["expected", "Next: tomorrow 06:00, unless rain is forecast"],
+  cushions: ["watching", "Watching: weather warnings for Home"], car: ["watching", "Watching: the car's Bluetooth"], keys: ["watching", "Watching: leaving Home"],
+  cleaning: ["finished", "Finished today, by you"], rent: ["expected", "Next: tomorrow 09:00"], door: ["expected", "Next: today 21:00"],
+  lawn: ["paused", "Paused for everyone until Monday 5 October"], passport: ["finished", "Finished Monday 28 September, by you"],
+};
+const COLS = [["overdue", "Overdue"], ["due", "Due"], ["waiting", "Waiting"], ["expected", "Expected"], ["watching", "Watching"], ["paused", "Paused"], ["finished", "Finished"]];
+const boardItems = (occ) => Object.keys(R).map((id) => {
+  const open = occ.find((o) => o.r === id && ["overdue", "due", "waiting"].includes(o.st));
+  if (open) return { id, col: open.st, line: metaLine(open) || `${stateWord[open.st]} since ${fmt(open.m)}`, o: open };
+  const s = BOARD_STATIC[id];
+  return { id, col: s[0], line: s[1], o: null };
+});
+const passes = (f, id) => !f.lists[R[id].list] && !f.pris[R[id].pri];
+const visible = (occ, f) => occ.filter((o) => passes(f, o.r));
+const openOf = (occ, st) => occ.filter((o) => o.st === st);
+const HOUR = 46, START = 6;
+function lanes(items) {
+  const sorted = [...items].sort((a, b) => a.m - b.m);
+  const ends = [];
+  sorted.forEach((o) => {
+    const top = (o.m - START * 60) / 60 * HOUR;
+    let lane = ends.findIndex((e) => e <= top);
+    if (lane === -1) { lane = ends.length; ends.push(0); }
+    ends[lane] = top + 24;
+    o._lane = lane;
+  });
+  return { items: sorted, n: Math.max(1, ends.length) };
+}
+
+// ---------- Calendar view ----------
+function CalendarView({ occ, act, sel, setSel }) {
+  const scroller = useRef(null);
+  useEffect(() => { if (scroller.current) scroller.current.scrollTop = (NOW.m / 60 - START - 5) * HOUR; }, []);
+  const selO = typeof sel === "number" ? occ.find((o) => o.id === sel) : null;
+  const hours = []; for (let i = START; i <= 23; i++) hours.push(i);
+  return html`<div class="calview">
+    <div style="display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; background: var(--view);">
+      <div class="dayheads">${["", "-1", "0", "1"].map((k, i) => i === 0 ? html`<div style="border-left: 0;"></div>` : html`<div class=${k === "0" ? "today" : ""}>${SHORT[k]}${k === "0" ? " · Today" : ""}</div>`)}</div>
+      <div class="scroll" ref=${scroller}>
+        <div class="grid" style=${`height: ${(24 - START) * HOUR}px;`}>
+          <div class="hours">${hours.map((hh) => html`<span class="tnum" style=${`top: ${(hh - START) * HOUR}px`}>${hh === START ? "" : fmt(hh * 60)}</span>`)}</div>
+          ${[-1, 0, 1].map((d) => {
+            const { items, n } = lanes(occ.filter((o) => o.d === d));
+            return html`<div class=${"col" + (d < 0 ? " past" : "")}>
+              ${CAL.filter((c) => c.d === d).map((c) => html`<div class="calblk" style=${`top: ${(c.s / 60 - START) * HOUR}px; height: ${(c.e - c.s) / 60 * HOUR}px;`}>${c.t} · ${fmt(c.s)}</div>`)}
+              ${items.map((o) => html`<button class=${`pill st-${o.st}` + (sel === o.id ? " sel" : "")} style=${lcStyle(R[o.r].list) + `top: ${(o.m / 60 - START) * HOUR}px; left: calc(4px + ${o._lane} * (86% / ${n})); width: calc(86% / ${n} - 3px);`}
+                onClick=${() => setSel(o.id)} title=${`${R[o.r].title} · ${stateWord[o.st]}`}>
+                <span class="tm">${fmt(o.m)}</span><span>${o.st === "nofire" ? "didn't fire: " : ""}${R[o.r].title}</span></button>`)}
+              ${d === 0 ? html`<div class="nowline" style=${`top: ${(NOW.m / 60 - START) * HOUR}px`}></div>` : null}
+            </div>`;
+          })}
+        </div>
+      </div>
+    </div>
+    <aside class="rail scroll">
+      ${selO ? html`<div><div style="padding: 8px 12px 0;"><button class="btn sm ghost" onClick=${() => setSel(null)}>‹ Open occurrences</button></div><${Detail} o=${selO} act=${act}/></div>` : html`<div>
+        ${[["overdue", "Overdue"], ["due", "Due"], ["waiting", "Waiting"]].map(([st, name]) => html`<div class="railsec">
+          <div class="sechead">${name}<span class="muted">${openOf(occ, st).length}</span></div>
+          ${openOf(occ, st).map((o) => html`<button class=${"orow" + (sel === o.id ? " sel" : "")} onClick=${() => setSel(o.id)}>
+            <span class="dot" style=${`background: ${lc(R[o.r].list)}`}></span>
+            <span style="min-width: 0;"><div class="row-title">${R[o.r].title}</div><div class="meta">${metaLine(o)}</div></span>
+            <span class="meta tnum">${fmt(o.m)}</span></button>`)}
+          ${openOf(occ, st).length === 0 ? html`<div class="meta" style="padding: 4px 8px;">Nothing ${name.toLowerCase()}.</div>` : null}
+        </div>`)}
+      </div>`}
+    </aside>
+  </div>`;
+}
+
+// ---------- Inbox view ----------
+function Ribbon({ occ, sel, setSel }) {
+  const span = 3 * 24 * 60, x = (o) => ((Number(o.d) + 1) * 1440 + o.m) / span * 100;
+  return html`<div class="ribbon">
+    <div class="sechead">Yesterday · Today · Tomorrow<span class="faint" style="text-transform: none; letter-spacing: 0; font-weight: 400;">grey bars are busy calendar events</span></div>
+    <div class="rib">
+      <div class="axis"></div>
+      ${[-1, 0, 1].map((d) => html`<div class="day" style=${`left: ${(d + 1) / 3 * 100}%`}>${SHORT[d]}</div>`)}
+      ${CAL.map((c) => html`<div class="busy" style=${`left: ${x({ d: c.d, m: c.s })}%; width: ${(c.e - c.s) / span * 100}%;`} title=${c.t}></div>`)}
+      ${occ.map((o) => html`<button class=${`tick st-${o.st}`} style=${lcStyle(R[o.r].list) + `left: ${x(o)}%;` + (sel === o.id ? "box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);" : "")} title=${`${fmt(o.m)} ${R[o.r].title} · ${stateWord[o.st]}`} aria-label=${R[o.r].title} onClick=${() => setSel(o.id)}></button>`)}
+      <div class="now" style=${`left: ${x(NOW)}%`}><span>17:40</span></div>
+    </div>
+  </div>`;
+}
+function InboxView({ occ, act, sel, setSel }) {
+  const later = occ.filter((o) => o.d === 0 && (o.st === "expected" || o.st === "tentative"));
+  const earlier = occ.filter((o) => o.d === 0 && ["completed", "skipped", "missed", "nofire"].includes(o.st));
+  const groups = [["Overdue", openOf(occ, "overdue")], ["Due", openOf(occ, "due")], ["Waiting", openOf(occ, "waiting")], ["Later today", later], ["Earlier today", earlier]];
+  return html`<div class="inview">
+    <${Ribbon} occ=${occ} sel=${sel} setSel=${setSel}/>
+    <div class="scroll" style="background: var(--view);"><div class="inbox">
+      ${groups.map(([name, items]) => items.length ? html`<div class="igroup">
+        <div class="sechead" style="padding: 8px 8px 4px;">${name}<span class="muted">${items.length}</span></div>
+        ${items.map((o) => html`<div class=${"irow" + (sel === o.id ? " sel" : "")} onClick=${() => setSel(o.id)} tabindex="0">
+          <span class="tm">${fmt(o.m)}</span><span class="dot" style=${`background: ${lc(R[o.r].list)}`}></span>
+          <span style="min-width: 0;"><div class=${"row-title" + (["completed", "skipped", "nofire"].includes(o.st) ? " done-title" : "") + (o.st === "skipped" ? " strike" : "")}>${R[o.r].title}</div>
+            <div class="meta">${o.st === "nofire" ? "Didn't fire · " : o.st === "missed" ? "Missed · " : ""}${metaLine(o) || R[o.r].trig}</div></span>
+          ${OPEN.includes(o.st) || o.st === "waiting" ? html`<${Actions} o=${o} act=${act} compact=${true}/>` : html`<span></span>`}
+        </div>`)}
+      </div>` : null)}
+    </div></div>
+  </div>`;
+}
+
+// ---------- Agenda view ----------
+function AgendaView({ occ, act, sel, setSel }) {
+  const open = occ.filter((o) => OPEN.includes(o.st) || o.st === "waiting").sort((a, b) => ["overdue", "due", "waiting"].indexOf(a.st) - ["overdue", "due", "waiting"].indexOf(b.st));
+  const scroller = useRef(null);
+  const scrollTo = (q) => { const sc = scroller.current; const el = sc && sc.querySelector(q); if (el) sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - 140; };
+  useEffect(() => scrollTo(".nowrule"), []);
+  useEffect(() => { if (typeof sel === "number") scrollTo(`[data-id="${sel}"]`); }, [sel]);
+  const dayRows = (d) => {
+    const rows = [...occ.filter((o) => o.d === d).map((o) => ({ k: "o", m: o.m, o })), ...CAL.filter((c) => c.d === d).map((c) => ({ k: "c", m: c.s, c }))].sort((a, b) => a.m - b.m);
+    if (d === 0) { const i = rows.findIndex((r) => r.m > NOW.m); rows.splice(i === -1 ? rows.length : i, 0, { k: "now" }); }
+    return rows;
+  };
+  return html`<div class="agview">
+    <div class="nowband">
+      <span class="lbl">Now</span>
+      ${open.map((o) => html`<button class=${`ncard st-${o.st}` + (sel === o.id ? " sel" : "")} style=${lcStyle(R[o.r].list)} onClick=${() => setSel(sel === o.id ? null : o.id)}>
+        <span style="display: flex; gap: 6px; align-items: center; justify-content: space-between;"><span class="row-title" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${R[o.r].title}</span>${tagFor(o)}</span>
+        <span class="meta" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${metaLine(o) || fmt(o.m)}</span></button>`)}
+    </div>
+    <div class="scroll" ref=${scroller} style="background: var(--view);">
+      <div class="agenda">
+        ${[-1, 0, 1].map((d) => html`<div>
+          <div class="dhead"><span>${REL[d]}</span><span class="muted" style="font-weight: 400;">${DAYS[d]}</span>${d === 0 ? html`<span class="meta" style="margin-left: auto; font-weight: 400;">Quiet hours from 22:00</span>` : null}</div>
+          ${dayRows(d).map((row) => row.k === "now" ? html`<div class="nowrule">NOW · 17:40</div>`
+            : row.k === "c" ? html`<div class="arow cal"><span class="tm">${fmt(row.c.s)}</span><span class="glyph"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="11" height="10" rx="1.5"/><path d="M1.5 5.5h11M4.5 1v3M9.5 1v3"/></svg></span>
+                <span><span>${row.c.t}</span> <span class="meta">until ${fmt(row.c.e)} · busy</span></span><span></span></div>`
+            : html`<div data-id=${row.o.id} class=${"arow" + (sel === row.o.id ? " sel" : "")} onClick=${() => setSel(sel === row.o.id ? null : row.o.id)} tabindex="0">
+                <span class="tm">${fmt(row.o.m)}</span><span class="glyph"><${Glyph} o=${row.o}/></span>
+                <span style="min-width: 0;"><div class=${"row-title" + (["completed", "skipped", "nofire", "expected", "tentative"].includes(row.o.st) ? " done-title" : "") + (row.o.st === "skipped" ? " strike" : "")}>${row.o.st === "nofire" ? "Didn't fire: " : ""}${R[row.o.r].title}</div>
+                  <div class="meta"><span class="dot" style=${`background: ${lc(R[row.o.r].list)}; width: 7px; height: 7px; margin-right: 5px;`}></span>${LISTS.find((l) => l.id === R[row.o.r].list).name}${metaLine(row.o) ? " · " + metaLine(row.o) : ""}</div></span>
+                <span>${tagFor(row.o)}</span>
+                ${sel === row.o.id ? html`<div class="expand" onClick=${(e) => e.stopPropagation()}><${Detail} o=${row.o} act=${act}/></div>` : null}
+              </div>`)}
+        </div>`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ---------- Board view ----------
+function BoardView({ occ, filt, sel, setSel }) {
+  const items = boardItems(occ).filter((b) => passes(filt, b.id));
+  return html`<div class="board">${COLS.map(([k, name]) => {
+    const its = items.filter((b) => b.col === k);
+    return html`<div class=${"bcol c-" + k}>
+      <div class="bhead"><span>${name}</span><span class="muted tnum">${its.length}</span></div>
+      ${its.map((b) => { const r = R[b.id]; return html`<button class=${"bcard" + (sel === "r:" + b.id ? " sel" : "")} style=${lcStyle(r.list)} onClick=${() => setSel("r:" + b.id)}>
+        <span class="row-title">${r.title}</span>
+        <span class="meta">${b.line}</span>
+        <span style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;"><span class="chip"><span class="dot" style=${`background: ${lc(r.list)}`}></span>${LISTS.find((l) => l.id === r.list).name}</span><span class="chip">${r.pri}</span>${r.fake ? html`<span class=${"fake " + r.fake[0]}>${r.fake[0] === "none" ? "Can't be faked" : r.fake[0] + " to fake"}</span>` : null}</span>
+      </button>`; })}
+      ${its.length === 0 ? html`<div class="meta" style="padding: 6px 4px;">None</div>` : null}
+    </div>`;
+  })}</div>`;
+}
+function ReminderDetail({ id, occ, act }) {
+  const r = R[id], b = boardItems(occ).find((x) => x.id === id), list = LISTS.find((l) => l.id === r.list);
+  const colName = COLS.find((c) => c[0] === b.col)[1];
+  return html`<div class="detail">
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <span class="chip"><span class="dot" style=${`background: ${lc(r.list)}`}></span>${list.name}</span><span class="chip">·</span><span class="chip">${r.pri} priority</span>
+      <span class=${"tag " + (b.col === "overdue" ? "overdue" : b.col === "due" ? "due" : b.col === "waiting" ? "waiting" : "plain")}>${colName}</span>
+    </div>
+    <h3>${r.title}</h3>
+    <div class="meta">${b.line}</div>
+    <div class="acts"><button class="btn primary">Edit reminder…</button>${b.col === "paused" ? html`<button class="btn">Resume</button>` : html`<button class="btn">Pause…</button>`}<button class="btn ghost">Duplicate</button></div>
+    ${b.o ? html`<div style="display: grid; gap: 6px;"><div class="sechead">${b.o.st === "waiting" ? "Waiting now" : "Open occurrence"}</div><${Actions} o=${b.o} act=${act}/></div>` : null}
+    <dl>
+      <dt>Trigger</dt><dd>${r.trig}</dd>
+      <dt>Expires</dt><dd>${r.exp}</dd>
+      ${r.rotation ? html`<dt>Rotation</dt><dd>${r.rotation}</dd>` : null}
+      <dt>Shared</dt><dd>${list.note}</dd>
+      ${r.fake ? html`<dt>Can it be faked?</dt><dd><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></dd>` : null}
+      ${r.note ? html`<dt>Note</dt><dd>${r.note}</dd>` : null}
+    </dl>
+  </div>`;
+}
+
+// ---------- the window ----------
+const VIEWS = [
+  { k: "inbox", name: "Inbox", icon: "M2 4h12M2 8h12M2 12h8" },
+  { k: "calendar", name: "Calendar", icon: "M2.5 3.5h11v10h-11zM2.5 6.5h11M5.5 2v3M10.5 2v3" },
+  { k: "agenda", name: "Agenda", icon: "M5 3h9M5 8h9M5 13h9M2 3h.5M2 8h.5M2 13h.5" },
+  { k: "board", name: "Board", icon: "M2 2.5h3.5v11H2zM6.25 2.5h3.5v7h-3.5zM10.5 2.5H14v9h-3.5z" },
+];
+function Window({ occ, act, filt, setFilt, sel, setSel, view, setView, tip, setTip }) {
+  const vis = visible(occ, filt);
+  const allCount = Object.keys(R).length;
+  const pick = (k) => { setView(k); setSel(null); };
+  const toggle = (group, key) => setFilt({ ...filt, [group]: { ...filt[group], [key]: !filt[group][key] } });
+  const monthDays = []; for (let i = 0; i < 2; i++) monthDays.push(null); for (let d = 1; d <= 30; d++) monthDays.push(d);
+  const title = { inbox: "Today, Wednesday 30 September", calendar: "29 September – 1 October", agenda: "Yesterday to tomorrow", board: `All reminders (${Object.keys(R).filter((id) => passes(filt, id)).length} of ${allCount})` }[view];
+  const drawer = (view === "inbox" || view === "board") && sel != null;
+  return html`<div class="body shell" style=${drawer ? "grid-template-columns: 200px minmax(0, 1fr) 320px;" : ""}>
+    <aside class="side">
+      ${view === "calendar" ? html`<div><div class="sechead" style="margin-bottom: 6px;">September 2026</div>
+        <div class="mini tnum">${["S", "M", "T", "W", "T", "F", "S"].map((x) => html`<div class="h">${x}</div>`)}${monthDays.map((d) => html`<div class=${"d" + (d === 30 ? " today" : d === 29 ? " inview" : "")}>${d || ""}</div>`)}</div></div>` : null}
+      <div class="lists"><div class="sechead">Reminder lists</div>
+        ${LISTS.map((l) => html`<label><input type="checkbox" id=${"list-" + l.id} checked=${!filt.lists[l.id]} onChange=${() => toggle("lists", l.id)} style=${`accent-color: ${lc(l.id)}`}/>${l.name}<span class="sub">${l.note}</span></label>`)}
+      </div>
+      <div class="lists"><div class="sechead">Priorities</div>
+        ${PRIS.map((p) => html`<label><input type="checkbox" id=${"pri-" + p} checked=${!filt.pris[p]} onChange=${() => toggle("pris", p)}/>${p}<span class="sub tnum">${Object.keys(R).filter((id) => R[id].pri === p).length}</span></label>`)}
+      </div>
+      <div class="meta">Quiet hours tonight 22:00–07:00<br/>Connected to the home server</div>
+    </aside>
+    <section class="pane main">
+      <div class="toolbar">
+        <div class="seg views" role="tablist" aria-label="Views">${VIEWS.map((v) => html`<button role="tab" aria-selected=${view === v.k} aria-pressed=${view === v.k} onClick=${() => pick(v.k)}>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d=${v.icon}/></svg>${v.name}</button>`)}</div>
+        ${view === "calendar" ? html`<button class="btn sm">Today</button><button class="btn sm ghost" aria-label="Previous">‹</button><button class="btn sm ghost" aria-label="Next">›</button>` : null}
+        <span class="t">${title}</span>
+        ${view === "calendar" ? html`<div class="seg"><button aria-pressed="false">Day</button><button aria-pressed="true">3 days</button><button aria-pressed="false">Week</button></div>` : null}
+        <button class="btn">Snooze all…</button>
+        <button class="btn primary">New reminder</button>
+        ${tip ? html`<div class="coach" role="dialog" aria-label="Tip">
+          <b>Four ways to see your reminders</b>
+          <span>Inbox puts what needs you first. Calendar lays them over your calendar. Agenda reads in time order. Board shows every reminder, including waiting and paused ones, so you can edit them.</span>
+          <span>The window opens on the view you used last.</span>
+          <button class="btn sm" onClick=${() => setTip(false)}>Got it</button></div>` : null}
+      </div>
+      <${SourcesBanner}/>
+      <div class="viewbody">
+        ${view === "inbox" ? html`<${InboxView} occ=${vis} act=${act} sel=${sel} setSel=${setSel}/>` : null}
+        ${view === "calendar" ? html`<${CalendarView} occ=${vis} act=${act} sel=${sel} setSel=${setSel}/>` : null}
+        ${view === "agenda" ? html`<${AgendaView} occ=${vis} act=${act} sel=${sel} setSel=${setSel}/>` : null}
+        ${view === "board" ? html`<${BoardView} occ=${occ} filt=${filt} sel=${sel} setSel=${setSel}/>` : null}
+      </div>
+    </section>
+    ${drawer ? html`<aside class="drawer"><div class="drawer-head"><span class="sechead">${typeof sel === "string" ? "Reminder" : "Occurrence"}</span><button class="btn sm ghost" onClick=${() => setSel(null)} aria-label="Close">✕</button></div>
+      <div class="scroll">${typeof sel === "string" ? html`<${ReminderDetail} id=${sel.slice(2)} occ=${occ} act=${act}/>` : html`<${Detail} o=${occ.find((o) => o.id === sel)} act=${act}/>`}</div></aside>` : null}
+  </div>`;
+}
+
+// ---------- tray ----------
+function Tray({ occ, open, setOpen }) {
+  const openOcc = occ.filter((o) => OPEN.includes(o.st));
+  const waiting = occ.filter((o) => o.st === "waiting");
+  const overdue = openOcc.filter((o) => o.st === "overdue").length;
+  return html`<div class="panel">
+    <span class="muted" style="margin-right: auto;">Plasma panel (mock)</span>
+    <span class="ticon"></span><span class="ticon"></span>
+    <button class="trayme" aria-label="Reminders tray icon" aria-expanded=${open} onClick=${() => setOpen(!open)}>
+      <${AppIcon} size=${18}/>${openOcc.length ? html`<span class="badge" style=${overdue ? "" : "background: var(--accent);"}>${openOcc.length}</span>` : null}
+    </button>
+    <span class="ticon"></span>
+    <span class="tnum">17:40</span>
+    ${open ? html`<div class="traymenu" role="menu">
+      <button class="mi" style="font-weight: 600;">Open Reminders</button>
+      <hr/>
+      <div class="cap">Open occurrences</div>
+      ${openOcc.map((o) => html`<button class="mi"><span style="display: inline-flex; gap: 7px; align-items: center; min-width: 0;"><span class="dot" style=${`background: ${o.st === "overdue" ? "var(--neg)" : lc(R[o.r].list)}`}></span>${R[o.r].title}</span><span class="muted">Done · Snooze · ${R[o.r].shared ? (o.claim ? "Can't" : "Claim") : "Skip"} ▸</span></button>`)}
+      ${waiting.length ? html`<div class="cap">Waiting</div>${waiting.map((o) => html`<button class="mi"><span style="display: inline-flex; gap: 7px; align-items: center; min-width: 0;"><span class="dot" style="background: var(--wait)"></span>${R[o.r].title}</span><span class="muted">at High Street</span></button>`)}` : null}
+      <hr/>
+      <button class="mi"><span>Snooze all</span><span class="muted">▸</span></button>
+      <button class="mi"><span>Quiet this computer until…</span><span class="muted">▸</span></button>
+      <hr/>
+      <button class="mi"><span>Quit</span></button>
+    </div>` : null}
+  </div>`;
+}
+
+// ---------- prototype shell ----------
+const readView = () => {
+  try { const k = (location.hash || "").replace("#", "").toLowerCase(); if (VIEWS.some((v) => v.k === k)) return k; } catch (e) {}
+  try { const s = localStorage.getItem("proto-last-view"); if (VIEWS.some((v) => v.k === s)) return s; } catch (e) {}
+  return "inbox";
+};
+function App() {
+  const [view, setViewRaw] = useState(readView());
+  const [occ, act] = useOccurrences();
+  const [filt, setFilt] = useState({ lists: {}, pris: {} });
+  const [sel, setSel] = useState(null);
+  const [tray, setTray] = useState(false);
+  const [tip, setTip] = useState(true);
+  const setView = (k) => { setViewRaw(k); setSel(null); try { history.replaceState(null, "", "#" + k); } catch (e) {} try { localStorage.setItem("proto-last-view", k); } catch (e) {} };
+  const idx = VIEWS.findIndex((x) => x.k === view);
+  const step = (n) => setView(VIEWS[(idx + n + VIEWS.length) % VIEWS.length].k);
+  useEffect(() => {
+    const onKey = (e) => { const t = e.target; if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return; if (e.key === "ArrowLeft") step(-1); if (e.key === "ArrowRight") step(1); };
+    const onHash = () => setViewRaw(readView());
+    window.addEventListener("keydown", onKey); window.addEventListener("hashchange", onHash);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("hashchange", onHash); };
+  });
+  return html`
+    <header class="proto-head">
+      <div class="proto-eyebrow">Throwaway prototype, version 2 · csnook/hab-bot#26 · sample data</div>
+      <h1>Reminders desktop window</h1>
+      <p>The three layouts from version 1 are now views of one window, switched from the toolbar. A fourth view, Board, shows every reminder in columns by status, so waiting, paused and not-time-based reminders can be found and edited. The lists and priorities on the left filter every view. The window opens on the view you used last, and a first-run tip points at the switcher.</p>
+      <p>It is Wednesday 30 September at 17:40. Click occurrences and cards to act on them. Done, Snooze, Claim, Skip and Undo change the page, and nothing is saved. Not covered yet: the reminder editor, the snooze-all and sharing dialogs, and the account, server and retention settings.</p>
+    </header>
+    <div class="desk-scroll"><div class="desk">
+      <div class="win" role="application" aria-label="Reminders window">
+        <div class="titlebar"><${AppIcon}/><span class="t">Reminders</span><span class="wbtns" aria-hidden="true"><span></span><span></span><span></span></span></div>
+        <${Window} occ=${occ} act=${act} filt=${filt} setFilt=${setFilt} sel=${sel} setSel=${setSel} view=${view} setView=${setView} tip=${tip} setTip=${setTip}/>
+      </div>
+      <${Tray} occ=${occ} open=${tray} setOpen=${setTray}/>
+    </div></div>
+    <div class="switcher" role="toolbar" aria-label="Prototype controls">
+      <button onClick=${() => step(-1)} aria-label="Previous view">←</button>
+      <span class="lbl">${VIEWS[idx].name}</span>
+      <button onClick=${() => step(1)} aria-label="Next view">→</button>
+      <span class="sep"></span>
+      <button onClick=${() => setTip(!tip)} aria-pressed=${tip}>First-run tip</button>
+      <button onClick=${() => setTray(!tray)} aria-pressed=${tray}>Tray menu</button>
+    </div>`;
+}
+render(html`<${App}/>`, document.getElementById("app"));
+</script>
+
+</body>
+</html>
