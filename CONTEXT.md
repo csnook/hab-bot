@@ -152,5 +152,12 @@ To silence an occurrence's current alert without closing it. The occurrence stay
 _Avoid_: Dismiss
 
 **Priority**:
-The level chosen for a reminder that sets how insistently its open occurrences alert, from a silent notification up to an alarm that breaks through Do Not Disturb. Some priorities are built in (minimum, low, medium, high, maximum); users can define their own.
+The level chosen for a reminder that sets how insistently its open occurrences alert, from a silent notification up to an alarm that breaks through Do Not Disturb. It sets an alert style and an interval for while an occurrence is due and for once it is overdue; the interval is also the snooze length. Some priorities are built in (minimum, low, medium, high, maximum); users can define their own.
 _Avoid_: Urgency, importance, severity (severity belongs to weather warnings)
+
+**Alert style**:
+How loud one alert is: silent, gentle, insistent (gentle, repeated each interval) or alarm (ringing until someone acts).
+
+**Quiet hours**:
+A snooze-all that recurs on a schedule, such as 22:00 to 07:00 on weeknights. Like any snooze-all it leaves out maximum priority unless told otherwise.
+_Avoid_: Do Not Disturb (that is the operating system's own setting)
