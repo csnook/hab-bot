@@ -124,7 +124,7 @@ Said of an occurrence the app closed because it expired before anyone completed 
 To change how or when a closed occurrence was closed, such as turning a missed occurrence into one completed at 9:40. The original closing stays in the history.
 
 **Expiry**:
-The triggers that make a reminder's open occurrence missed, whichever occurs first. The reminder firing again is always one of them.
+The triggers that make a reminder's open occurrence missed, whichever occurs first. The reminder firing again, at a new schedule or countdown instance, is always one of them.
 _Avoid_: Timeout (that is an alert stopping by itself)
 
 ### Alerts

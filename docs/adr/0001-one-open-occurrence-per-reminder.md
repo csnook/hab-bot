@@ -11,3 +11,4 @@ When a reminder fires while its previous occurrence is still open, the previous 
 
 - An occurrence can be missed without anyone seeing it, if the reminder fires again before its alerts reach anyone.
 - Reminders that repeat from the last completion never fire again on their own, so without an added expiry their occurrence stays open until someone closes it.
+- "Firing again" means a new instance of a schedule or countdown. An event trigger (arriving somewhere, a connection, a webhook) that occurs while the reminder's occurrence is still open joins that occurrence instead, alerting the user whose device sensed it, so it never marks the open occurrence missed. Two devices firing the same occurrence produce one occurrence.
