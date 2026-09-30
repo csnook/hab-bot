@@ -33,13 +33,24 @@ _Avoid_: Recurrence
 A trigger that occurs a set time after the reminder's last occurrence was closed, such as 3 days after the plants were last watered. Completing, skipping or missing an occurrence restarts it.
 _Avoid_: Interval, rolling repeat
 
-### Sharing
+### People and accounts
 
 **User**:
-A person who uses the app. A reminder can be shared with users individually, without any group.
+Someone who uses the app, usually a person. A screen that several people share, such as a kitchen tablet, is a user of its own.
+
+**Account**:
+A user's registration on a server. A standalone user has no account, and a user has at most one. Say "account" only when joining, signing in, recovering or deleting, and "user" otherwise.
 
 **Device**:
-A phone or computer running the app, belonging to exactly one user. Whatever a user does to an occurrence applies on all of their devices. A screen that several people share, such as a kitchen tablet, signs in as a user of its own.
+A phone or computer running the app, belonging to exactly one user. Whatever a user does to an occurrence applies on all of their devices.
+
+**Server admin**:
+A user who runs a server's accounts: inviting people, removing or resetting accounts and releasing escrow. A server admin can't read anyone's encrypted data or change their access.
+_Avoid_: Admin on its own
+
+### Sharing
+
+A reminder can be shared with users individually, or with a group as a whole.
 
 **Group**:
 A defined set of users, such as a household, that reminders can be shared with as a whole.
@@ -47,6 +58,10 @@ _Avoid_: Household (one kind of group), family, team
 
 **Member**:
 A user who belongs to a group. Use "member" only when talking about a group, and "user" otherwise.
+
+**Group admin**:
+A member who can add and remove the group's members and make other members group admins. A group has no other roles.
+_Avoid_: Admin on its own
 
 **Reminder list**:
 A named collection that every reminder belongs to exactly one of, like a calendar in a calendar app. Each user has a private personal list; other lists can be shared with users and groups.
@@ -77,11 +92,11 @@ A device's limit, set per server, on how much it lets that server read. Reminder
 **Standalone**:
 Said of the app used on a device with no server. Everything works on that device; sharing, several devices and recovery need a server.
 
-**Recovery key**:
-A secret a user keeps outside the app, such as on paper, that restores their encrypted personal data after losing all their devices.
+**Password**:
+The secret a user remembers, from which their devices derive the key that unlocks that user's own keys, such as when signing in on a new device. It never leaves their devices.
 
 **Escrow**:
-An optional arrangement where the server keeps a copy of a user's personal keys and releases it after verifying the user. It lets whoever runs the server read that user's personal data.
+An optional arrangement where the server keeps a copy of a user's personal keys and releases it after verifying the user, for someone who can no longer unlock them. It lets whoever runs the server read that user's personal data.
 
 ### Sources
 
