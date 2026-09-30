@@ -66,6 +66,21 @@ To claim a shared reminder's occurrences ahead of time on another user's behalf.
 **Rotation**:
 Users taking turns on a shared reminder. The next turn goes to whoever in the rotation did it least recently, and each turn is an assignment.
 
+### Privacy
+
+**Readable**:
+Said of a reminder list or source whose content the server may read. Everything else a user creates is encrypted so that only the devices of users with access can read it. Accounts, groups, access and timing are always readable.
+_Avoid_: Public, trusted, plaintext
+
+**Server trust**:
+A device's limit, set per server, on how much it lets that server read. A device refuses to create, join or upload anything more readable than its server trust allows.
+
+**Recovery key**:
+A secret a user keeps outside the app, such as on paper, that restores their encrypted personal data after losing all their devices.
+
+**Escrow**:
+An optional arrangement where the server keeps a copy of a user's personal keys and releases it after verifying the user. It lets whoever runs the server read that user's personal data.
+
 ### Sources
 
 **Source**:
