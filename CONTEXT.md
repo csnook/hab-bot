@@ -38,6 +38,9 @@ _Avoid_: Interval, rolling repeat
 **User**:
 A person who uses the app. A reminder can be shared with users individually, without any group.
 
+**Device**:
+A phone or computer running the app, belonging to exactly one user. Whatever a user does to an occurrence applies on all of their devices. A screen that several people share, such as a kitchen tablet, signs in as a user of its own.
+
 **Group**:
 A defined set of users, such as a household, that reminders can be shared with as a whole.
 _Avoid_: Household (one kind of group), family, team
@@ -140,7 +143,7 @@ _Avoid_: Timeout (that is an alert stopping by itself)
 ### Alerts
 
 **Alert**:
-How an occurrence gets someone's attention, anywhere from a quiet notification to a loud alarm.
+How an occurrence gets someone's attention, anywhere from a quiet notification to a loud alarm. Each of their devices that holds the reminder alerts, not just the one that fired it.
 _Avoid_: Alarm, notification (each is one kind of alert)
 
 **Snooze**:
@@ -148,7 +151,7 @@ To quiet an occurrence's alerts for yourself until a chosen time or trigger. The
 _Avoid_: Postpone, delay
 
 **Acknowledge**:
-To silence an occurrence's current alert without closing it. The occurrence stays open and can still become overdue or missed.
+To silence an occurrence's current alert for yourself, on all your devices, without closing it. The occurrence stays open and can still become overdue or missed.
 _Avoid_: Dismiss
 
 **Priority**:
