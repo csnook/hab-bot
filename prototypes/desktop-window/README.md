@@ -10,4 +10,4 @@ A throwaway UI prototype for [Desktop window](https://github.com/csnook/hab-bot/
 
 Open any file in a browser. They load Preact and htm from cdn.jsdelivr.net and use sample data, with the time fixed at Wednesday 30 September 2026, 17:40. Nothing is saved.
 
-The decisions they settled are in the two tickets' resolution comments.
+The decisions they settled are in the two tickets' resolution comments. One decision came after version 5 and is in the tickets' comments, not in the prototype: the settings section This computer is now This device, as on Android and in the web client.
