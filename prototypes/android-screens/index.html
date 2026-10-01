@@ -1,0 +1,1482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>Reminders on Android</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans:wght@300;400;500;600;700&display=swap">
+<style>
+/* PROTOTYPE, throwaway. Android screens for csnook/hab-bot#30, three navigation variants (#A, #B, #C).
+   Layout: a Plasma desk holding one Breeze-styled app window and a tray; prototype controls sit outside the window in mono type. */
+:root {
+  --desk: #cfd6dd;
+  --win: #eff0f1;
+  --view: #fcfcfc;
+  --line: #d3d7db;
+  --fg: #232629;
+  --muted: #677079;
+  --faint: #9aa1a8;
+  --accent: #2c93cf;
+  --accent-soft: rgba(61, 174, 233, 0.14);
+  --neg: #d33a4b;
+  --neg-soft: rgba(218, 68, 83, 0.12);
+  --pos: #238a4f;
+  --wait: #b86a00;
+  --wait-soft: rgba(246, 116, 0, 0.12);
+  --cal: rgba(35, 38, 41, 0.06);
+  --cal-edge: rgba(35, 38, 41, 0.28);
+  --l-personal: #1d99f3;
+  --l-household: #9b59b6;
+  --l-garden: #11a08a;
+  --chrome-bg: #1d2126;
+  --chrome-fg: #f3f5f7;
+  --chrome-muted: #aab2ba;
+  --shadow: 0 18px 50px rgba(20, 30, 40, 0.22), 0 2px 6px rgba(20, 30, 40, 0.12);
+  --ui: "Noto Sans", "Noto Sans UI", system-ui, sans-serif;
+  --proto: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --desk: #121417; --win: #2a2e32; --view: #1e2124; --line: #3b4148; --fg: #f2f4f5; --muted: #a3acb4; --faint: #6d757d;
+    --accent: #3daee9; --accent-soft: rgba(61, 174, 233, 0.18); --neg: #f0596a; --neg-soft: rgba(240, 89, 106, 0.16);
+    --pos: #46c27a; --wait: #f39c3c; --wait-soft: rgba(243, 156, 60, 0.16); --cal: rgba(252, 252, 252, 0.06); --cal-edge: rgba(252, 252, 252, 0.3);
+    --l-personal: #3daee9; --l-household: #b77fd0; --l-garden: #2ec4a6;
+    --chrome-bg: #eef1f4; --chrome-fg: #16191c; --chrome-muted: #4f575f;
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --desk: #121417; --win: #2a2e32; --view: #1e2124; --line: #3b4148; --fg: #f2f4f5; --muted: #a3acb4; --faint: #6d757d;
+  --accent: #3daee9; --accent-soft: rgba(61, 174, 233, 0.18); --neg: #f0596a; --neg-soft: rgba(240, 89, 106, 0.16);
+  --pos: #46c27a; --wait: #f39c3c; --wait-soft: rgba(243, 156, 60, 0.16); --cal: rgba(252, 252, 252, 0.06); --cal-edge: rgba(252, 252, 252, 0.3);
+  --l-personal: #3daee9; --l-household: #b77fd0; --l-garden: #2ec4a6;
+  --chrome-bg: #eef1f4; --chrome-fg: #16191c; --chrome-muted: #4f575f;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+html, body { background: var(--desk); color: var(--fg); }
+body { font-family: var(--ui); padding: 0 16px 96px; }
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; }
+button:focus-visible, [tabindex]:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* ---------- prototype chrome (not part of the design) ---------- */
+.proto-head { max-width: 1180px; margin: 0 auto; padding-block: 28px 18px; display: grid; gap: 10px; font-family: var(--proto); }
+.proto-eyebrow { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.proto-head h1 { font-family: var(--ui); font-size: 26px; font-weight: 700; margin: 0; text-wrap: balance; }
+.proto-head a { color: var(--accent); }
+.proto-head p { margin: 0; max-width: 78ch; font-size: 13px; line-height: 1.6; color: var(--muted); }
+.proto-variants { display: flex; flex-wrap: wrap; gap: 8px; }
+.proto-variants button { border: 1px solid var(--line); background: var(--view); border-radius: 6px; padding: 8px 12px; cursor: pointer; text-align: left; font-family: var(--proto); font-size: 12px; line-height: 1.45; max-width: 360px; min-width: 0; }
+.proto-variants button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.proto-variants b { font-family: var(--ui); font-size: 13px; }
+.desk-scroll { overflow-x: auto; padding-block: 8px 24px; }
+.desk { width: 1212px; margin: 0 auto; display: grid; gap: 14px; justify-items: center; }
+.switcher { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 50;
+  display: flex; align-items: center; gap: 4px; padding: 6px; border-radius: 999px; background: var(--chrome-bg); color: var(--chrome-fg);
+  font-family: var(--proto); font-size: 13px; box-shadow: 0 8px 28px rgba(0,0,0,0.35); max-width: calc(100vw - 32px); }
+.switcher button { background: transparent; border: 0; color: inherit; cursor: pointer; padding: 6px 10px; border-radius: 999px; }
+.switcher button:hover { background: rgba(127,127,127,0.25); }
+.switcher .lbl { padding: 0 8px; white-space: nowrap; }
+.switcher .sep { width: 1px; height: 20px; background: var(--chrome-muted); opacity: 0.5; }
+
+/* ---------- the app window ---------- */
+.win { width: 1180px; height: 720px; background: var(--win); border: 1px solid var(--line); border-radius: 8px 8px 6px 6px; box-shadow: var(--shadow);
+  display: grid; grid-template-rows: 34px minmax(0, 1fr); overflow: hidden; font-size: 13px; }
+.titlebar { display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.titlebar .appicon { width: 18px; height: 18px; }
+.titlebar .t { flex: 1; text-align: center; font-weight: 500; color: var(--muted); }
+.wbtns { display: flex; gap: 10px; }
+.wbtns span { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--faint); }
+.body { min-height: 0; display: grid; }
+.pane { background: var(--view); min-height: 0; min-width: 0; }
+.scroll { overflow: auto; min-height: 0; }
+
+/* shared bits */
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+.btn { border: 1px solid var(--line); background: var(--win); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12.5px; line-height: 1.4; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 2px 8px; font-size: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+.tag.overdue { color: var(--neg); background: var(--neg-soft); }
+.tag.due { color: var(--accent); background: var(--accent-soft); }
+.tag.waiting { color: var(--wait); background: var(--wait-soft); }
+.tag.plain { color: var(--muted); background: var(--cal); }
+.banner { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--wait-soft); border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.banner .grow { flex: 1; min-width: 0; }
+.sechead { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.meta { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.row-title { font-weight: 500; }
+.done-title { color: var(--muted); }
+.strike { text-decoration: line-through; }
+
+/* detail */
+.detail { display: grid; gap: 12px; padding: 14px 16px; align-content: start; }
+.detail h3 { margin: 0; font-size: 16px; line-height: 1.3; text-wrap: balance; }
+.detail dl { margin: 0; display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; font-size: 12.5px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; min-width: 0; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.menu { position: absolute; z-index: 20; background: var(--view); border: 1px solid var(--line); border-radius: 5px; box-shadow: var(--shadow); padding: 4px; display: grid; min-width: 190px; }
+.menu button { border: 0; background: transparent; text-align: left; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12.5px; }
+.menu button:hover { background: var(--accent-soft); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.hist { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+
+/* ---------- Variant A: calendar ---------- */
+.A { grid-template-columns: 214px minmax(0, 1fr) 286px; }
+.A .side { background: var(--win); border-right: 1px solid var(--line); padding: 12px; display: grid; gap: 16px; align-content: start; }
+.mini { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; font-size: 11px; }
+.mini .h { color: var(--faint); font-weight: 600; }
+.mini .d { padding: 3px 0; border-radius: 3px; }
+.mini .d.today { background: var(--accent); color: #fff; font-weight: 600; }
+.mini .d.inview { background: var(--accent-soft); }
+.lists { display: grid; gap: 4px; }
+.lists label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 3px; cursor: pointer; font-size: 12.5px; }
+.lists label:hover { background: var(--cal); }
+.lists .sub { font-size: 11px; color: var(--muted); margin-left: auto; }
+.navlink { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px; cursor: pointer; border: 0; background: transparent; width: 100%; text-align: left; font-size: 12.5px; }
+.navlink:hover, .navlink[aria-current="true"] { background: var(--accent-soft); }
+.A .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); border-right: 1px solid var(--line); }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--win); }
+.toolbar .t { font-size: 15px; font-weight: 600; flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button { border: 0; background: var(--win); padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.dayheads { display: grid; grid-template-columns: 52px repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--view); }
+.dayheads div { padding: 6px 8px; font-size: 12px; font-weight: 600; border-left: 1px solid var(--line); }
+.dayheads div.today { color: var(--accent); }
+.grid { display: grid; grid-template-columns: 52px repeat(3, 1fr); position: relative; }
+.hours { position: relative; }
+.hours span { position: absolute; right: 6px; font-size: 10.5px; color: var(--faint); transform: translateY(-6px); }
+.col { position: relative; border-left: 1px solid var(--line); background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 46px); background-position: 0 0; }
+.col.past { background-color: rgba(127,127,127,0.035); }
+.calblk { position: absolute; left: 3px; right: 3px; background: var(--cal); border-left: 3px solid var(--cal-edge); border-radius: 3px; font-size: 10.5px; color: var(--muted); padding: 2px 6px; text-align: right; overflow: hidden; }
+.pill { position: absolute; height: 22px; border-radius: 4px; font-size: 11.5px; padding: 0 6px; display: flex; align-items: center; gap: 5px; cursor: pointer; overflow: hidden; white-space: nowrap; border: 1px solid transparent; text-align: left; }
+.pill .tm { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pill.st-due { background: var(--lc-soft); border-color: var(--lc); color: var(--fg); }
+.pill.st-overdue { background: var(--lc-soft); border-color: var(--neg); color: var(--fg); box-shadow: inset 3px 0 0 var(--neg); }
+.pill.st-waiting { background: var(--wait-soft); border: 1px dashed var(--wait); color: var(--fg); }
+.pill.st-expected { background: var(--view); border-color: var(--lc); color: var(--fg); }
+.pill.st-tentative { background: var(--view); border: 1px dashed var(--lc); color: var(--muted); }
+.pill.st-completed { background: transparent; border-color: var(--line); color: var(--muted); }
+.pill.st-skipped { background: transparent; border-color: var(--line); color: var(--faint); text-decoration: line-through; }
+.pill.st-missed { background: transparent; border: 1px solid var(--neg); color: var(--neg); }
+.pill.st-nofire { background: transparent; border: 1px dotted var(--faint); color: var(--faint); height: 18px; font-size: 10.5px; }
+.pill.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nowline { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--neg); z-index: 5; pointer-events: none; }
+.nowline::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--neg); }
+.A .rail { background: var(--view); display: grid; grid-template-rows: minmax(0, 1fr); }
+.railsec { display: grid; gap: 6px; padding: 12px 12px 4px; }
+.orow { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; text-align: left; background: transparent; width: 100%; }
+.orow:hover { background: var(--cal); }
+.orow.sel { border-color: var(--accent); background: var(--accent-soft); }
+.orow .dot { margin-top: 5px; }
+
+/* ---------- Variant B: inbox ---------- */
+.B { grid-template-columns: 188px minmax(0, 1fr) auto; }
+.B .nav { background: var(--win); border-right: 1px solid var(--line); padding: 12px 10px; display: grid; gap: 14px; align-content: start; }
+.B .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.ribbon { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); background: var(--view); display: grid; gap: 6px; }
+.rib { position: relative; height: 54px; }
+.rib .axis { position: absolute; left: 0; right: 0; top: 26px; border-top: 1px solid var(--line); }
+.rib .day { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); font-size: 10.5px; color: var(--muted); padding-left: 4px; }
+.rib .busy { position: absolute; top: 34px; height: 8px; background: var(--cal-edge); opacity: 0.45; border-radius: 2px; }
+.rib .tick { position: absolute; top: 20px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; border: 2px solid var(--lc); background: var(--view); cursor: pointer; padding: 0; }
+.rib .tick.st-due { background: var(--lc); }
+.rib .tick.st-overdue { background: var(--neg); border-color: var(--neg); }
+.rib .tick.st-waiting { border-style: dashed; border-color: var(--wait); }
+.rib .tick.st-completed { background: var(--pos); border-color: var(--pos); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-skipped { border-color: var(--faint); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-missed { border-color: var(--neg); background: var(--view); }
+.rib .tick.st-nofire { border: 1px dotted var(--faint); width: 8px; height: 8px; margin-left: -4px; top: 22px; }
+.rib .tick.st-tentative { border-style: dashed; }
+.rib .now { position: absolute; top: 12px; bottom: 6px; border-left: 2px solid var(--neg); }
+.rib .now span { position: absolute; top: -12px; left: -16px; font-size: 10px; color: var(--neg); font-weight: 600; }
+.inbox { padding: 6px 16px 24px; display: grid; gap: 18px; align-content: start; }
+.igroup { display: grid; gap: 2px; }
+.irow { display: grid; grid-template-columns: 48px 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 8px; border-radius: 5px; border: 1px solid transparent; cursor: pointer; }
+.irow:hover { background: var(--cal); }
+.irow.sel { border-color: var(--accent); background: var(--accent-soft); }
+.irow .tm { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+.drawer { width: 320px; border-left: 1px solid var(--line); background: var(--view); display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+
+/* ---------- Variant C: agenda ---------- */
+.C { grid-template-rows: auto auto minmax(0, 1fr); }
+.chead { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; padding: 12px 20px 10px; background: var(--win); border-bottom: 1px solid var(--line); }
+.chead .date { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+.chead .grow { flex: 1; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--view); font-size: 12px; cursor: pointer; }
+.fchip[aria-pressed="false"] { opacity: 0.45; }
+.nowband { display: flex; gap: 8px; padding: 10px 20px; background: var(--view); border-bottom: 1px solid var(--line); overflow-x: auto; align-items: stretch; }
+.nowband .lbl { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; color: var(--neg); text-transform: uppercase; align-self: center; padding-right: 4px; white-space: nowrap; }
+.ncard { display: grid; gap: 2px; min-width: 190px; max-width: 230px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); border-left: 4px solid var(--lc); background: var(--win); cursor: pointer; text-align: left; }
+.ncard.st-overdue { border-left-color: var(--neg); }
+.ncard.st-waiting { border-left-style: dashed; border-left-color: var(--wait); }
+.ncard.sel { box-shadow: 0 0 0 2px var(--accent); }
+.agenda { max-width: 760px; margin: 0 auto; padding: 4px 20px 40px; }
+.dhead { position: sticky; top: 0; z-index: 3; background: var(--view); padding: 14px 0 6px; font-size: 13px; font-weight: 700; display: flex; gap: 8px; align-items: baseline; border-bottom: 1px solid var(--line); }
+.arow { display: grid; grid-template-columns: 54px 22px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 8px 6px; border-bottom: 1px solid var(--cal); cursor: pointer; }
+.arow:hover { background: var(--cal); }
+.arow.sel { background: var(--accent-soft); }
+.arow .tm { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; padding-top: 1px; }
+.arow.cal { cursor: default; color: var(--muted); }
+.arow.cal:hover { background: transparent; }
+.glyph { width: 16px; height: 16px; display: inline-grid; place-items: center; margin-top: 1px; }
+.nowrule { display: flex; align-items: center; gap: 8px; color: var(--neg); font-size: 11px; font-weight: 700; padding: 6px 0; }
+.nowrule::after { content: ""; flex: 1; border-top: 2px solid var(--neg); }
+.expand { grid-column: 3 / -1; margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--win); cursor: default; }
+
+/* ---------- not time-based table (shared) ---------- */
+.ntb { padding: 16px; display: grid; gap: 10px; align-content: start; }
+.ntb table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ntb th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.ntb td { padding: 8px; border-bottom: 1px solid var(--cal); vertical-align: top; }
+.fake { font-size: 11px; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.fake.easy { border-color: var(--neg); color: var(--neg); }
+.fake.moderate { border-color: var(--wait); color: var(--wait); }
+
+/* ---------- tray ---------- */
+.panel { width: 1180px; height: 38px; border-radius: 6px; background: var(--win); border: 1px solid var(--line); display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 0 12px; position: relative; font-size: 12.5px; }
+.panel .ticon { width: 16px; height: 16px; border-radius: 3px; background: var(--faint); opacity: 0.6; }
+.trayme { position: relative; border: 0; background: transparent; padding: 2px; cursor: pointer; display: grid; place-items: center; }
+.trayme .badge { position: absolute; top: -5px; right: -7px; min-width: 15px; height: 15px; border-radius: 8px; background: var(--neg); color: #fff; font-size: 9.5px; font-weight: 700; display: grid; place-items: center; padding: 0 3px; }
+.traymenu { position: absolute; right: 70px; bottom: 44px; width: 300px; background: var(--view); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); padding: 6px; display: grid; font-size: 12.5px; z-index: 30; }
+.traymenu .mi { display: flex; justify-content: space-between; gap: 8px; padding: 5px 10px; border-radius: 3px; border: 0; background: transparent; text-align: left; cursor: pointer; width: 100%; }
+.traymenu .mi:hover { background: var(--accent-soft); }
+.traymenu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.traymenu .cap { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+/* ---------- version 2: one window, four views ---------- */
+.shell { grid-template-columns: 200px minmax(0, 1fr); }
+.shell .side { background: var(--win); border-right: 1px solid var(--line); padding: 12px; display: grid; gap: 16px; align-content: start; overflow: auto; }
+.shell .main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; }
+.shell .toolbar { position: relative; flex-wrap: nowrap; }
+.shell .toolbar .t { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.views button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; }
+.viewbody { min-height: 0; display: grid; }
+.calview { display: grid; grid-template-columns: minmax(0, 1fr) 270px; min-height: 0; }
+.calview .rail { border-left: 1px solid var(--line); background: var(--view); }
+.inview, .agview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: 200px; gap: 10px; padding: 12px; overflow: auto; align-items: start; min-height: 0; background: var(--view); }
+.bcol { background: var(--win); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 6px; padding: 8px; align-content: start; }
+.bhead { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; padding: 2px 2px 4px; }
+.c-overdue .bhead span:first-child { color: var(--neg); }
+.c-due .bhead span:first-child { color: var(--accent); }
+.c-waiting .bhead span:first-child { color: var(--wait); }
+.c-finished .bcard, .c-paused .bcard { opacity: 0.8; }
+.bcard { display: grid; gap: 4px; text-align: left; background: var(--view); border: 1px solid var(--line); border-left: 3px solid var(--lc); border-radius: 5px; padding: 7px 8px; cursor: pointer; width: 100%; }
+.bcard:hover { border-color: var(--accent); border-left-color: var(--lc); }
+.bcard.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.coach { position: absolute; top: calc(100% - 2px); left: 10px; z-index: 40; width: 320px; background: var(--chrome-bg); color: var(--chrome-fg); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.5; }
+.coach::before { content: ""; position: absolute; top: -6px; left: 40px; width: 12px; height: 12px; background: var(--chrome-bg); transform: rotate(45deg); }
+.coach .btn { justify-self: start; background: var(--chrome-fg); color: var(--chrome-bg); border-color: var(--chrome-fg); }
+/* ---------- version 3: History view and the reminder editor ---------- */
+.win { position: relative; }
+.linkbtn { border: 0; background: transparent; color: var(--accent); cursor: pointer; padding: 0; font-size: 12px; }
+.relline { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.histview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.histbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--view); flex-wrap: wrap; }
+.histbar .grow { flex: 1; }
+.histbody { padding: 14px 16px 28px; display: grid; gap: 14px; align-content: start; }
+.totals { display: flex; gap: 10px; flex-wrap: wrap; }
+.total { display: grid; gap: 2px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--win); min-width: 140px; }
+.total .big { font-size: 22px; font-weight: 700; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.tablewrap { overflow-x: auto; }
+.htable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.htable th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.htable td { padding: 8px; border-bottom: 1px solid var(--cal); vertical-align: top; }
+.htable tbody tr { cursor: pointer; }
+.htable tbody tr:hover td { background: var(--cal); }
+.htable tr.sel td { background: var(--accent-soft); }
+.htable .num { text-align: right; }
+.htable td:first-child { min-width: 210px; }
+.htable td:nth-child(2) { white-space: nowrap; }
+.hint { font-size: 11.5px; color: var(--wait); margin-top: 3px; }
+.strip { display: inline-flex; gap: 2px; flex-wrap: nowrap; }
+.cell { width: 8px; height: 14px; border-radius: 2px; display: inline-block; flex: none; }
+.o-ontime { background: var(--pos); }
+.o-late { background: var(--wait); }
+.o-skipped { background: var(--faint); opacity: 0.55; }
+.o-missed { background: var(--neg); }
+.o-nofire { background: transparent; border: 1px dotted var(--faint); }
+.gsec { display: grid; gap: 8px; }
+.gsec .sechead .dot { width: 8px; height: 8px; }
+.sharebar { display: inline-block; vertical-align: middle; width: 160px; height: 8px; border-radius: 4px; background: var(--cal); overflow: hidden; }
+.sharebar .fill { display: block; height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; }
+.overlay { position: absolute; inset: 34px 0 0 0; background: rgba(15, 20, 25, 0.38); display: grid; place-items: center; z-index: 60; }
+.overlay.side { place-items: stretch end; }
+.modal, .sheet { background: var(--view); border: 1px solid var(--line); box-shadow: var(--shadow); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; position: relative; font-size: 13px; }
+.modal { width: 560px; max-height: 640px; border-radius: 8px; }
+.modal.wide { width: 640px; }
+.sheet { width: 440px; height: 100%; grid-template-rows: auto auto minmax(0, 1fr) auto; border-radius: 0; }
+.edhead { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.proto-tag { margin-left: auto; font-family: var(--proto); font-size: 11px; color: var(--chrome-fg); background: var(--chrome-bg); padding: 2px 8px; border-radius: 999px; }
+.edbody { padding: 14px 16px; display: grid; gap: 12px; overflow: auto; align-content: start; }
+.edfoot { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--win); }
+.edfoot .grow { flex: 1; }
+.field { display: grid; gap: 5px; }
+.flabel { font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.inp { font: inherit; color: var(--fg); background: var(--view); border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; width: 100%; min-width: 0; }
+.inp.sm { width: 90px; padding: 2px 6px; }
+.inp.title { font-size: 16px; font-weight: 600; padding: 8px 10px; }
+textarea.inp { resize: vertical; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tchip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--accent); font-size: 12.5px; }
+.tchip button { border: 0; background: transparent; cursor: pointer; color: var(--muted); font-size: 11px; padding: 0 4px; }
+.radios { display: grid; gap: 6px; font-size: 12.5px; }
+.radios label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.folds { display: grid; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.fold + .fold { border-top: 1px solid var(--line); }
+.foldhead { display: grid; grid-template-columns: 110px minmax(0, 1fr) 16px; gap: 10px; align-items: baseline; width: 100%; text-align: left; border: 0; background: var(--win); padding: 8px 12px; cursor: pointer; }
+.foldhead .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foldbody { padding: 10px 12px 12px; display: grid; gap: 8px; background: var(--view); }
+.caret { color: var(--muted); }
+.sentence { font-size: 18px; line-height: 2.1; margin: 0; }
+.tok { font: inherit; border: 0; background: transparent; color: var(--accent); border-bottom: 2px dotted var(--accent); padding: 0 1px; cursor: pointer; }
+.tok.on { background: var(--accent-soft); border-bottom-style: solid; }
+.tok.empty { color: var(--faint); border-bottom-color: var(--faint); }
+.adders { display: flex; flex-wrap: wrap; gap: 6px; }
+.tokedit { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--win); display: grid; gap: 8px; }
+.tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--win); }
+.tabs button { border: 0; background: transparent; padding: 8px 10px; cursor: pointer; font-size: 12.5px; border-bottom: 2px solid transparent; }
+.tabs button[aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 600; }
+.picker { position: absolute; left: 50%; top: 56px; transform: translateX(-50%); width: min(460px, 94%); max-height: 520px; overflow: auto; background: var(--view); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); z-index: 5; padding: 8px; display: grid; gap: 6px; }
+.pickhead { display: flex; align-items: baseline; gap: 10px; padding: 4px 6px 6px; }
+.pickhead .btn { margin-left: auto; }
+.pickgrp { display: grid; gap: 2px; }
+.pickgrp .sechead { padding: 6px 6px 2px; }
+.pickrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 0; background: transparent; text-align: left; padding: 6px 8px; border-radius: 4px; cursor: pointer; width: 100%; }
+.pickrow:hover { background: var(--accent-soft); }
+.warntext { color: var(--wait); }
+/* ---------- version 4: settings, sharing, joining ---------- */
+.modal.settings { width: 820px; height: 600px; max-height: none; grid-template-rows: auto minmax(0, 1fr); }
+.setgrid { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 0; }
+.setnav { background: var(--win); border-right: 1px solid var(--line); padding: 10px 8px; display: grid; gap: 2px; align-content: start; }
+.setbody { overflow: auto; padding: 14px 18px 24px; }
+.setpage { display: grid; gap: 10px; }
+.setpage h4 { margin: 8px 0 0; font-size: 13px; }
+.setrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--cal); }
+.setctl { display: grid; gap: 4px; justify-items: start; }
+.tog { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.note { font-size: 12px; color: var(--muted); background: var(--cal); border-radius: 5px; padding: 8px 10px; line-height: 1.5; }
+.warnbox { font-size: 12px; background: var(--wait-soft); border-radius: 5px; padding: 8px 10px; line-height: 1.5; }
+.ltable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ltable td { padding: 6px 6px; border-bottom: 1px solid var(--cal); vertical-align: middle; }
+.ltable td:last-child { text-align: right; }
+.invite { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-soft); font-size: 12.5px; }
+.qrbox { display: flex; gap: 14px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+.qr { flex: none; border-radius: 4px; }
+.btn.danger { color: var(--neg); }
+.addshare { display: flex; gap: 6px; }
+.choices { display: grid; gap: 8px; }
+.choice { display: grid; gap: 3px; text-align: left; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--win); cursor: pointer; }
+.choice:hover { border-color: var(--accent); }
+.meter { height: 6px; border-radius: 3px; background: var(--cal); overflow: hidden; }
+.meter .lvl { display: block; height: 100%; }
+.lvl.l1, .lvl.l2 { background: var(--neg); } .lvl.l3 { background: var(--wait); } .lvl.l4 { background: var(--pos); }
+.banner.info { background: var(--accent-soft); }
+.listmore { margin-left: auto; border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 0 4px; border-radius: 3px; }
+.listmore:hover { background: var(--cal); color: var(--fg); }
+/* ---------- version 5: sources, priorities, snooze all, notices, alarm ---------- */
+.clickrow { cursor: pointer; }
+.clickrow:hover td { background: var(--cal); }
+.map { display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; padding-bottom: 6px; }
+.map .meta { padding: 0 8px; }
+.copyrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mono { font-family: var(--proto); font-size: 11.5px; background: var(--cal); padding: 2px 6px; border-radius: 3px; }
+.filters { display: grid; gap: 6px; width: 100%; }
+.srow { display: grid; grid-template-columns: 80px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.frow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.pairs { display: grid; gap: 6px; width: 100%; }
+.occnote { font-size: 12px; padding: 6px 10px; border-left: 3px solid var(--wait); background: var(--wait-soft); border-radius: 0 4px 4px 0; }
+.unsent { font-size: 11px; color: var(--wait); border: 1px dashed var(--wait); border-radius: 3px; padding: 0 5px; margin-left: 4px; }
+.confirm { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--win); }
+.snzchip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--wait-soft); border: 1px solid var(--wait); white-space: nowrap; }
+.alarmwrap { position: absolute; inset: 34px 0 0 0; z-index: 70; background: rgba(15, 20, 25, 0.25); display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 24px; align-items: start; }
+.alarm { justify-self: center; align-self: center; width: 440px; background: var(--win); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); display: grid; grid-template-rows: 34px auto; overflow: hidden; }
+.alarmbody { padding: 18px 22px 20px; display: grid; gap: 10px; text-align: center; background: var(--view); }
+.ring { font-size: 12px; font-weight: 600; color: var(--neg); letter-spacing: 0.03em; }
+.alarmtitle { font-size: 24px; font-weight: 700; text-wrap: balance; }
+.btn.big { font-size: 16px; padding: 10px; }
+.knotif { width: 300px; background: var(--view); border: 1px solid var(--line); border-left: 4px solid var(--neg); border-radius: 6px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 4px; font-size: 12.5px; grid-column: 2; }
+.knotif.gentle { border-left-color: var(--accent); }
+.knhead { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
+@media (prefers-reduced-motion: no-preference) { .pill, .orow, .irow, .arow, .ncard { transition: background-color .12s, border-color .12s; } }
+/* ================= Android phone prototype ================= */
+.stage-scroll { overflow-x: auto; padding-block: 8px 24px; }
+.stage { display: flex; justify-content: center; min-width: 430px; }
+.phone { width: 412px; height: 868px; border-radius: 46px; background: #0d0f12; padding: 12px; box-shadow: var(--shadow); position: relative; flex: none; }
+.screen { width: 388px; height: 844px; border-radius: 36px; overflow: hidden; background: var(--view); position: relative; display: grid; grid-template-rows: 28px minmax(0, 1fr) 22px; font-size: 14px; }
+.sbar { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; font-size: 12.5px; font-weight: 600; background: var(--win); }
+.gbar { display: grid; place-items: center; background: var(--win); }
+.gbar span { width: 110px; height: 4px; border-radius: 2px; background: var(--faint); }
+.app { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; position: relative; background: var(--view); }
+.topbar { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; background: var(--win); min-height: 56px; }
+.topbar .title { flex: 1; font-size: 19px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ibtn { width: 40px; height: 40px; border-radius: 20px; border: 0; background: transparent; display: grid; place-items: center; cursor: pointer; color: var(--fg); }
+.ibtn:hover { background: var(--cal); }
+.pscroll { overflow-y: auto; min-height: 0; }
+.bnav { display: grid; background: var(--win); border-top: 1px solid var(--line); padding: 8px 4px 10px; }
+.bnav button { border: 0; background: transparent; display: grid; justify-items: center; gap: 4px; font-size: 11.5px; cursor: pointer; color: var(--muted); padding: 0; }
+.bnav .navpill { width: 56px; height: 30px; border-radius: 15px; display: grid; place-items: center; }
+.bnav button[aria-current="true"] { color: var(--fg); font-weight: 600; }
+.bnav button[aria-current="true"] .navpill { background: var(--accent-soft); color: var(--accent); }
+.fab { position: absolute; right: 16px; bottom: 92px; width: 56px; height: 56px; border-radius: 16px; border: 0; background: var(--accent); color: #fff; font-size: 26px; box-shadow: 0 6px 16px rgba(0,0,0,.25); cursor: pointer; z-index: 5; }
+.fab.low { bottom: 20px; }
+.psec { padding: 14px 16px 2px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); display: flex; gap: 8px; }
+.prow { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px 10px 16px; cursor: pointer; border-bottom: 1px solid var(--cal); }
+.prow:active, .prow:hover { background: var(--cal); }
+.prow .tm { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+.prow .ttl { font-weight: 500; display: flex; align-items: center; gap: 7px; }
+.prow.st-overdue { box-shadow: inset 3px 0 0 var(--neg); }
+.donebtn { border: 1px solid var(--line); background: var(--win); border-radius: 18px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+.banner.p { font-size: 12.5px; padding: 8px 14px; }
+.sheetback { position: absolute; inset: 0; background: rgba(0,0,0,.35); z-index: 20; display: grid; align-items: end; }
+.sheet2 { background: var(--view); border-radius: 22px 22px 0 0; max-height: 82%; overflow-y: auto; padding-bottom: 12px; box-shadow: 0 -8px 24px rgba(0,0,0,.2); }
+.sheet2 .handle { width: 36px; height: 4px; border-radius: 2px; background: var(--faint); margin: 10px auto 2px; }
+.sheet2 .detail { padding: 8px 18px 14px; }
+.sheet2 .btn { padding: 8px 14px; font-size: 13.5px; border-radius: 20px; }
+.fullscreen { position: absolute; inset: 0; z-index: 30; background: var(--view); display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.fullscreen .edbody { padding: 12px 16px 30px; }
+.summary { font-size: 15px; line-height: 1.6; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); }
+.chiprow { display: flex; gap: 8px; overflow-x: auto; padding: 10px 16px; }
+.nchip { flex: none; display: grid; gap: 2px; width: 200px; text-align: left; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--line); border-left: 4px solid var(--lc); background: var(--win); cursor: pointer; }
+.nchip.st-overdue { border-left-color: var(--neg); }
+.nchip.st-waiting { border-left-style: dashed; border-left-color: var(--wait); }
+.dayhdr { position: sticky; top: 0; background: var(--view); z-index: 2; padding: 12px 16px 6px; font-weight: 700; display: flex; gap: 8px; align-items: baseline; border-bottom: 1px solid var(--line); }
+.prule { display: flex; align-items: center; gap: 8px; color: var(--neg); font-size: 11px; font-weight: 700; padding: 4px 16px; }
+.prule::after { content: ""; flex: 1; border-top: 2px solid var(--neg); }
+.pday { position: relative; margin: 0 12px 0 54px; border-left: 1px solid var(--line); background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 52px); }
+.pday .hr { position: absolute; left: -48px; font-size: 11px; color: var(--faint); transform: translateY(-7px); width: 40px; text-align: right; }
+.pday .calblk { left: 4px; right: 4px; }
+.pday .pill { height: 26px; font-size: 12.5px; left: 6px; right: 40px; }
+.pday .nowline { left: -6px; }
+.daynav { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.daynav .t { flex: 1; font-weight: 600; }
+.pboard { display: grid; grid-auto-flow: column; grid-auto-columns: calc(100% - 44px); gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 12px 16px; align-items: start; height: 100%; }
+.pboard .bcol { scroll-snap-align: start; max-height: 100%; overflow-y: auto; }
+.colchips { display: flex; gap: 6px; overflow-x: auto; padding: 10px 16px 0; }
+.colchips button { flex: none; border: 1px solid var(--line); background: var(--win); border-radius: 16px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.hcard { margin: 8px 16px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; display: grid; gap: 8px; cursor: pointer; }
+.hcard .nums { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.hcard .nums b { color: var(--fg); font-size: 15px; }
+.hcard .strip { flex-wrap: wrap; row-gap: 3px; }
+.drawerback { position: absolute; inset: 0; background: rgba(0,0,0,.35); z-index: 25; }
+.navdrawer { position: absolute; top: 0; bottom: 0; left: 0; width: 300px; background: var(--win); z-index: 26; border-radius: 0 18px 18px 0; padding: 16px 12px; display: grid; gap: 14px; align-content: start; overflow-y: auto; }
+.navdrawer .navlink { padding: 10px 12px; border-radius: 22px; font-size: 14px; }
+.moremenu { position: absolute; right: 8px; bottom: 76px; z-index: 22; background: var(--view); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; display: grid; min-width: 180px; }
+.moremenu button { border: 0; background: transparent; text-align: left; padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.moremenu button:hover { background: var(--accent-soft); }
+.shade { position: absolute; inset: 0; z-index: 40; background: rgba(22, 26, 31, 0.97); color: #eef1f4; padding: 14px 12px; display: grid; gap: 10px; align-content: start; overflow-y: auto; }
+.shade .clock { font-size: 34px; font-weight: 300; padding: 6px 8px 0; }
+.shade .qs { display: flex; gap: 8px; padding: 0 6px 6px; }
+.shade .qs span { flex: 1; height: 44px; border-radius: 22px; background: rgba(255,255,255,.1); }
+.anotif { background: #2a2f36; border-radius: 18px; padding: 12px 14px; display: grid; gap: 6px; font-size: 13.5px; }
+.anotif .h { display: flex; gap: 6px; align-items: center; font-size: 11.5px; color: #aab2ba; }
+.anotif .t { font-weight: 600; }
+.anotif .s { color: #c3c9cf; font-size: 12.5px; }
+.anotif .acts2 { display: flex; gap: 18px; padding-top: 4px; }
+.anotif .acts2 button { border: 0; background: transparent; color: #8fd0f5; font-weight: 600; font-size: 13px; cursor: pointer; padding: 4px 0; }
+.anotif.alarm { border-left: 4px solid #f0596a; }
+.shade .grp { font-size: 11.5px; color: #aab2ba; padding: 4px 8px 0; }
+.shade .swipe { font-size: 11px; color: #8a929a; }
+.alarmfs { position: absolute; inset: 0; z-index: 45; background: linear-gradient(180deg, #1b2a38 0%, #121a22 100%); color: #f2f4f5; display: grid; grid-template-rows: auto 1fr auto; padding: 36px 24px 30px; text-align: center; }
+.alarmfs .ring { color: #ff8a96; }
+.alarmfs .big { font-size: 30px; font-weight: 700; margin-top: 12px; text-wrap: balance; }
+.alarmfs .when { color: #aab2ba; margin-top: 8px; }
+.alarmfs .clock { font-size: 64px; font-weight: 200; align-self: center; }
+.alarmfs .donebig { width: 100%; padding: 16px; border-radius: 30px; border: 0; background: #3daee9; color: #06263a; font-size: 20px; font-weight: 700; cursor: pointer; }
+.alarmfs .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+.alarmfs .row button { border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.06); color: #f2f4f5; border-radius: 20px; padding: 9px 14px; cursor: pointer; font-size: 13.5px; }
+.vol { font-size: 11.5px; color: #8a929a; margin-top: 10px; }
+
+
+/* batch 2 */
+.screen .setrow { grid-template-columns: 1fr; gap: 6px; }
+.screen .setgrid { grid-template-columns: 1fr; }
+.psettings { padding: 8px 16px 40px; }
+.seclist { display: grid; }
+.secitem { display: flex; justify-content: space-between; align-items: center; border: 0; border-bottom: 1px solid var(--cal); background: transparent; padding: 14px 4px; font-size: 15px; cursor: pointer; text-align: left; }
+.permrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--cal); }
+.camera { height: 220px; border-radius: 14px; background: repeating-linear-gradient(45deg, var(--cal) 0 10px, transparent 10px 20px); display: grid; place-items: center; color: var(--muted); font-size: 13px; border: 1px solid var(--line); }
+.screen .edfoot { padding: 12px 16px 14px; }
+.screen .edfoot .btn { padding: 9px 18px; border-radius: 20px; }
+.screen .ltable td:last-child { text-align: left; }
+.screen .qrbox { flex-wrap: wrap; }
+.ongoing { border-left: 4px solid #3daee9; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+</style>
+
+<div id="app"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/preact@10.29.8/dist/preact.min.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/preact@10.29.8/hooks/dist/hooks.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/htm@3.1.1/dist/htm.umd.js"></script>
+<script>
+// PROTOTYPE, throwaway. Sample data only; nothing is saved. "Now" is fixed at Wed 30 Sep 2026, 17:40.
+const { h, render } = preact;
+const { useState, useEffect, useRef } = preactHooks;
+const html = htm.bind(h);
+
+const NOW = { d: 0, m: 17 * 60 + 40 };
+const DAYS = { "-1": "Tuesday 29 September", "0": "Wednesday 30 September", "1": "Thursday 1 October" };
+const SHORT = { "-1": "Tue 29", "0": "Wed 30", "1": "Thu 1" };
+const REL = { "-1": "Yesterday", "0": "Today", "1": "Tomorrow" };
+const fmt = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+
+const LISTS = [
+  { id: "personal", name: "Personal", note: "Only you" },
+  { id: "household", name: "Household", note: "Household group · 3" },
+  { id: "garden", name: "Garden", note: "Shared with Sam" },
+];
+const lc = (id) => `var(--l-${id})`;
+const lcStyle = (id) => `--lc: ${lc(id)}; --lc-soft: color-mix(in srgb, ${lc(id)} 16%, transparent);`;
+
+const R = {
+  bp: { title: "Blood-pressure pill", list: "personal", pri: "High", trig: "Every day at 07:00 and 19:00", exp: "When it fires again" },
+  vitd: { title: "Vitamin D", list: "personal", pri: "Minimum", trig: "Every day at 08:00", exp: "When it fires again" },
+  plumber: { title: "Call the plumber", list: "personal", pri: "Low", trig: "Once, today at 10:00", exp: "None", note: "Kitchen tap drips. Number is on the fridge." },
+  stretch: { title: "Stretch for 10 minutes", list: "personal", pri: "Low", trig: "Weekdays at 12:30", exp: "End of the day" },
+  tomatoes: { title: "Water the tomatoes", list: "garden", pri: "Medium", trig: "3 days after it was last done", exp: "When it fires again", shared: true },
+  dish: { title: "Unload the dishwasher", list: "household", pri: "Medium", trig: "When the dishwasher says it's finished (webhook)", exp: "At 22:00", shared: true, fake: ["difficult", "Difficult to fake (signed)"] },
+  bins: { title: "Take the bins out", list: "household", pri: "Medium", trig: "Wednesdays at 18:00, if someone is home; waits until 23:59", exp: "When it fires again", shared: true, rotation: "Robin → you → Sam" },
+  sprinkler: { title: "Run the sprinklers", list: "garden", pri: "Low", trig: "Every day at 06:00, unless rain is forecast; lets the trigger pass", exp: "End of the day", shared: true },
+  cushions: { title: "Bring in the cushions", list: "garden", pri: "High", trig: "Severe Thunderstorm Warning issued for Home", exp: "When the warning ends", shared: true, fake: ["none", "Can't be faked"] },
+  car: { title: "Plug in the car", list: "personal", pri: "Medium", trig: "Car's Bluetooth disconnects after 18:00, at Home", exp: "At 23:00", fake: ["moderate", "Moderate to fake (Bluetooth)"] },
+  keys: { title: "Take your keys", list: "personal", pri: "Low", trig: "Leaving Home", exp: "10 minutes after leaving", fake: ["difficult", "Difficult to fake (location)"] },
+  cleaning: { title: "Pick up the dry cleaning", list: "personal", pri: "Low", trig: "Today at 17:00, when at High Street; waits until 20:00", exp: "When the wait ends" },
+  rent: { title: "Pay the rent", list: "personal", pri: "High", trig: "1st of every month at 09:00", exp: "When it fires again" },
+  door: { title: "Lock the back door", list: "household", pri: "Low", trig: "Every day at 21:00", exp: "When it fires again", shared: true },
+};
+
+const INITIAL = [
+  { id: 1, r: "bp", d: -1, m: 420, st: "completed", by: "You", at: "07:04" },
+  { id: 2, r: "vitd", d: -1, m: 480, st: "completed", by: "You", at: "09:10" },
+  { id: 3, r: "stretch", d: -1, m: 750, st: "missed", why: "Expired at the end of the day" },
+  { id: 4, r: "cushions", d: -1, m: 920, st: "completed", by: "Sam", at: "15:31", why: "Severe Thunderstorm Warning for Home" },
+  { id: 5, r: "bp", d: -1, m: 1140, st: "completed", by: "You", at: "19:02" },
+  { id: 6, r: "car", d: -1, m: 1215, st: "completed", by: "You", at: "20:21" },
+  { id: 7, r: "door", d: -1, m: 1260, st: "completed", by: "Robin", at: "21:05" },
+  { id: 10, r: "sprinkler", d: 0, m: 360, st: "nofire", why: "Rain forecast (80%)" },
+  { id: 11, r: "bp", d: 0, m: 420, st: "completed", by: "You", at: "07:12" },
+  { id: 12, r: "vitd", d: 0, m: 480, st: "due", why: "Silent: minimum priority" },
+  { id: 13, r: "plumber", d: 0, m: 600, st: "due", snoozed: "18:30" },
+  { id: 14, r: "stretch", d: 0, m: 750, st: "skipped", by: "You", note: "Gym at lunch instead" },
+  { id: 15, r: "tomatoes", d: 0, m: 960, st: "overdue", since: "17:00", claim: "Sam", claimAt: "16:20" },
+  { id: 16, r: "cleaning", d: 0, m: 1020, st: "waiting", why: "Waiting for: at High Street, until 20:00" },
+  { id: 17, r: "dish", d: 0, m: 1025, st: "due", declined: ["Robin"], why: "Everyone is alerted" },
+  { id: 18, r: "bins", d: 0, m: 1080, st: "tentative", turn: "Robin", why: "If someone is home" },
+  { id: 19, r: "bp", d: 0, m: 1140, st: "expected" },
+  { id: 20, r: "door", d: 0, m: 1260, st: "expected" },
+  { id: 30, r: "bp", d: 1, m: 420, st: "expected" },
+  { id: 31, r: "vitd", d: 1, m: 480, st: "expected" },
+  { id: 32, r: "rent", d: 1, m: 540, st: "expected" },
+  { id: 33, r: "stretch", d: 1, m: 750, st: "expected" },
+  { id: 34, r: "bp", d: 1, m: 1140, st: "expected" },
+  { id: 35, r: "door", d: 1, m: 1260, st: "expected" },
+];
+
+const CAL = [
+  { d: -1, s: 1110, e: 1170, t: "Yoga" },
+  { d: 0, s: 570, e: 585, t: "Standup" },
+  { d: 0, s: 840, e: 900, t: "Dentist" },
+  { d: 0, s: 1170, e: 1290, t: "Dinner with Jo" },
+  { d: 1, s: 600, e: 660, t: "Budget review" },
+];
+
+const NTB = [
+  { r: "cushions", last: "Yesterday 15:31 by Sam" },
+  { r: "dish", last: "Open now" },
+  { r: "car", last: "Yesterday 20:21 by you" },
+  { r: "keys", last: "This morning 08:32 by you" },
+];
+
+const OPEN = ["overdue", "due"];
+const stateWord = { completed: "Completed", skipped: "Skipped", missed: "Missed", nofire: "Didn't fire", due: "Due", overdue: "Overdue", waiting: "Waiting", expected: "Expected", tentative: "Expected" };
+
+function metaLine(o) {
+  const bits = [];
+  if (o.st === "completed") bits.push(`${o.by === "You" ? "You" : o.by} completed it at ${o.at}`);
+  if (o.st === "skipped") bits.push(`Skipped by ${o.by === "You" ? "you" : o.by}${o.note ? `: "${o.note}"` : ""}`);
+  if (o.st === "overdue") bits.push(`Overdue since ${o.since}`);
+  if (o.claim) bits.push(o.claim === "You" ? `You claimed it` : `${o.claim} claimed it at ${o.claimAt}`);
+  if (o.turn) bits.push(`${o.turn}'s turn`);
+  if (o.snoozed) bits.push(`Snoozed until ${o.snoozed}`);
+  if (o.declined && o.declined.length) bits.push(`${o.declined.join(", ")} can't this time`);
+  if (o.why) bits.push(o.why);
+  if (o.undone) bits.push("Undone");
+  return bits.join(" · ");
+}
+function tagFor(o) {
+  if (o.st === "overdue") return html`<span class="tag overdue">Overdue</span>`;
+  if (o.st === "due") return html`<span class="tag due">Due</span>`;
+  if (o.st === "waiting") return html`<span class="tag waiting">Waiting</span>`;
+  if (o.st === "tentative") return html`<span class="tag plain">If someone is home</span>`;
+  return null;
+}
+function Glyph({ o }) {
+  const c = { completed: "var(--pos)", skipped: "var(--faint)", missed: "var(--neg)", nofire: "var(--faint)", overdue: "var(--neg)", due: "var(--accent)", waiting: "var(--wait)", expected: lc(R[o.r].list), tentative: lc(R[o.r].list) }[o.st];
+  const s = { width: 14, height: 14, viewBox: "0 0 14 14", fill: "none", stroke: c, "stroke-width": 1.6 };
+  if (o.st === "completed") return html`<svg ...${s}><circle cx="7" cy="7" r="6" fill=${c} stroke="none"/><path d="M4 7.2l2 2 4-4.4" stroke="#fff"/></svg>`;
+  if (o.st === "skipped") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5"/><path d="M4.5 7h5"/></svg>`;
+  if (o.st === "missed") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5"/><path d="M5 5l4 4M9 5l-4 4"/></svg>`;
+  if (o.st === "nofire") return html`<svg ...${s} stroke-dasharray="1.6 1.8"><circle cx="7" cy="7" r="5.5"/></svg>`;
+  if (o.st === "waiting") return html`<svg ...${s}><circle cx="7" cy="7" r="5.5" stroke-dasharray="2.4 1.6"/><path d="M7 4.2V7l1.8 1.2"/></svg>`;
+  if (o.st === "expected" || o.st === "tentative") return html`<svg ...${s} stroke-dasharray=${o.st === "tentative" ? "2 1.6" : null}><circle cx="7" cy="7" r="5.5"/></svg>`;
+  return html`<svg ...${s}><circle cx="7" cy="7" r="6" fill=${c} stroke="none"/><path d="M7 3.8v3.8" stroke="#fff"/><circle cx="7" cy="10" r=".6" fill="#fff" stroke="#fff"/></svg>`;
+}
+function AppIcon({ size = 18 }) {
+  return html`<svg class="appicon" width=${size} height=${size} viewBox="0 0 18 18"><rect x="1" y="1" width="16" height="16" rx="4" fill="var(--accent)"/><path d="M5 9.3l2.6 2.6L13 6.3" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+// ---------- actions (in-memory stubs) ----------
+function useOccurrences() {
+  const [occ, setOcc] = useState(INITIAL.map((o) => ({ ...o })));
+  const act = (id, kind, arg) => setOcc((all) => all.map((o) => {
+    if (o.id !== id) return o;
+    const prev = o.prev || { ...o };
+    switch (kind) {
+      case "done": return { ...o, prev, st: "completed", by: "You", at: fmt(NOW.m), snoozed: null, since: null, why: null, undone: false };
+      case "done-early": return { ...o, prev, st: "completed", by: "You", at: "Wed " + fmt(NOW.m), why: "Completed early" };
+      case "skip": return { ...o, prev, st: "skipped", by: "You", note: arg || null, snoozed: null, since: null, why: null };
+      case "snooze": return { ...o, prev, snoozed: arg };
+      case "claim": return { ...o, prev, claim: "You", claimAt: fmt(NOW.m) };
+      case "release": return { ...o, prev, claim: null };
+      case "decline": return { ...o, prev, declined: [...(o.declined || []), "You"] };
+      case "stopwait": return { ...o, prev, st: "nofire", why: "You stopped the wait" };
+      case "undo": return { ...o.prev, prev: null, undone: true };
+      default: return o;
+    }
+  }));
+  return [occ, act];
+}
+
+function SnoozeMenu({ o, act, close }) {
+  const r = R[o.r];
+  const one = r.pri === "Medium" && o.st === "overdue" ? "10 minutes" : r.pri === "Medium" ? "1 hour" : r.pri === "Low" || r.pri === "Minimum" ? "1 day" : "10 minutes";
+  const pick = (v) => { act(o.id, "snooze", v); close(); };
+  return html`<div class="menu" role="menu" style="top: 100%; left: 0; margin-top: 4px;">
+    <button role="menuitem" onClick=${() => pick(one === "10 minutes" ? "17:50" : one === "1 hour" ? "18:40" : "tomorrow 17:40")}>${one} (this priority's interval)</button>
+    <button role="menuitem" onClick=${() => pick("18:40")}>1 hour</button>
+    <button role="menuitem" onClick=${() => pick("20:00")}>Until 20:00</button>
+    <button role="menuitem" onClick=${() => pick("you get home")}>Until I get home</button>
+    <button role="menuitem" onClick=${() => pick("tomorrow 07:00")}>Until tomorrow 07:00</button>
+    <hr/>
+    <button role="menuitem" class="faint" onClick=${close}>Pick a time…</button>
+    ${r.exp !== "None" && r.exp !== "When it fires again" ? html`<div class="meta" style="padding: 4px 10px;">Expires ${r.exp.toLowerCase()}. You'll get a last-chance alert 10 minutes before.</div>` : null}
+    ${o.claim && o.claim !== "You" ? html`<div class="meta" style="padding: 4px 10px; color: var(--wait);">${o.claim} has claimed this. Snoozing only quiets your alerts.</div>` : null}
+  </div>`;
+}
+
+function Actions({ o, act, compact }) {
+  const [menu, setMenu] = useState(null);
+  const r = R[o.r];
+  const cls = compact ? "btn sm" : "btn";
+  if (OPEN.includes(o.st)) {
+    const third = r.shared
+      ? (o.claim === "You" ? html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "release"); }}>Release</button>`
+        : o.claim ? html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "decline"); }}>Can't do it</button>`
+        : html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "claim"); }}>Claim</button>`)
+      : html`<button class=${cls} onClick=${(e) => { e.stopPropagation(); act(o.id, "skip"); }}>Skip</button>`;
+    return html`<div class="acts" style="position: relative;" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls + " primary"} onClick=${() => act(o.id, "done")}>Done</button>
+      <span style="position: relative;"><button class=${cls} aria-haspopup="menu" aria-expanded=${menu === "snooze"} onClick=${() => setMenu(menu === "snooze" ? null : "snooze")}>Snooze ▾</button>
+        ${menu === "snooze" ? html`<${SnoozeMenu} o=${o} act=${act} close=${() => setMenu(null)} />` : null}</span>
+      ${third}
+      ${!compact ? html`<span style="position: relative;"><button class=${cls + " ghost"} aria-haspopup="menu" onClick=${() => setMenu(menu === "more" ? null : "more")}>More ▾</button>
+        ${menu === "more" ? html`<div class="menu" role="menu" style="top: 100%; right: 0; margin-top: 4px;">
+          ${r.shared ? html`<button role="menuitem" onClick=${() => { act(o.id, "skip", "Not needed today"); setMenu(null); }}>Skip for everyone…</button>
+            <button role="menuitem" onClick=${() => { act(o.id, "decline"); setMenu(null); }}>I can't do it this time</button>` : null}
+          <button role="menuitem" onClick=${() => { act(o.id, "done"); setMenu(null); }}>Done at a different time…</button>
+          <button role="menuitem" onClick=${() => setMenu(null)}>Pause this reminder…</button>
+          <hr/><button role="menuitem" onClick=${() => { setMenu(null); HOOKS.edit(o.r); }}>Edit reminder…</button>
+        </div>` : null}</span>` : null}
+    </div>`;
+  }
+  if (o.st === "waiting") {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls} onClick=${() => act(o.id, "done")}>Done anyway</button>
+      <button class=${cls + " ghost"} onClick=${() => act(o.id, "stopwait")}>Stop waiting</button>
+    </div>`;
+  }
+  if (o.st === "expected" || o.st === "tentative") {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      <button class=${cls} onClick=${() => act(o.id, "done-early")}>Complete early</button>
+      <button class=${cls} onClick=${() => act(o.id, "skip", "Skipped ahead of time")}>Skip ahead</button>
+      <button class=${cls + " ghost"} onClick=${() => act(o.id, "snooze", "its time + 1 hour")}>Snooze ahead</button>
+      ${r.shared ? html`<button class=${cls + " ghost"} onClick=${() => act(o.id, "decline")}>I can't</button>` : null}
+    </div>`;
+  }
+  if (o.st === "completed" || o.st === "skipped" || o.st === "missed" || (o.st === "nofire" && o.prev)) {
+    return html`<div class="acts" onClick=${(e) => e.stopPropagation()}>
+      ${o.prev ? html`<button class=${cls} onClick=${() => act(o.id, "undo")}>Undo</button>` : null}
+      <button class=${cls + " ghost"}>${o.st === "missed" ? "It was done… (correct)" : "Correct the time…"}</button>
+    </div>`;
+  }
+  return null;
+}
+
+function Detail({ o, act }) {
+  if (!o) return null;
+  const r = R[o.r];
+  const list = LISTS.find((l) => l.id === r.list);
+  return html`<div class="detail">
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <span class="chip"><span class="dot" style=${`background: ${lc(r.list)}`}></span>${list.name}</span>
+      <span class="chip">·</span><span class="chip">${r.pri} priority</span>
+      ${tagFor(o)}
+    </div>
+    <h3>${r.title}</h3>
+    <div class="meta">${REL[o.d]}, ${fmt(o.m)} · ${stateWord[o.st]}${metaLine(o) ? " · " + metaLine(o) : ""}</div>
+    <${Actions} o=${o} act=${act} />
+    <dl>
+      <dt>Trigger</dt><dd>${r.trig}</dd>
+      <dt>Expires</dt><dd>${r.exp}</dd>
+      ${r.rotation ? html`<dt>Rotation</dt><dd>${r.rotation}</dd>` : null}
+      <dt>Shared</dt><dd>${list.note}</dd>
+      ${r.fake ? html`<dt>Can it be faked?</dt><dd><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></dd>` : null}
+      ${r.note ? html`<dt>Note</dt><dd>${r.note}</dd>` : null}
+    </dl>
+    <${RelLine} id=${o.r}/>
+    <div class="hist"><div class="sechead">Recently</div>
+      ${o.r === "tomatoes" ? html`<div>Sun 16:05 · completed by Sam</div><div>Thu 17:40 · completed by you, 40 min late</div>` : null}
+      ${o.r === "dish" ? html`<div>Mon 21:10 · completed by Robin</div><div>Sat 13:02 · completed by you</div>` : null}
+      ${o.r === "bp" ? html`<div>Today 07:12 · completed by you</div><div>Yesterday 19:02 · completed by you</div>` : null}
+      ${!["tomatoes", "dish", "bp"].includes(o.r) ? html`<div>No earlier occurrences in the last 30 days</div>` : null}
+    </div>
+  </div>`;
+}
+
+function SourcesBanner() {
+  return html`<div class="banner"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1l6 11H1z" fill="var(--wait)"/><path d="M7 5v3.2" stroke="#fff" stroke-width="1.5"/><circle cx="7" cy="10" r=".8" fill="#fff"/></svg>
+    <span class="grow">Google Calendar needs you to sign in again on this computer. Calendar events and calendar triggers are paused here.</span>
+    <button class="btn sm">Sign in</button></div>`;
+}
+
+function NotTimeBased() {
+  return html`<div class="ntb">
+    <div class="sechead">Reminders that aren't time-based</div>
+    <table><thead><tr><th>Reminder</th><th>When</th><th>Last</th><th>Faking</th></tr></thead>
+      <tbody>${NTB.map((n) => { const r = R[n.r]; return html`<tr>
+        <td><span style="display: inline-flex; gap: 7px; align-items: center;"><span class="dot" style=${`background: ${lc(r.list)}`}></span><span class="row-title">${r.title}</span></span></td>
+        <td>${r.trig}</td><td class="muted">${n.last}</td><td><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></td></tr>`; })}</tbody></table>
+  </div>`;
+}
+
+const PRIS = ["Minimum", "Low", "Medium", "High", "Maximum"];
+R.lawn = { title: "Water the lawn", list: "garden", pri: "Medium", trig: "Every 2 days at 07:30", exp: "When it fires again", shared: true };
+R.passport = { title: "Book a passport photo", list: "personal", pri: "Low", trig: "Once, Monday 28 September at 12:00", exp: "None" };
+const BOARD_STATIC = {
+  bp: ["expected", "Next: today 19:00"], vitd: ["expected", "Next: tomorrow 08:00"], plumber: ["finished", "Finished today, by you"],
+  stretch: ["expected", "Next: tomorrow 12:30"], tomatoes: ["expected", "Next: Saturday, 3 days after it's done"], dish: ["watching", "Watching: the dishwasher's webhook"],
+  bins: ["expected", "Next: today 18:00, if someone is home · Robin's turn"], sprinkler: ["expected", "Next: tomorrow 06:00, unless rain is forecast"],
+  cushions: ["watching", "Watching: weather warnings for Home"], car: ["watching", "Watching: the car's Bluetooth"], keys: ["watching", "Watching: leaving Home"],
+  cleaning: ["finished", "Finished today, by you"], rent: ["expected", "Next: tomorrow 09:00"], door: ["expected", "Next: today 21:00"],
+  lawn: ["paused", "Paused for everyone until Monday 5 October"], passport: ["finished", "Finished Monday 28 September, by you"],
+};
+const COLS = [["overdue", "Overdue"], ["due", "Due"], ["waiting", "Waiting"], ["expected", "Expected"], ["watching", "Watching"], ["paused", "Paused"], ["finished", "Finished"]];
+const boardItems = (occ) => Object.keys(R).map((id) => {
+  const open = occ.find((o) => o.r === id && ["overdue", "due", "waiting"].includes(o.st));
+  if (open) return { id, col: open.st, line: metaLine(open) || `${stateWord[open.st]} since ${fmt(open.m)}`, o: open };
+  const s = BOARD_STATIC[id];
+  return { id, col: s[0], line: s[1], o: null };
+});
+const passes = (f, id) => !f.lists[R[id].list] && !f.pris[R[id].pri];
+const visible = (occ, f) => occ.filter((o) => passes(f, o.r));
+const openOf = (occ, st) => occ.filter((o) => o.st === st);
+const HOUR = 46, START = 6;
+function lanes(items) {
+  const sorted = [...items].sort((a, b) => a.m - b.m);
+  const ends = [];
+  sorted.forEach((o) => {
+    const top = (o.m - START * 60) / 60 * HOUR;
+    let lane = ends.findIndex((e) => e <= top);
+    if (lane === -1) { lane = ends.length; ends.push(0); }
+    ends[lane] = top + 24;
+    o._lane = lane;
+  });
+  return { items: sorted, n: Math.max(1, ends.length) };
+}
+
+// ---------- version 3: hooks the prototype shell sets ----------
+const HOOKS = { edit: () => {}, go: () => {}, settings: () => {}, share: () => {}, tip: () => {}, snoozeAll: () => {}, snoozed: null, endSnooze: () => {} };
+
+// ---------- History data (sample, generated from fixed seeds) ----------
+function seeded(seed) { let s = seed; return () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; }; }
+const OUTS = ["ontime", "late", "skipped", "missed", "nofire"];
+const OUT_WORD = { ontime: "Done on time", late: "Done late", skipped: "Skipped", missed: "Missed", nofire: "Didn't fire" };
+const HIST_SPEC = {
+  bp: { n: 30, p: [0.83, 0.12, 0.02, 0.03, 0], snz: 0, ttd: "4 min" },
+  vitd: { n: 30, p: [0.6, 0.2, 0.05, 0.15, 0], snz: 1, ttd: "1 h 10 min" },
+  stretch: { n: 22, p: [0.45, 0.15, 0.2, 0.2, 0], snz: 2, ttd: "35 min" },
+  tomatoes: { n: 10, p: [0.5, 0.4, 0, 0.1, 0], snz: 1, ttd: "50 min" },
+  dish: { n: 21, p: [0.7, 0.2, 0, 0.1, 0], snz: 1, ttd: "25 min" },
+  bins: { n: 5, p: [0.6, 0.2, 0, 0.001, 0.2], snz: 0, ttd: "12 min", everyone: 1 },
+  door: { n: 30, p: [0.9, 0.05, 0, 0.05, 0], snz: 0, ttd: "6 min" },
+  sprinkler: { n: 30, p: [0.55, 0.05, 0, 0.05, 0.35], snz: 0, ttd: "3 min" },
+  car: { n: 14, p: [0.8, 0.1, 0, 0.1, 0], snz: 0, ttd: "9 min" },
+  keys: { n: 24, p: [0.95, 0, 0, 0.05, 0], snz: 0, ttd: "1 min" },
+  cushions: { n: 2, p: [1, 0, 0, 0, 0], snz: 0, ttd: "11 min" },
+  rent: { n: 1, p: [1, 0, 0, 0, 0], snz: 0, ttd: "2 h" },
+};
+const HIST = {};
+Object.keys(HIST_SPEC).forEach((id, i) => {
+  const sp = HIST_SPEC[id], rnd = seeded(7919 * (i + 3));
+  const seq = [];
+  for (let k = 0; k < sp.n; k++) { const x = rnd(); let acc = 0, o = "ontime"; for (let j = 0; j < 5; j++) { acc += sp.p[j]; if (x < acc) { o = OUTS[j]; break; } } seq.push(o); }
+  if (sp.everyone) seq[1] = "missed";
+  const c = {}; OUTS.forEach((o) => (c[o] = seq.filter((s) => s === o).length));
+  const done = c.ontime + c.late, base = done + c.missed;
+  HIST[id] = { seq, c, done, base, rel: base ? Math.round(done / base * 100) : null, onTime: base ? Math.round(c.ontime / base * 100) : null, snz: sp.snz, ttd: sp.ttd, everyone: sp.everyone ? 1 : 0 };
+});
+function RelLine({ id }) {
+  const h = HIST[id];
+  if (!h) return null;
+  return html`<div class="relline"><span>Last 30 days: done ${h.done} of ${h.base}${h.c.late ? `, ${h.c.late} late` : ""}${h.c.skipped ? ` · ${h.c.skipped} skipped` : ""}</span><button class="linkbtn" onClick=${() => HOOKS.go("history")}>History ›</button></div>`;
+}
+const GROUP = [
+  { list: "household", since: "31 August", rows: [
+    { who: "You", done: 19, turns: 4, dec: 1, miss: 0 },
+    { who: "Sam", done: 17, turns: 2, dec: 3, miss: 1 },
+    { who: "Robin", done: 10, turns: 0, dec: 2, miss: 2, note: "Has access since 12 September; counted from then." },
+  ] },
+  { list: "garden", since: "31 August", rows: [
+    { who: "You", done: 9, turns: null, dec: 0, miss: null },
+    { who: "Sam", done: 11, turns: null, dec: 1, miss: null },
+  ] },
+];
+
+function ReminderDetail({ id, occ, act }) {
+  const r = R[id], b = boardItems(occ).find((x) => x.id === id), list = LISTS.find((l) => l.id === r.list);
+  const colName = COLS.find((c) => c[0] === b.col)[1];
+  return html`<div class="detail">
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <span class="chip"><span class="dot" style=${`background: ${lc(r.list)}`}></span>${list.name}</span><span class="chip">·</span><span class="chip">${r.pri} priority</span>
+      <span class=${"tag " + (b.col === "overdue" ? "overdue" : b.col === "due" ? "due" : b.col === "waiting" ? "waiting" : "plain")}>${colName}</span>
+    </div>
+    <h3>${r.title}</h3>
+    <div class="meta">${b.line}</div>
+    <${RelLine} id=${id}/>
+    <div class="acts"><button class="btn primary" onClick=${() => HOOKS.edit(id)}>Edit reminder…</button>${b.col === "paused" ? html`<button class="btn">Resume</button>` : html`<button class="btn">Pause…</button>`}<button class="btn ghost">Duplicate</button></div>
+    ${b.o ? html`<div style="display: grid; gap: 6px;"><div class="sechead">${b.o.st === "waiting" ? "Waiting now" : "Open occurrence"}</div><${Actions} o=${b.o} act=${act}/></div>` : null}
+    <dl>
+      <dt>Trigger</dt><dd>${r.trig}</dd>
+      <dt>Expires</dt><dd>${r.exp}</dd>
+      ${r.rotation ? html`<dt>Rotation</dt><dd>${r.rotation}</dd>` : null}
+      <dt>Shared</dt><dd>${list.note}</dd>
+      ${r.fake ? html`<dt>Can it be faked?</dt><dd><span class=${"fake " + r.fake[0]}>${r.fake[1]}</span></dd>` : null}
+      ${r.note ? html`<dt>Note</dt><dd>${r.note}</dd>` : null}
+    </dl>
+  </div>`;
+}
+
+// ---------- the reminder editor (three variants) ----------
+const PICK = [
+  { g: "Time", items: [["Schedule", "At set times by the calendar and clock", "none"], ["Countdown", "A set time after it was last done", "none"], ["Sunrise or sunset", "At Home", "none"]] },
+  { g: "Places", items: [["Arrive at a place", "Phones only; about 30 min late without Google Play", "difficult"], ["Leave a place", "Phones only", "difficult"], ["At or not at a place", "Condition", "difficult"]] },
+  { g: "Calendar", items: [["Before or after an event", "Your Google calendars", "none"], ["During a busy event", "Condition", "none"]] },
+  { g: "Weather", items: [["Weather warning issued", "Can reach you 15 minutes late or more; not a safety alert", "none"], ["Forecast", "Condition only", "none"]] },
+  { g: "Connections", items: [["Bluetooth device connects or disconnects", "Portable devices only", "moderate"], ["Wi-Fi network joined or left", "Open networks are easy to fake", "easy"], ["USB device plugged in", "No device holding this list can sense USB", "moderate", true]] },
+  { g: "Other", items: [["Webhook received", "From another app or service", "difficult"]] },
+];
+function Picker({ kind, onPick, onClose }) {
+  return html`<div class="picker" role="dialog" aria-label=${kind === "trigger" ? "Add a trigger" : "Add a condition"}>
+    <div class="pickhead"><b>${kind === "trigger" ? "Add a trigger" : "Add a condition"}</b><span class="meta">${kind === "trigger" ? "What makes it fire" : "What must also be true"}</span><button class="btn sm ghost" onClick=${onClose} aria-label="Close">✕</button></div>
+    ${PICK.map((grp) => html`<div class="pickgrp"><div class="sechead">${grp.g}</div>
+      ${grp.items.map(([name, note, fake, warn]) => html`<button class="pickrow" onClick=${() => { onPick(name); onClose(); }}>
+        <span><span class="row-title">${name}</span><div class=${"meta" + (warn ? " warntext" : "")}>${warn ? "⚠ " : ""}${note}</div></span>
+        <span class=${"fake " + fake}>${fake === "none" ? "Can't be faked" : fake[0].toUpperCase() + fake.slice(1) + " to fake"}</span></button>`)}</div>`)}
+  </div>`;
+}
+function edModel(id) {
+  const r = R[id] || {};
+  const m = { id, title: r.title || "", list: r.list || "personal", pri: r.pri || "Medium", triggers: [r.trig || "Today at 18:00"], conds: [], ifNot: "wait", waitUntil: "End of the day", expiry: r.exp || "When it fires again", overdue: "Priority default (1 hour)", turns: r.rotation || "", note: r.note || "", paused: "" };
+  if (id === "bins") Object.assign(m, { triggers: ["Every Wednesday at 18:00"], conds: ["Someone is at Home"], waitUntil: "23:59", note: "Recycling goes out on alternate weeks.", turns: "Robin → you → Sam" });
+  if (id === "cleaning") Object.assign(m, { triggers: ["Today at 17:00"], conds: ["At High Street"], waitUntil: "20:00" });
+  return m;
+}
+function Field({ label, children, hint }) {
+  return html`<label class="field"><span class="flabel">${label}</span>${children}${hint ? html`<span class="meta">${hint}</span>` : null}</label>`;
+}
+function ListSel({ m, set }) { return html`<select class="inp" value=${m.list} onChange=${(e) => set({ ...m, list: e.target.value })}>${LISTS.map((l) => html`<option value=${l.id}>${l.name} (${l.note})</option>`)}</select>`; }
+function PriSel({ m, set }) { return html`<select class="inp" value=${m.pri} onChange=${(e) => set({ ...m, pri: e.target.value })}>${PRIS.map((p) => html`<option>${p}</option>`)}</select>`; }
+function Chips({ items, onRemove, onAdd, addLabel }) {
+  return html`<div class="chips">${items.map((t, i) => html`<span class="tchip">${t}<button aria-label=${"Remove " + t} onClick=${() => onRemove(i)}>✕</button></span>`)}<button class="btn sm ghost" onClick=${onAdd}>+ ${addLabel}</button></div>`;
+}
+function WaitCtl({ m, set }) {
+  return html`<div class="radios">
+    <label><input type="radio" name="ifnot" id="ifnot-wait" checked=${m.ifNot === "wait"} onChange=${() => set({ ...m, ifNot: "wait" })}/> Wait until they are, until <input class="inp sm" value=${m.waitUntil} onInput=${(e) => set({ ...m, waitUntil: e.target.value })}/></label>
+    <label><input type="radio" name="ifnot" id="ifnot-pass" checked=${m.ifNot === "pass"} onChange=${() => set({ ...m, ifNot: "pass" })}/> Let the trigger pass</label>
+  </div>`;
+}
+function useEditorModel(id) {
+  const [m, set] = useState(edModel(id));
+  const [pick, setPick] = useState(null);
+  const addPicked = (name) => set((cur) => pick === "trigger" ? { ...cur, triggers: [...cur.triggers, name] } : { ...cur, conds: [...cur.conds, name] });
+  return { m, set, pick, setPick, addPicked };
+}
+const edTitle = (id) => id ? "Edit reminder" : "New reminder";
+function EdFooter({ id, close }) {
+  return html`<div class="edfoot">${id ? html`<button class="btn ghost">Delete…</button>` : null}<span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn primary" onClick=${close}>${id ? "Save" : "Create"}</button></div>`;
+}
+function FoldSec({ k, name, sum, open, setOpen, children }) {
+  return html`<div class=${"fold" + (open === k ? " open" : "")}>
+    <button class="foldhead" aria-expanded=${open === k} onClick=${() => setOpen(open === k ? null : k)}><span class="row-title">${name}</span><span class="meta">${sum}</span><span class="caret">${open === k ? "▾" : "▸"}</span></button>
+    ${open === k ? html`<div class="foldbody">${children}</div>` : null}</div>`;
+}
+function Strip({ seq }) {
+  return html`<span class="strip" role="img" aria-label=${OUTS.map((o) => `${seq.filter((s) => s === o).length} ${OUT_WORD[o].toLowerCase()}`).join(", ")}>
+    ${seq.map((s, i) => html`<span class=${"cell o-" + s} title=${`${OUT_WORD[s]} · ${seq.length - i} occurrence${seq.length - i === 1 ? "" : "s"} ago`}></span>`)}</span>`;
+}
+
+const NOGMS = { on: false };
+const SECTIONS = [["you", "You"], ["priorities", "Priorities"], ["sources", "Sources"], ["device", "This computer"], ["account", "Account"], ["groups", "Groups"], ["server", "Server"], ["calendars", "Calendars"], ["about", "About"]];
+function Toggle({ id, on, label }) { return html`<label class="tog"><input type="checkbox" id=${id} checked=${on}/> ${label}</label>`; }
+function SetRow({ label, hint, children }) {
+  return html`<div class="setrow"><div><div class="row-title">${label}</div>${hint ? html`<div class="meta">${hint}</div>` : null}</div><div class="setctl">${children}</div></div>`;
+}
+function SettingsYou() {
+  const [cap, setCap] = useState("Maximum");
+  const [ret, setRet] = useState("No limit");
+  return html`<div class="setpage">
+    <h4>Reminders from other users</h4>
+    <${SetRow} label="Highest priority others can reach you at" hint="Others' reminders above this are treated as this. Your own overrides aren't capped.">
+      <select class="inp" id="cap" value=${cap} onChange=${(e) => setCap(e.target.value)}>${PRIS.map((p) => html`<option>${p}</option>`)}</select></${SetRow}>
+    ${["Minimum", "Low"].includes(cap) ? html`<div class="warnbox">Reminders from others may be easy to miss at ${cap}. Medium or higher is recommended.</div>` : null}
+    <h4>Quiet hours</h4>
+    <${SetRow} label="Weeknights, 22:00 to 07:00" hint="A snooze-all that repeats on a schedule. Your phone's own Do Not Disturb schedule is honoured too."><button class="btn sm">Change…</button></${SetRow}>
+    <${SetRow} label="Weekends, 23:00 to 08:30"><button class="btn sm">Change…</button></${SetRow}>
+    <${SetRow} label="Include maximum priority" hint="Off: maximum-priority reminders still get through."><${Toggle} id="qh-max" on=${false} label=""/></${SetRow}>
+    <button class="btn sm ghost" style="justify-self: start;">+ Add quiet hours</button>
+    <h4>History</h4>
+    <${SetRow} label="Retention limit for your personal list" hint="Older history is deleted. Current reminders are kept.">
+      <select class="inp" id="ret" value=${ret} onChange=${(e) => setRet(e.target.value)}>${["No limit", "30 days", "90 days", "1 year", "2 years", "Custom…"].map((x) => html`<option>${x}</option>`)}</select></${SetRow}>
+    <div class="note">History you share, on lists shared with others, may be kept longer on the server and on other people's devices. A group's lists follow the group's limit.</div>
+    ${ret !== "No limit" ? html`<div class="warnbox">Nothing is deleted for 7 days. On 7 October, history on your personal list older than ${ret} will be deleted.</div>` : null}
+  </div>`;
+}
+function SettingsDevice() {
+  return html`<div class="setpage">
+    <${SetRow} label="Name" hint="Only your own devices see it."><input class="inp" id="devname" value="Desk computer"/></${SetRow}>
+    <${SetRow} label="This computer is" hint="Only portable devices count for Wi-Fi and Bluetooth sources, unless a source says otherwise.">
+      <div class="radios"><label><input type="radio" name="port" id="port-s" checked/> Stationary: it stays in one place</label><label><input type="radio" name="port" id="port-p"/> Portable: it goes where I go</label></div></${SetRow}>
+    <${SetRow} label="Loudest alert on this computer" hint="For example, no alarms here while your phone still rings.">
+      <select class="inp" id="loudest"><option>Alarm</option><option selected>Insistent</option><option>Gentle</option><option>Silent</option></select></${SetRow}>
+    <${SetRow} label="Quiet this computer" hint="Only this computer goes silent. Your other devices still alert."><button class="btn sm">Quiet until…</button></${SetRow}>
+    <${SetRow} label="Reminder lists on this computer">${LISTS.map((l) => html`<label class="tog"><input type="checkbox" id=${"hold-" + l.id} checked/> ${l.name}</label>`)}</${SetRow}>
+    <${SetRow} label="Start at login"><${Toggle} id="autostart" on=${true} label=""/></${SetRow}>
+  </div>`;
+}
+function SettingsAccount() {
+  const [code, setCode] = useState(false);
+  return html`<div class="setpage">
+    <${SetRow} label="You" hint="Your username, display name and avatar are what others see."><button class="btn sm">Edit profile…</button></${SetRow}>
+    <${SetRow} label="Password" hint="It unlocks your keys on a new device. The server never sees it."><button class="btn sm">Change password…</button></${SetRow}>
+    <h4>Your devices</h4>
+    <table class="ltable"><tbody>
+      <tr><td><b>Desk computer</b> <span class="meta">this computer</span></td><td class="meta">Stationary</td><td class="meta">Now</td><td></td></tr>
+      <tr><td><b>Pixel 9</b></td><td class="meta">Portable</td><td class="meta">3 minutes ago</td><td><button class="btn sm ghost">Remove…</button></td></tr>
+      <tr><td><b>Old laptop</b></td><td class="meta">Portable</td><td class="meta">41 days ago</td><td><button class="btn sm ghost">Remove…</button></td></tr>
+    </tbody></table>
+    <div class="note">Removing a device changes the keys of every list it held, so it can't read anything new.</div>
+    <${SetRow} label="Sign in on another device" hint="Scan this code from the new device, or open the link. It carries this server's certificate fingerprint."><button class="btn sm" onClick=${() => setCode(!code)}>${code ? "Hide code" : "Show sign-in code"}</button></${SetRow}>
+    ${code ? html`<div class="qrbox"><${FakeQR}/><div class="meta">hab://home.lan:8443/join?fp=4F:9A:…:C2<br/>The new device still needs your password, or your approval here.</div></div>` : null}
+    <h4>Recovery</h4>
+    <${SetRow} label="Escrow is off" hint="If you forget your password and lose every device, your personal reminders can't be recovered."><button class="btn sm">Turn on escrow…</button></${SetRow}>
+    <h4>Leaving</h4>
+    <${SetRow} label="Leave this server" hint="This computer keeps your personal lists and becomes standalone. You can keep copies of shared lists without their history."><button class="btn sm ghost">Leave server…</button></${SetRow}>
+    <${SetRow} label="Delete your account" hint="Removes you from every shared list and deletes your data on the server."><button class="btn sm ghost danger">Delete account…</button></${SetRow}>
+  </div>`;
+}
+function SettingsGroups() {
+  return html`<div class="setpage">
+    <h4>Invitations</h4>
+    <div class="invite"><div><b>Sam</b> invited you to the group <b>Allotment</b><div class="meta">3 members · you'd see its lists and its members</div></div><div class="acts"><button class="btn sm primary">Accept</button><button class="btn sm">Decline</button></div></div>
+    <h4>Household <span class="meta" style="font-weight: 400;">You're a group admin</span></h4>
+    <table class="ltable"><tbody>
+      <tr><td><b>You</b></td><td class="meta">Group admin</td><td></td></tr>
+      <tr><td><b>Sam</b></td><td class="meta">Group admin</td><td><button class="btn sm ghost">⋯</button></td></tr>
+      <tr><td><b>Robin</b></td><td class="meta">Member</td><td><button class="btn sm ghost">⋯</button></td></tr>
+      <tr><td><b>Kitchen</b> <span class="meta">shared screen</span></td><td class="meta">Member</td><td><button class="btn sm ghost">⋯</button></td></tr>
+      <tr><td><b>Jo</b></td><td class="meta">Invited, not answered yet</td><td><button class="btn sm ghost">Cancel</button></td></tr>
+    </tbody></table>
+    <div class="acts"><button class="btn sm">Invite someone…</button><button class="btn sm ghost">Leave group…</button></div>
+    <${SetRow} label="Retention limit for Household's lists" hint="Group admins set it. Changes are announced 7 days ahead."><select class="inp" id="gret"><option>No limit</option><option selected>1 year</option><option>2 years</option></select></${SetRow}>
+    <button class="btn sm ghost" style="justify-self: start;">+ Create a group</button>
+  </div>`;
+}
+function SettingsServer() {
+  const [inv, setInv] = useState(false);
+  return html`<div class="setpage">
+    <div class="note">You're a server admin on home.lan. You can't read anyone's reminders, or change who can see a list.</div>
+    <h4>Invites</h4>
+    <div class="acts"><button class="btn sm" onClick=${() => setInv(!inv)}>${inv ? "Hide" : "Make an invite…"}</button></div>
+    ${inv ? html`<div class="qrbox"><${FakeQR}/><div class="meta">Single use · expires 7 October<br/>Also add them to: <label class="tog"><input type="checkbox" id="inv-house" checked/> Household</label></div></div>` : null}
+    <table class="ltable"><tbody><tr><td>Invite for Jo</td><td class="meta">expires 5 October</td><td><button class="btn sm ghost">Revoke</button></td></tr></tbody></table>
+    <h4>Accounts</h4>
+    <table class="ltable"><tbody>
+      <tr><td><b>You</b></td><td class="meta">3 devices</td><td class="meta">Server admin</td><td></td></tr>
+      <tr><td><b>Sam</b></td><td class="meta">2 devices</td><td class="meta">Server admin</td><td><button class="btn sm ghost">⋯</button></td></tr>
+      <tr><td><b>Robin</b></td><td class="meta">1 device · reset 28 September</td><td></td><td><button class="btn sm ghost">⋯</button></td></tr>
+      <tr><td><b>Kitchen</b></td><td class="meta">1 device · shared screen</td><td></td><td><button class="btn sm ghost">⋯</button></td></tr>
+    </tbody></table>
+    <div class="note">Reset is for someone who has lost every device and their password and has no escrow. They start again with new keys, and each shared list's managers verify them before it comes back.</div>
+    <h4>Escrow requests</h4>
+    <div class="invite"><div><b>Robin</b> asks to recover their personal reminders<div class="meta">Confirm it's really Robin, in person, before releasing.</div></div><div class="acts"><button class="btn sm">Release…</button><button class="btn sm ghost">Decline</button></div></div>
+    <h4>History</h4>
+    <${SetRow} label="Server retention limit" hint="Caps every list on this server. Shown to people when they join."><select class="inp" id="sret"><option>No limit</option><option>1 year</option><option selected>2 years</option></select></${SetRow}>
+  </div>`;
+}
+function SettingsCalendars() {
+  return html`<div class="setpage">
+    <div class="warnbox">Google Calendar needs you to sign in again on this computer.</div>
+    <${SetRow} label="Google account" hint="Signing in opens your web browser."><button class="btn sm primary">Sign in again…</button></${SetRow}>
+    <${SetRow} label="Calendars laid over the timeline">${["Personal", "Work", "Family", "US holidays"].map((c, i) => html`<label class="tog"><input type="checkbox" id=${"cal-" + i} checked=${i < 3}/> ${c}</label>`)}</${SetRow}>
+    <${SetRow} label="Use your own Google OAuth client" hint="For people running their own server who don't want to use the app's client."><input class="inp" id="oauth" placeholder="Client ID"/></${SetRow}>
+  </div>`;
+}
+function SettingsAbout() {
+  return html`<div class="setpage">
+    <${SetRow} label="Reminders" hint="Version 0.1 (prototype)"><span></span></${SetRow}>
+    <${SetRow} label="Server" hint="home.lan · connected · certificate 4F:9A:…:C2"><span></span></${SetRow}>
+    <div class="note">Weather warnings from the US National Weather Service. Forecasts from <a href="https://open-meteo.com/">Open-Meteo</a>, used under CC BY 4.0.</div>
+  </div>`;
+}
+function FakeQR() {
+  const cells = [], rnd = seeded(4242);
+  const finder = (x, y, ox, oy) => { const dx = x - ox, dy = y - oy; if (dx < 0 || dy < 0 || dx > 6 || dy > 6) return null; return dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4); };
+  for (let y = 0; y < 21; y++) for (let x = 0; x < 21; x++) {
+    const f = [finder(x, y, 0, 0), finder(x, y, 14, 0), finder(x, y, 0, 14)].find((v) => v !== null);
+    const on = f !== undefined ? f : rnd() > 0.55;
+    if (on) cells.push(html`<rect x=${x} y=${y} width="1" height="1"/>`);
+  }
+  return html`<svg class="qr" viewBox="-1 -1 23 23" width="120" height="120" role="img" aria-label="Sign-in code (sample)"><rect x="-1" y="-1" width="23" height="23" fill="#fff"/><g fill="#111">${cells}</g></svg>`;
+}
+const SOURCES = [
+  { k: "place", name: "Home", owner: "Household", detail: "150 m around 12 Elm Row · Wi-Fi “Elm Row” counts as arriving", health: "ok", fake: "difficult" },
+  { k: "place", name: "High Street", owner: "Personal", detail: "200 m around High Street", health: "ok", fake: "difficult" },
+  { k: "bt", name: "Car", owner: "Personal", detail: "Bluetooth “Model 3” · portable devices only", health: "ok", fake: "moderate" },
+  { k: "wifi", name: "Elm Row Wi-Fi", owner: "Household", detail: "“Elm Row”, password-secured", health: "ok", fake: "moderate" },
+  { k: "webhook", name: "Dishwasher", owner: "Household", detail: "Webhook with a signature", health: "ok", fake: "difficult" },
+  { k: "calendar", name: "Google Calendar", owner: "You", detail: "3 calendars", health: "attention", fake: "none" },
+  { k: "weather", name: "Weather at Home", owner: "Household", detail: "NWS warnings, Severe and Extreme", health: "ok", fake: "none" },
+];
+const SRC_WORD = { place: "Place", bt: "Bluetooth", wifi: "Wi-Fi", usb: "USB", webhook: "Webhook", calendar: "Calendar", weather: "Weather" };
+function SettingsSources() {
+  const [open, setOpen] = useState(null);
+  const s = open != null ? SOURCES[open] : null;
+  return html`<div class="setpage">
+    ${s ? html`<button class="btn sm ghost" style="justify-self: start;" onClick=${() => setOpen(null)}>‹ All sources</button>
+      ${s.k === "place" ? html`<${PlaceEditor} s=${s}/>` : s.k === "bt" || s.k === "wifi" ? html`<${ConnEditor} s=${s}/>` : s.k === "webhook" ? html`<${WebhookEditor} s=${s}/>` : html`<div class="note">This source's settings live in its own section.</div>`}` : html`
+    <div class="note">Sources are what the app watches. Each belongs to a reminder list, whose members share it, or to you alone.</div>
+    <table class="ltable"><tbody>${SOURCES.map((x, i) => html`<tr class="clickrow" onClick=${() => setOpen(i)}>
+      <td><b>${x.name}</b><div class="meta">${SRC_WORD[x.k]} · ${x.detail}</div></td>
+      <td class="meta">${x.owner}</td>
+      <td>${x.health === "ok" ? html`<span class="meta">Working</span>` : html`<span class="tag waiting">Needs attention</span>`}</td>
+      <td><span class=${"fake " + x.fake}>${x.fake === "none" ? "Can't be faked" : x.fake[0].toUpperCase() + x.fake.slice(1) + " to fake"}</span></td></tr>`)}</tbody></table>
+    <div class="acts"><button class="btn sm">+ Place</button><button class="btn sm">+ Bluetooth</button><button class="btn sm">+ Wi-Fi</button><button class="btn sm">+ USB</button><button class="btn sm">+ Webhook</button><button class="btn sm">+ Weather</button></div>`}
+  </div>`;
+}
+function PlaceEditor({ s }) {
+  const [r, setR] = useState(150);
+  return html`<div class="setpage">
+    <h4>Place: ${s.name}</h4>
+    <button class="btn primary" style="justify-self: start;">Use where I am now</button>
+    <div class="meta">Or move the map to adjust it.</div>
+    <div class="map" role="img" aria-label="Map with the place's circle">
+      <svg viewBox="0 0 400 200" width="100%" height="200" preserveAspectRatio="xMidYMid slice"><rect width="400" height="200" fill="var(--cal)"/>
+        <path d="M0 120 L400 90 M130 0 L170 200 M260 0 L240 200 M0 40 L400 60" stroke="var(--line)" stroke-width="10" fill="none"/>
+        <circle cx="200" cy="100" r=${r / 3} fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/><circle cx="200" cy="100" r="4" fill="var(--accent)"/></svg>
+      <span class="meta">Drag the map to move the centre. Search for an address above it.</span>
+    </div>
+    <${SetRow} label="Radius" hint="Smaller than about 100 m may not register on some phones."><span class="tnum"><input type="range" id="radius" min="50" max="500" step="10" value=${r} onInput=${(e) => setR(+e.target.value)}/> ${r} m</span></${SetRow}>
+    <${SetRow} label="Belongs to" hint="Everyone with access to that list shares this place."><select class="inp" id="pl-owner"><option>Household</option><option>Personal</option><option>Garden</option></select></${SetRow}>
+    <${SetRow} label="Wi-Fi networks that count as arriving" hint="Joining one counts as arriving and being here, but not leaving."><div class="chips"><span class="tchip">Elm Row<button aria-label="Remove">✕</button></span><button class="btn sm ghost">+ Network</button></div></${SetRow}>
+    ${NOGMS.on ? html`<div class="warnbox">This phone has no Google Play Services, so arriving may be noticed about 30 minutes late. Turn on precise location in Settings → This phone to be on time, at some cost in battery.</div>` : html`<div class="note">Map © OpenStreetMap contributors.</div>`}
+  </div>`;
+}
+function ConnEditor({ s }) {
+  const [kind, setKind] = useState(s.k === "bt" ? "bt" : "wifi");
+  return html`<div class="setpage">
+    <h4>Connection: ${s.name}</h4>
+    <div class="seg" style="justify-self: start;"><button aria-pressed=${kind === "bt"} onClick=${() => setKind("bt")}>Bluetooth</button><button aria-pressed=${kind === "wifi"} onClick=${() => setKind("wifi")}>Wi-Fi</button><button aria-pressed=${kind === "usb"} onClick=${() => setKind("usb")}>USB</button></div>
+    ${kind === "bt" ? html`<${SetRow} label="Paired device" hint="Identified by its address. Someone nearby could fake it with moderate effort."><select class="inp" id="bt-dev"><option>Model 3 (car)</option><option>Pixel Buds</option><option>Kitchen speaker</option></select></${SetRow}>` : null}
+    ${kind === "wifi" ? html`<${SetRow} label="Network name"><input class="inp" id="wifi-name" value="Elm Row"/></${SetRow}>
+      <${SetRow} label="Security" hint="Detected from this computer's connection."><div class="radios"><label><input type="radio" name="sec" id="sec-open"/> Open: easy to fake</label><label><input type="radio" name="sec" id="sec-pw" checked/> Password: moderate to fake</label><label><input type="radio" name="sec" id="sec-cert"/> Certificate (enterprise): difficult to fake</label></div></${SetRow}>
+      <${SetRow} label="Only these access points" hint="Optional. Harder to fake, but replacing the router breaks it."><label class="tog"><input type="checkbox" id="pin-ap"/> Pin the 2 access points seen now</label></${SetRow}>` : null}
+    ${kind === "usb" ? html`<${SetRow} label="Device" hint="Plugged into this computer now."><select class="inp" id="usb-dev"><option>YubiKey 5 (serial 1234…)</option><option>USB audio adapter (no serial number)</option></select></${SetRow}>
+      <div class="warnbox">A device with no serial number can't be told apart from another of the same model.</div>` : null}
+    ${kind !== "usb" ? html`<${SetRow} label="Which devices count" hint="By default only portable devices, because a desktop's connections say little about where you are."><select class="inp" id="conn-count"><option>Portable devices only</option><option>All devices</option><option>Choose devices…</option></select></${SetRow}>` : null}
+    <${SetRow} label="Belongs to"><select class="inp" id="conn-owner"><option>Personal</option><option>Household</option></select></${SetRow}>
+    ${kind === "wifi" ? html`<div class="note">Leaving a Wi-Fi network may be noticed late on a phone.</div>` : null}
+  </div>`;
+}
+function WebhookEditor({ s }) {
+  const [listen, setListen] = useState(false);
+  return html`<div class="setpage">
+    <h4>Webhook: ${s.name}</h4>
+    <${SetRow} label="Address" hint="Reachable only on your home network while the server isn't on the internet."><div class="copyrow"><code class="mono">https://home.lan:8443/hook/7f3c…a91e</code><button class="btn sm">Copy</button><button class="btn sm ghost">Change address…</button></div></${SetRow}>
+    <${SetRow} label="Signature secret" hint="With a secret, calls must be signed (HMAC), which makes them difficult to fake. Without one, anyone with the address can trigger it."><div class="copyrow"><code class="mono">whsec_••••••••</code><button class="btn sm">Show</button></div></${SetRow}>
+    <${SetRow} label="Only when the payload has" hint="Exact matches on fields. All must match."><div class="filters"><div class="frow"><input class="inp" value="event"/><span>=</span><input class="inp" value="cycle_finished"/><button class="btn sm ghost" aria-label="Remove">✕</button></div><button class="btn sm ghost" style="justify-self: start;">+ Field</button></div></${SetRow}>
+    <${SetRow} label="Also listen on this computer" hint="Works without a server, for apps on this computer only."><label class="tog"><input type="checkbox" id="listen" checked=${listen} onChange=${() => setListen(!listen)}/> ${listen ? "http://127.0.0.1:47380/hook/dishwasher" : "Off"}</label></${SetRow}>
+    <${SetRow} label="Belongs to"><select class="inp" id="wh-owner"><option>Household</option><option>Personal</option></select></${SetRow}>
+  </div>`;
+}
+const BUILTIN = [
+  ["Minimum", "Silent", "1 day", "Silent", "1 day", "yes", "no"],
+  ["Low", "Gentle", "1 day", "Silent", "1 day", "yes", "no"],
+  ["Medium", "Gentle", "1 hour", "Insistent, then Alarm after 1 hour", "10 min", "yes", "no"],
+  ["High", "Alarm", "0", "Alarm", "10 min", "no", "no"],
+  ["Maximum", "Alarm", "0", "Alarm", "10 min", "no", "yes"],
+];
+function SettingsPriorities() {
+  const [edit, setEdit] = useState(false);
+  return html`<div class="setpage">
+    ${edit ? html`<button class="btn sm ghost" style="justify-self: start;" onClick=${() => setEdit(false)}>‹ All priorities</button>
+      <h4>Custom priority</h4>
+      <${SetRow} label="Name"><input class="inp" id="pr-name" value="Medicine"/></${SetRow}>
+      <${SetRow} label="While due" hint="How it alerts, and for how long before it goes overdue. The interval is also one tap of Snooze."><div class="pairs"><select class="inp" id="pr-due-style"><option>Silent</option><option>Gentle</option><option>Insistent</option><option selected>Alarm</option></select><select class="inp" id="pr-due-int"><option>0 (overdue at once)</option><option selected>15 minutes</option><option>1 hour</option><option>1 day</option></select></div></${SetRow}>
+      <${SetRow} label="Once overdue" hint="Add steps to escalate the longer it stays overdue."><div class="filters"><div class="srow"><span class="meta">At first</span><select class="inp" id="pr-od-style"><option selected>Alarm</option><option>Insistent</option></select></div><div class="srow"><span class="meta">After 30 min</span><select class="inp"><option>Alarm, breaking Do Not Disturb</option></select><button class="btn sm ghost" aria-label="Remove">✕</button></div><button class="btn sm ghost" style="justify-self: start;">+ Step</button></div></${SetRow}>
+      <${SetRow} label="Overdue interval" hint="Repeat, snooze and quiet-after-acknowledging length once overdue."><select class="inp" id="pr-od-int"><option>5 minutes</option><option selected>10 minutes</option><option>30 minutes</option></select></${SetRow}>
+      <${SetRow} label="An alarm rings for"><select class="inp" id="pr-ring"><option selected>The whole interval</option><option>1 minute</option><option>5 minutes</option></select></${SetRow}>
+      <${SetRow} label="Wait for the server before alerting" hint="Up to this long, to learn whether someone already did it."><select class="inp" id="pr-wait"><option>None</option><option>10 seconds</option><option selected>60 seconds</option></select></${SetRow}>
+      <${SetRow} label="On Android"><label class="tog"><input type="checkbox" id="pr-swipe" checked/> Swiping it away snoozes it</label><label class="tog"><input type="checkbox" id="pr-dnd"/> Break through Do Not Disturb</label></${SetRow}>
+      <div class="note">Custom priorities are yours alone. A shared reminder must use a built-in priority, but you can override it with this one for yourself.</div>`
+    : html`<div class="tablewrap"><table class="htable"><thead><tr><th>Priority</th><th>While due</th><th>Overdue after</th><th>Once overdue</th><th>Interval</th><th>Swipe</th><th>Breaks DND</th><th></th></tr></thead>
+      <tbody>${BUILTIN.map((b) => html`<tr><td><b>${b[0]}</b></td><td>${b[1]}</td><td>${b[2]}</td><td>${b[3]}</td><td>${b[4]}</td><td>${b[5]}</td><td>${b[6]}</td><td><button class="btn sm ghost">Copy</button></td></tr>`)}
+        <tr><td><b>Medicine</b> <span class="meta">yours</span></td><td>Alarm</td><td>15 minutes</td><td>Alarm, breaking DND after 30 min</td><td>10 min</td><td>yes</td><td>after 30 min</td><td><button class="btn sm" onClick=${() => setEdit(true)}>Edit</button></td></tr></tbody></table></div>
+      <div class="meta">Built-in priorities can't be changed. Copy one to make your own.</div>`}
+  </div>`;
+}
+
+// ================= batch 2: first start, permissions, settings, no Google, precise mode =================
+const PERMS = [
+  { k: "notif", name: "Notifications", why: "To show your reminders at all.", when: "First start" },
+  { k: "alarms", name: "Alarms & reminders", why: "To fire exactly on time, even when the phone is idle.", when: "First start" },
+  { k: "dnd", name: "Do Not Disturb access", why: "So Maximum priority can get through when you allow it.", when: "First start" },
+  { k: "lan", name: "Local network", why: "To reach your home server over Wi-Fi (Android 17).", when: "Joining a home server" },
+  { k: "fullscreen", name: "Full-screen alarms", why: "To ring like an alarm clock for High and Maximum.", when: "First High or Maximum reminder" },
+  { k: "location", name: "Location, all the time", why: "To notice arriving and leaving places.", when: "First place trigger" },
+  { k: "calendar", name: "Calendar", why: "To use your calendar's events.", when: "First calendar source" },
+  { k: "nearby", name: "Nearby devices", why: "To notice Bluetooth connections.", when: "First Bluetooth source" },
+  { k: "wifiloc", name: "Location, for Wi-Fi names", why: "Android needs it to tell you which Wi-Fi you're on.", when: "First Wi-Fi source" },
+];
+function PermsList({ granted, grant, only }) {
+  return html`<div class="ltable" style="display: grid;">${PERMS.filter((p) => !only || only.includes(p.k)).map((p) => html`<div class="permrow"><div><div class="row-title">${p.name}</div><div class="meta">${p.why}</div><div class="faint" style="font-size: 11.5px;">Asked when: ${p.when}</div></div>
+    ${granted[p.k] ? html`<span class="meta" style="color: var(--pos);">Allowed</span>` : html`<button class="btn sm" onClick=${() => grant(p.k)}>Allow…</button>`}</div>`)}</div>`;
+}
+function PushStatus({ noGms }) {
+  return noGms ? html`<div class="warnbox">No push app is installed, so changes from your other devices arrive every 15 minutes or so, and whenever you open the app or something fires. Installing a UnifiedPush app such as ntfy makes them arrive within seconds.<div class="acts" style="margin-top: 6px;"><button class="btn sm primary">Get ntfy…</button><button class="btn sm ghost">Not now</button></div></div>`
+    : html`<div class="note">Updates arrive through Google Play Services, using UnifiedPush's built-in route. Nothing to set up.</div>`;
+}
+function PhoneDevice({ noGms, precise, setPrecise, granted, grant }) {
+  return html`<div class="setpage">
+    <${SetRow} label="Name" hint="Only your own devices see it."><input class="inp" id="pdev" value="Pixel 9"/></${SetRow}>
+    <${SetRow} label="This phone is" hint="Phones are portable unless you say otherwise."><div class="radios"><label><input type="radio" name="pport" id="pport-p" checked/> Portable</label><label><input type="radio" name="pport" id="pport-s"/> Stationary</label></div></${SetRow}>
+    <${SetRow} label="Loudest alert on this phone"><select class="inp" id="ploud"><option selected>Alarm</option><option>Insistent</option><option>Gentle</option><option>Silent</option></select></${SetRow}>
+    <${SetRow} label="Quiet this phone" hint="Only this phone goes silent."><button class="btn sm">Quiet until…</button></${SetRow}>
+    <h4>Updates from your other devices</h4>
+    <${PushStatus} noGms=${noGms}/>
+    <h4>Places</h4>
+    <${SetRow} label="Precise location" hint=${noGms ? "Without Google Play Services, arrivals can be about 30 minutes late. Precise mode checks more often, uses more battery, and shows a notification while it's on." : "Google Play Services already notices arrivals on time. Precise mode is rarely needed."}>
+      <label class="tog"><input type="checkbox" id="precise" checked=${precise} onChange=${() => setPrecise(!precise)}/> ${precise ? "On" : "Off"}</label></${SetRow}>
+    <h4>Permissions</h4>
+    <div class="meta">Each one is asked when it's first needed. You can fix any of them here.</div>
+    <${PermsList} granted=${granted} grant=${grant}/>
+  </div>`;
+}
+const PSECTIONS = [["you", "You"], ["priorities", "Priorities"], ["sources", "Sources"], ["device", "This phone"], ["account", "Account"], ["groups", "Groups"], ["server", "Server"], ["calendars", "Calendars"], ["about", "About"]];
+function PSettings({ close, noGms, precise, setPrecise, granted, grant }) {
+  const [sec, setSec] = useState(null);
+  const Page = sec && { you: SettingsYou, priorities: SettingsPriorities, sources: SettingsSources, account: SettingsAccount, groups: SettingsGroups, server: SettingsServer, calendars: SettingsCalendars, about: SettingsAbout }[sec];
+  return html`<div class="fullscreen" role="dialog" aria-label="Settings">
+    <div class="topbar"><button class="ibtn" aria-label="Back" onClick=${() => sec ? setSec(null) : close()}><${Ico} d=${I.back}/></button><span class="title">${sec ? PSECTIONS.find((s) => s[0] === sec)[1] : "Settings"}</span></div>
+    <div class="pscroll"><div class="psettings">
+      ${sec == null ? html`<div class="seclist">${PSECTIONS.map(([k, n]) => html`<button class="secitem" onClick=${() => setSec(k)}><span>${n}</span>${k === "groups" ? html`<span class="tag due">1</span>` : k === "device" && (noGms || !granted.fullscreen) ? html`<span class="tag waiting">!</span>` : html`<span class="muted">›</span>`}</button>`)}</div>`
+        : sec === "device" ? html`<${PhoneDevice} noGms=${noGms} precise=${precise} setPrecise=${setPrecise} granted=${granted} grant=${grant}/>` : html`<${Page}/>`}
+    </div></div>
+  </div>`;
+}
+function PFirstStart({ close, noGms, granted, grant }) {
+  const [step, setStep] = useState(0);
+  const [pw, setPw] = useState("");
+  const strength = pw.length >= 20 ? 4 : pw.length >= 14 ? 3 : pw.length >= 10 ? 2 : pw.length ? 1 : 0;
+  const STEPS = ["Start", "Server", "You", "Password", "Recovery", "Others' reminders", "Permissions", "Done"];
+  const next = () => setStep(step + 1);
+  const firstStart = PERMS.filter((p) => p.when === "First start" || p.when === "Joining a home server");
+  return html`<div class="fullscreen" role="dialog" aria-label="Get started">
+    <div class="topbar">${step > 0 && step < 7 ? html`<button class="ibtn" aria-label="Back" onClick=${() => setStep(step - 1)}><${Ico} d=${I.back}/></button>` : null}<span class="title">${step === 0 ? "Welcome" : STEPS[step]}</span>${step > 0 && step < 7 ? html`<span class="meta" style="padding-right: 10px;">${step} of 6</span>` : null}</div>
+    <div class="pscroll"><div class="edbody">
+      ${step === 0 ? html`<div class="choices">
+        <button class="choice" onClick=${() => setStep(6)}><b>Use it on this phone only</b><span class="meta">Everything works here with no server. You can join one later.</span></button>
+        <button class="choice" onClick=${next}><b>Join a server with an invite</b><span class="meta">Scan the code someone showed you, or open their link.</span></button>
+        <button class="choice" onClick=${() => setStep(3)}><b>Sign in to your account</b><span class="meta">You already use it on another device.</span></button></div>` : null}
+      ${step === 1 ? html`<div class="camera">Camera: point it at the invite code</div><button class="btn sm ghost" style="justify-self: start;">Paste a link instead</button>
+        <div class="note">Server home.lan · certificate 4F:9A:…:C2 · keeps history for 2 years · adds you to Household</div>` : null}
+      ${step === 2 ? html`<${Field} label="Username"><input class="inp" id="pun" value="pat"/></${Field}><${Field} label="Display name"><input class="inp" id="pdn" value="Pat"/></${Field}>` : null}
+      ${step === 3 ? html`<${Field} label="Password" hint="The server never sees it, so choose one nobody could guess."><input class="inp" type="password" id="ppw" value=${pw} onInput=${(e) => setPw(e.target.value)}/></${Field}>
+        <div class="meter"><span class=${"lvl l" + strength} style=${`width: ${strength * 25}%`}></span></div>
+        <div class="meta">${["", "Too easy to guess", "Still too easy to guess", "Good", "Strong"][strength]}</div>
+        <button class="btn sm ghost" style="justify-self: start;" onClick=${() => setPw("lantern-orbit-pebble-quartz")}>Suggest a passphrase</button>` : null}
+      ${step === 4 ? html`<div class="note">If you forget your password and lose every device, your personal reminders are gone.</div><label class="tog"><input type="checkbox" id="pesc"/> Let the server keep a copy of my keys</label><div class="warnbox">With this on, whoever runs home.lan could read your personal reminders.</div>` : null}
+      ${step === 5 ? html`<${Field} label="Highest priority other people's reminders can reach you at"><select class="inp" id="pcap">${PRIS.map((p) => html`<option selected=${p === "Maximum"}>${p}</option>`)}</select></${Field}>` : null}
+      ${step === 6 ? html`<div class="meta">A reminder app needs a few things from Android to work reliably. Each is explained before Android asks.</div>
+        <${PermsList} granted=${granted} grant=${grant} only=${["notif", "alarms", "dnd", "lan"]}/>
+        ${noGms ? html`<${PushStatus} noGms=${true}/>` : null}
+        <div class="meta">Location, calendar, Nearby devices and full-screen alarms are asked later, the first time something needs them.</div>` : null}
+      ${step === 7 ? html`<div class="note">You're set up. Household's lists will appear once someone with manage access comes online.</div>` : null}
+    </div></div>
+    <div class="edfoot"><span class="grow"></span>${step === 0 ? html`<button class="btn" onClick=${close}>Close</button>` : step === 7 ? html`<button class="btn primary" onClick=${close}>Open Reminders</button>`
+      : html`<button class="btn primary" disabled=${(step === 3 && strength < 3) || (step === 6 && !firstStart.filter((p) => p.k !== "lan").every((p) => granted[p.k]))} onClick=${next}>Continue</button>`}</div>
+  </div>`;
+}
+
+// ================= Android phone prototype =================
+const I = {
+  inbox: "M3 5h14M3 10h14M3 15h9", calendar: "M3.5 4.5h13v12h-13zM3.5 8h13M7 2.5v3M13 2.5v3", agenda: "M7 5h10M7 10h10M7 15h10M3 5h1M3 10h1M3 15h1",
+  board: "M3 3.5h4v13H3zM8 3.5h4v8H8zM13 3.5h4v10h-4z", history: "M3 16.5h14M5 14V9M9 14V5M13 14V10M16 14V7", more: "M5 10h.5M10 10h.5M15 10h.5",
+  filter: "M3 5h14M6 10h8M8.5 15h3", gear: "M10 7a3 3 0 1 0 0 6a3 3 0 0 0 0-6zM10 2v2.5M10 15.5V18M2 10h2.5M15.5 10H18M4.3 4.3l1.8 1.8M13.9 13.9l1.8 1.8M4.3 15.7l1.8-1.8M13.9 6.1l1.8-1.8",
+  menu: "M3 6h14M3 10h14M3 14h14", back: "M12 4l-6 6 6 6", close: "M5 5l10 10M15 5L5 15",
+};
+const Ico = ({ d, s = 20 }) => html`<svg width=${s} height=${s} viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d=${d}/></svg>`;
+const PRECISE = { on: false };
+const PVIEWS = [["inbox", "Inbox"], ["calendar", "Calendar"], ["agenda", "Agenda"], ["board", "Board"], ["history", "History"]];
+
+function PInbox({ occ, act, open }) {
+  const later = occ.filter((o) => o.d === 0 && (o.st === "expected" || o.st === "tentative"));
+  const earlier = occ.filter((o) => o.d === 0 && ["completed", "skipped", "missed", "nofire"].includes(o.st));
+  const groups = [["Overdue", openOf(occ, "overdue")], ["Due", openOf(occ, "due")], ["Waiting", openOf(occ, "waiting")], ["Later today", later], ["Earlier today", earlier]];
+  return html`<div>${groups.map(([name, items]) => items.length ? html`<div>
+    <div class="psec">${name}<span>${items.length}</span></div>
+    ${items.map((o) => html`<div class=${"prow st-" + o.st} onClick=${() => open(o.id)}>
+      <span class="tm">${fmt(o.m)}</span>
+      <span style="min-width: 0;"><div class=${"ttl" + (["completed", "skipped", "nofire"].includes(o.st) ? " done-title" : "") + (o.st === "skipped" ? " strike" : "")}><span class="dot" style=${`background: ${lc(R[o.r].list)}`}></span>${R[o.r].title}</div>
+        <div class="meta" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${o.st === "nofire" ? "Didn't fire · " : o.st === "missed" ? "Missed · " : ""}${metaLine(o) || R[o.r].trig}</div></span>
+      ${OPEN.includes(o.st) ? html`<button class="donebtn" onClick=${(e) => { e.stopPropagation(); act(o.id, "done"); }}>Done</button>` : html`<span></span>`}
+    </div>`)}</div>` : null)}<div style="height: 90px;"></div></div>`;
+}
+function PCalendar({ occ, open }) {
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = (NOW.m / 60 - 6 - 4) * 52; }, []);
+  const H = 52, items = lanes(occ.filter((o) => o.d === 0)).items;
+  const hours = []; for (let i = 6; i <= 23; i++) hours.push(i);
+  return html`<div style="display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%;">
+    <div class="daynav"><button class="ibtn" aria-label="Previous day"><${Ico} d=${I.back}/></button><span class="t">Today, Wed 30 September</span><button class="btn sm">Today</button></div>
+    <div class="pscroll" ref=${ref}><div class="pday" style=${`height: ${18 * H}px; margin-top: 10px;`}>
+      ${hours.map((hh) => html`<span class="hr" style=${`top: ${(hh - 6) * H}px`}>${fmt(hh * 60)}</span>`)}
+      ${CAL.filter((c) => c.d === 0).map((c) => html`<div class="calblk" style=${`top: ${(c.s / 60 - 6) * H}px; height: ${(c.e - c.s) / 60 * H}px;`}>${c.t}</div>`)}
+      ${items.map((o) => html`<button class=${`pill st-${o.st}`} style=${lcStyle(R[o.r].list) + `top: ${(o.m / 60 - 6) * H + o._lane * 28}px;`} onClick=${() => open(o.id)}><span class="tm">${fmt(o.m)}</span><span>${R[o.r].title}</span></button>`)}
+      <div class="nowline" style=${`top: ${(NOW.m / 60 - 6) * H}px`}></div>
+    </div><div style="height: 90px;"></div></div>
+  </div>`;
+}
+function PAgenda({ occ, open }) {
+  const ref = useRef(null);
+  useEffect(() => { const sc = ref.current, el = sc && sc.querySelector(".prule"); if (el) sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - 120; }, []);
+  const opens = occ.filter((o) => OPEN.includes(o.st) || o.st === "waiting");
+  const rows = (d) => { const r = [...occ.filter((o) => o.d === d).map((o) => ({ k: "o", m: o.m, o })), ...CAL.filter((c) => c.d === d).map((c) => ({ k: "c", m: c.s, c }))].sort((a, b) => a.m - b.m); if (d === 0) { const i = r.findIndex((x) => x.m > NOW.m); r.splice(i < 0 ? r.length : i, 0, { k: "now" }); } return r; };
+  return html`<div style="display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%;">
+    <div class="chiprow">${opens.map((o) => html`<button class=${"nchip st-" + o.st} style=${lcStyle(R[o.r].list)} onClick=${() => open(o.id)}><span class="row-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${R[o.r].title}</span><span class="meta" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${metaLine(o) || fmt(o.m)}</span></button>`)}</div>
+    <div class="pscroll" ref=${ref}>${[-1, 0, 1].map((d) => html`<div><div class="dayhdr">${REL[d]}<span class="meta" style="font-weight: 400;">${DAYS[d]}</span></div>
+      ${rows(d).map((x) => x.k === "now" ? html`<div class="prule">NOW · 17:40</div>` : x.k === "c" ? html`<div class="prow" style="cursor: default; color: var(--muted);"><span class="tm">${fmt(x.c.s)}</span><span>${x.c.t} <span class="meta">until ${fmt(x.c.e)} · busy</span></span><span></span></div>`
+        : html`<div class="prow" onClick=${() => open(x.o.id)}><span class="tm">${fmt(x.o.m)}</span><span style="min-width: 0;"><div class=${"ttl" + (["completed", "skipped", "nofire", "expected", "tentative"].includes(x.o.st) ? " done-title" : "")}><${Glyph} o=${x.o}/>${R[x.o.r].title}</div><div class="meta">${metaLine(x.o) || LISTS.find((l) => l.id === R[x.o.r].list).name}</div></span><span>${tagFor(x.o)}</span></div>`)}</div>`)}<div style="height: 90px;"></div></div>
+  </div>`;
+}
+function PBoard({ occ, open }) {
+  const ref = useRef(null);
+  const items = boardItems(occ);
+  const jump = (i) => { const el = ref.current && ref.current.children[i]; if (el) ref.current.scrollLeft = el.offsetLeft - 16; };
+  return html`<div style="display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%;">
+    <div class="colchips">${COLS.map(([k, n], i) => html`<button onClick=${() => jump(i)}>${n} ${items.filter((b) => b.col === k).length}</button>`)}</div>
+    <div class="pboard" ref=${ref}>${COLS.map(([k, n]) => { const its = items.filter((b) => b.col === k); return html`<div class=${"bcol c-" + k}><div class="bhead"><span>${n}</span><span class="muted">${its.length}</span></div>
+      ${its.map((b) => html`<button class="bcard" style=${lcStyle(R[b.id].list)} onClick=${() => open("r:" + b.id)}><span class="row-title">${R[b.id].title}</span><span class="meta">${b.line}</span></button>`)}
+      ${its.length ? null : html`<div class="meta">None</div>`}</div>`; })}</div>
+  </div>`;
+}
+function PHistory({ open }) {
+  const [tab, setTab] = useState("rel");
+  const ids = Object.keys(HIST).sort((a, b) => (HIST[a].rel ?? 101) - (HIST[b].rel ?? 101));
+  return html`<div>
+    <div class="daynav"><div class="seg"><button aria-pressed=${tab === "rel"} onClick=${() => setTab("rel")}>Reliability</button><button aria-pressed=${tab === "grp"} onClick=${() => setTab("grp")}>Group</button></div><span class="t"></span><span class="meta">Last 30 days</span></div>
+    ${tab === "rel" ? ids.map((id) => { const h = HIST[id]; return html`<div class="hcard" onClick=${() => open("r:" + id)}>
+      <div class="ttl" style="display: flex; gap: 7px; align-items: center; font-weight: 500;"><span class="dot" style=${`background: ${lc(R[id].list)}`}></span>${R[id].title}</div>
+      <${Strip} seq=${h.seq.slice(-30)}/>
+      <div class="nums"><span><b>${h.rel == null ? "–" : h.rel + "%"}</b> reliable</span><span>${h.onTime == null ? "–" : h.onTime + "%"} on time</span><span>${h.c.skipped} skipped</span>${h.snz >= 2 ? html`<span style="color: var(--wait);">often snoozed</span>` : null}</div></div>`; })
+    : GROUP.map((g) => { const total = g.rows.reduce((a, r) => a + r.done, 0); return html`<div class="hcard" style="cursor: default;"><div style="font-weight: 600;">${LISTS.find((l) => l.id === g.list).name}</div>
+      ${g.rows.map((r) => html`<div style="display: grid; gap: 3px;"><div style="display: flex; justify-content: space-between;"><span>${r.who}</span><span class="tnum meta">${r.done} · ${Math.round(r.done / total * 100)}%</span></div><span class="sharebar" style="width: 100%;"><span class="fill" style=${`width: ${Math.round(r.done / total * 100)}%`}></span></span>
+        <span class="meta">${r.turns == null ? "" : `${r.turns} on others' turns · `}${r.dec} declined${r.miss == null ? "" : ` · ${r.miss} missed on their turn`}</span></div>`)}</div>`; })}
+    <div style="height: 90px;"></div></div>`;
+}
+function Sheet({ sel, occ, act, close }) {
+  return html`<div class="sheetback" onClick=${(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div class="sheet2" role="dialog"><div class="handle"></div>
+      ${typeof sel === "string" ? html`<${ReminderDetail} id=${sel.slice(2)} occ=${occ} act=${act}/>` : html`<${Detail} o=${occ.find((o) => o.id === sel)} act=${act}/>`}</div></div>`;
+}
+function FilterSheet({ filt, setFilt, close }) {
+  const toggle = (g, k) => setFilt({ ...filt, [g]: { ...filt[g], [k]: !filt[g][k] } });
+  return html`<div class="sheetback" onClick=${(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div class="sheet2"><div class="handle"></div><div class="detail">
+      <div class="lists"><div class="sechead">Reminder lists</div>${LISTS.map((l) => html`<label><input type="checkbox" id=${"pf-" + l.id} checked=${!filt.lists[l.id]} onChange=${() => toggle("lists", l.id)} style=${`accent-color: ${lc(l.id)}`}/>${l.name}<span class="sub">${l.note}</span></label>`)}</div>
+      <div class="lists"><div class="sechead">Priorities</div>${PRIS.map((p) => html`<label><input type="checkbox" id=${"pp-" + p} checked=${!filt.pris[p]} onChange=${() => toggle("pris", p)}/>${p}</label>`)}</div>
+      <div class="meta">Filters apply to every view, and are remembered.</div></div></div></div>`;
+}
+function PEditor({ id, close }) {
+  const { m, set, pick, setPick, addPicked } = useEditorModel(id);
+  const [open, setOpen] = useState(null);
+  const listName = LISTS.find((l) => l.id === m.list).name;
+  return html`<div class="fullscreen" role="dialog" aria-label=${edTitle(id)}>
+    <div class="topbar"><button class="ibtn" onClick=${close} aria-label="Close"><${Ico} d=${I.close}/></button><span class="title">${edTitle(id)}</span><button class="btn primary" onClick=${close}>Save</button></div>
+    <div class="pscroll"><div class="edbody">
+      <div class="summary">In <b>${listName}</b>, remind ${m.turns ? html`<b>whoever's turn it is</b>` : "you"} to <b>${m.title || "…"}</b> <b>${m.triggers.join(" or ")}</b>${m.conds.length ? html` if <b>${m.conds.join(" and ")}</b>` : ""}.${m.conds.length ? html` If not, ${m.ifNot === "wait" ? html`wait until <b>${m.waitUntil}</b>` : "let it pass"}.` : ""} <b>${m.pri}</b> priority.</div>
+      <input class="inp title" placeholder="What should you be reminded to do?" value=${m.title} onInput=${(e) => set({ ...m, title: e.target.value })}/>
+      <${Field} label="Reminder list"><${ListSel} m=${m} set=${set}/></${Field}>
+      <${Field} label="Priority"><${PriSel} m=${m} set=${set}/></${Field}>
+      <${Field} label="When"><${Chips} items=${m.triggers} addLabel="Trigger" onAdd=${() => setPick("trigger")} onRemove=${(i) => set({ ...m, triggers: m.triggers.filter((_, j) => j !== i) })}/></${Field}>
+      <${Field} label="Only if"><${Chips} items=${m.conds} addLabel="Condition" onAdd=${() => setPick("cond")} onRemove=${(i) => set({ ...m, conds: m.conds.filter((_, j) => j !== i) })}/></${Field}>
+      ${m.conds.length ? html`<${Field} label="If the conditions aren't met"><${WaitCtl} m=${m} set=${set}/></${Field}>` : null}
+      <div class="folds">
+        <${FoldSec} open=${open} setOpen=${setOpen} k="od" name="Overdue" sum=${m.overdue}><select class="inp"><option>Priority default (1 hour)</option><option>Straight away</option></select></${FoldSec}>
+        <${FoldSec} open=${open} setOpen=${setOpen} k="ex" name="Expiry" sum=${m.expiry}><${Chips} items=${[m.expiry]} addLabel="Expiry" onAdd=${() => {}} onRemove=${() => {}}/></${FoldSec}>
+        <${FoldSec} open=${open} setOpen=${setOpen} k="tu" name="Turns" sum=${m.turns || "Anyone can claim it"}><input class="inp" value=${m.turns} onInput=${(e) => set({ ...m, turns: e.target.value })}/></${FoldSec}>
+        <${FoldSec} open=${open} setOpen=${setOpen} k="no" name="Note" sum=${m.note ? m.note.slice(0, 26) + "…" : "None"}><textarea class="inp" rows="3" onInput=${(e) => set({ ...m, note: e.target.value })}>${m.note}</textarea></${FoldSec}>
+        <${FoldSec} open=${open} setOpen=${setOpen} k="pa" name="Pause" sum="Not paused"><div class="radios"><label><input type="radio" name="ppz" id="ppz-a"/> For everyone until…</label><label><input type="radio" name="ppz" id="ppz-m"/> Just for me until…</label></div></${FoldSec}>
+      </div>
+    </div></div>
+    ${pick ? html`<${Picker} kind=${pick} onPick=${addPicked} onClose=${() => setPick(null)}/>` : null}
+  </div>`;
+}
+function Shade({ occ, act, close }) {
+  const n = (o) => R[o.r];
+  const loud = occ.filter((o) => OPEN.includes(o.st) && !["Minimum"].includes(n(o).pri));
+  const silent = occ.filter((o) => OPEN.includes(o.st) && n(o).pri === "Minimum");
+  const third = (o) => n(o).shared ? (o.claim && o.claim !== "You" ? ["Can't do it", "decline"] : ["Claim", "claim"]) : ["Skip", "skip"];
+  return html`<div class="shade" onClick=${(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div class="clock">17:40</div><div class="qs"><span></span><span></span><span></span><span></span></div>
+    ${PRECISE.on ? html`<div class="anotif ongoing"><div class="h"><${AppIcon} size=${12}/> Reminders · ongoing</div><div class="t">Watching for arrivals precisely</div><div class="s">Uses more battery. Arrivals at Home and High Street are noticed on time.</div><div class="acts2"><button>Turn off</button></div></div>` : null}
+    ${loud.map((o) => html`<div class=${"anotif" + (o.st === "overdue" ? " alarm" : "")}>
+      <div class="h"><${AppIcon} size=${12}/> Reminders · ${LISTS.find((l) => l.id === n(o).list).name} · ${o.st === "overdue" ? "overdue" : "due " + fmt(o.m)}</div>
+      <div class="t">${n(o).title}</div><div class="s">${metaLine(o) || n(o).trig}</div>
+      <div class="acts2"><button onClick=${() => act(o.id, "done")}>Done</button><button onClick=${() => act(o.id, "snooze", "18:40")}>Snooze</button><button onClick=${() => act(o.id, third(o)[1])}>${third(o)[0]}</button></div>
+      <div class="swipe">${["High", "Maximum"].includes(n(o).pri) ? "Can't be swiped away" : "Swipe away to snooze for " + (o.st === "overdue" ? "10 minutes" : n(o).pri === "Medium" ? "1 hour" : "1 day")}</div></div>`)}
+    ${silent.length ? html`<div class="grp">Silent</div>${silent.map((o) => html`<div class="anotif"><div class="h"><${AppIcon} size=${12}/> Reminders</div><div class="t">${n(o).title}</div><div class="acts2"><button onClick=${() => act(o.id, "done")}>Done</button><button onClick=${() => act(o.id, "snooze", "tomorrow")}>Snooze</button><button onClick=${() => act(o.id, "skip")}>Skip</button></div></div>`)}` : null}
+    <div class="grp">Tap outside the notifications to close the shade.</div>
+  </div>`;
+}
+function FullAlarm({ close }) {
+  const [snz, setSnz] = useState(false);
+  return html`<div class="alarmfs" role="alertdialog" aria-label="Alarm">
+    <div><div class="ring">RINGING · HOUSEHOLD · HIGH PRIORITY</div><div class="big">Take the bins out</div><div class="when">Due 18:00 · Robin's turn · Robin can't this time</div></div>
+    <div class="clock">18:00</div>
+    <div><button class="donebig" onClick=${close}>Done</button>
+      <div class="row">${snz ? ["5 min", "10 min", "30 min", "Until…"].map((x) => html`<button onClick=${close}>${x}</button>`) : html`<button onClick=${() => setSnz(true)}>Snooze ▾</button><button onClick=${close}>Claim</button><button onClick=${close}>Acknowledge</button><button onClick=${close}>Skip…</button>`}</div>
+      <div class="vol">The volume rises over 30 seconds. Without full-screen permission this shows as a large pop-up with the same buttons.</div></div>
+  </div>`;
+}
+
+const PVARIANTS = [
+  { k: "A", name: "Bottom navigation, five views", blurb: "All five views in a bottom bar. Filters and settings in the top bar." },
+  { k: "B", name: "Three views and More", blurb: "Inbox, Calendar (with an Agenda toggle) and Board at the bottom; History and settings under More." },
+  { k: "C", name: "Navigation drawer", blurb: "A drawer like the desktop sidebar: the five views, list and priority filters, and settings." },
+];
+function PhoneApp({ variant, overlay, setOverlay, noGms, precise, setPrecise, granted, grant }) {
+  const [occ, act] = useOccurrences();
+  const [view, setView] = useState("inbox");
+  const [calMode, setCalMode] = useState("day");
+  const [sel, setSel] = useState(null);
+  const [filt, setFilt] = useState({ lists: {}, pris: {} });
+  const [sheet, setSheet] = useState(null);
+  const vis = visible(occ, filt);
+  HOOKS.edit = (id) => { setSel(null); setOverlay({ k: "editor", id }); };
+  HOOKS.go = (k) => { setSel(null); setView(k); };
+  const open = (id) => setSel(id);
+  const titles = { inbox: "Today", calendar: "Calendar", agenda: "Agenda", board: "All reminders", history: "History" };
+  const effView = variant === "B" && view === "calendar" && calMode === "agenda" ? "agenda" : view;
+  const body = { inbox: html`<${PInbox} occ=${vis} act=${act} open=${open}/>`, calendar: html`<${PCalendar} occ=${vis} open=${open}/>`, agenda: html`<${PAgenda} occ=${vis} open=${open}/>`, board: html`<${PBoard} occ=${occ} open=${open}/>`, history: html`<${PHistory} open=${open}/>` }[effView];
+  const nav = variant === "A" ? PVIEWS : variant === "B" ? [["inbox", "Inbox"], ["calendar", "Calendar"], ["board", "Board"], ["more", "More"]] : null;
+  return html`<div class="app" style=${nav ? "" : "grid-template-rows: auto minmax(0, 1fr);"}>
+    <div class="topbar">
+      ${variant === "C" ? html`<button class="ibtn" aria-label="Menu" onClick=${() => setSheet("drawer")}><${Ico} d=${I.menu}/></button>` : null}
+      <span class="title">${titles[effView]}</span>
+      ${variant === "B" && view === "calendar" ? html`<div class="seg"><button aria-pressed=${calMode === "day"} onClick=${() => setCalMode("day")}>Day</button><button aria-pressed=${calMode === "agenda"} onClick=${() => setCalMode("agenda")}>Agenda</button></div>` : null}
+      ${variant !== "C" ? html`<button class="ibtn" aria-label="Filters" onClick=${() => setSheet("filters")}><${Ico} d=${I.filter}/></button>` : null}
+      ${variant === "A" ? html`<button class="ibtn" aria-label="Settings" onClick=${() => setOverlay({ k: "settings" })}><${Ico} d=${I.gear}/></button>` : null}
+    </div>
+    <div style="display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0;">
+      <div class="banner p">Google Calendar needs you to sign in again.</div>
+      <div class=${effView === "calendar" || effView === "agenda" || effView === "board" ? "" : "pscroll"} style="min-height: 0;">${body}</div>
+    </div>
+    ${nav ? html`<nav class="bnav" style=${`grid-template-columns: repeat(${nav.length}, 1fr);`}>${nav.map(([k, n]) => html`<button aria-current=${k === "more" ? sheet === "more" : view === k} onClick=${() => k === "more" ? setSheet(sheet === "more" ? null : "more") : (setView(k), setSheet(null))}><span class="navpill"><${Ico} d=${I[k]}/></span>${n}</button>`)}</nav>` : null}
+    <button class=${"fab" + (nav ? "" : " low")} aria-label="New reminder" onClick=${() => HOOKS.edit(null)}>+</button>
+    ${sheet === "more" ? html`<div class="moremenu"><button onClick=${() => { setView("history"); setSheet(null); }}>History</button><button onClick=${() => setSheet(null)}>Snooze all…</button><button onClick=${() => setSheet(null)}>Settings</button></div>` : null}
+    ${sheet === "filters" ? html`<${FilterSheet} filt=${filt} setFilt=${setFilt} close=${() => setSheet(null)}/>` : null}
+    ${sheet === "drawer" ? html`<div class="drawerback" onClick=${() => setSheet(null)}></div><div class="navdrawer">
+      <div style="display: flex; gap: 8px; align-items: center; padding: 4px 8px;"><${AppIcon} size=${22}/><b>Reminders</b></div>
+      <div style="display: grid; gap: 2px;">${PVIEWS.map(([k, n]) => html`<button class="navlink" aria-current=${view === k} onClick=${() => { setView(k); setSheet(null); }}><span style="display: inline-flex; gap: 10px; align-items: center;"><${Ico} d=${I[k]} s=${18}/>${n}</span></button>`)}</div>
+      <div class="lists"><div class="sechead">Reminder lists</div>${LISTS.map((l) => html`<label><input type="checkbox" id=${"dl-" + l.id} checked=${!filt.lists[l.id]} onChange=${() => setFilt({ ...filt, lists: { ...filt.lists, [l.id]: !filt.lists[l.id] } })} style=${`accent-color: ${lc(l.id)}`}/>${l.name}</label>`)}</div>
+      <div class="lists"><div class="sechead">Priorities</div>${PRIS.map((p) => html`<label><input type="checkbox" id=${"dp-" + p} checked=${!filt.pris[p]} onChange=${() => setFilt({ ...filt, pris: { ...filt.pris, [p]: !filt.pris[p] } })}/>${p}</label>`)}</div>
+      <div style="display: grid; gap: 2px;"><button class="navlink">Snooze all…</button><button class="navlink">Settings</button></div></div>` : null}
+    ${sel != null ? html`<${Sheet} sel=${sel} occ=${occ} act=${act} close=${() => setSel(null)}/>` : null}
+    ${overlay && overlay.k === "editor" ? html`<${PEditor} id=${overlay.id} close=${() => setOverlay(null)}/>` : null}
+    ${overlay && overlay.k === "shade" ? html`<${Shade} occ=${occ} act=${act} close=${() => setOverlay(null)}/>` : null}
+    ${overlay && overlay.k === "alarm" ? html`<${FullAlarm} close=${() => setOverlay(null)}/>` : null}
+    ${overlay && overlay.k === "settings" ? html`<${PSettings} close=${() => setOverlay(null)} noGms=${noGms} precise=${precise} setPrecise=${setPrecise} granted=${granted} grant=${grant}/>` : null}
+    ${overlay && overlay.k === "first" ? html`<${PFirstStart} close=${() => setOverlay(null)} noGms=${noGms} granted=${granted} grant=${grant}/>` : null}
+  </div>`;
+}
+function Root() {
+  const [v, setV] = useState(() => { try { const k = (location.hash || "").replace("#", "").toUpperCase(); return PVARIANTS.some((x) => x.k === k) ? k : "A"; } catch (e) { return "A"; } });
+  const [overlay, setOverlay] = useState(null);
+  const [noGms, setNoGms] = useState(false);
+  const [precise, setPrecise] = useState(false);
+  const [granted, setGranted] = useState({ notif: true, alarms: true, dnd: true, lan: true, calendar: true });
+  const grant = (k) => setGranted({ ...granted, [k]: true });
+  NOGMS.on = noGms; PRECISE.on = precise;
+  const idx = PVARIANTS.findIndex((x) => x.k === v);
+  const go = (k) => { setV(k); try { history.replaceState(null, "", "#" + k); } catch (e) {} };
+  useEffect(() => { const onKey = (e) => { const t = e.target; if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return; if (e.key === "ArrowLeft") go(PVARIANTS[(idx + 2) % 3].k); if (e.key === "ArrowRight") go(PVARIANTS[(idx + 1) % 3].k); }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); });
+  return html`<header class="proto-head">
+      <div class="proto-eyebrow">Throwaway prototype, batch 2 · csnook/hab-bot#30 · sample data</div>
+      <h1>Reminders on Android</h1>
+      <p>The phone version of the settled desktop design. Batch 1 chose variant A (bottom navigation, five views); B and C are still here for comparison. Batch 2 adds first start with its permission requests, Settings (the gear in variant A, or the bar at the bottom), "This phone" with push status, precise location and every permission, and the place editor under Settings → Sources → Home. "No Google" in the bar turns this into a phone without Google Play Services. Turning on precise location adds its notification to the shade.</p>
+      <div class="proto-variants">${PVARIANTS.map((x) => html`<button aria-pressed=${x.k === v} onClick=${() => go(x.k)}><b>${x.k} · ${x.name}</b><br/>${x.blurb}</button>`)}</div>
+      <p>It is Wednesday 30 September at 17:40, with sample data, and nothing is saved.</p>
+    </header>
+    <div class="stage-scroll"><div class="stage"><div class="phone"><div class="screen">
+      <div class="sbar"><span>17:40</span><span>▾ ▴ ▮</span></div>
+      <${PhoneApp} key=${v} variant=${v} overlay=${overlay} setOverlay=${setOverlay} noGms=${noGms} precise=${precise} setPrecise=${setPrecise} granted=${granted} grant=${grant}/>
+      <div class="gbar"><span></span></div>
+    </div></div></div></div>
+    <div class="switcher" role="toolbar" aria-label="Prototype controls">
+      <button onClick=${() => go(PVARIANTS[(idx + 2) % 3].k)} aria-label="Previous variant">←</button>
+      <span class="lbl">${v} (${PVARIANTS[idx].name})</span>
+      <button onClick=${() => go(PVARIANTS[(idx + 1) % 3].k)} aria-label="Next variant">→</button>
+      <span class="sep"></span>
+      <button onClick=${() => setOverlay(overlay && overlay.k === "shade" ? null : { k: "shade" })}>Shade</button>
+      <button onClick=${() => setOverlay(overlay && overlay.k === "alarm" ? null : { k: "alarm" })}>Alarm</button>
+      <button onClick=${() => setOverlay({ k: "editor", id: "bins" })}>Editor</button>
+      <button onClick=${() => { setGranted({}); setOverlay({ k: "first" }); }}>First start</button>
+      <button onClick=${() => setOverlay({ k: "settings" })}>Settings</button>
+      <button onClick=${() => setNoGms(!noGms)} aria-pressed=${noGms}>${noGms ? "No Google ✓" : "No Google"}</button>
+    </div>`;
+}
+render(html`<${Root}/>`, document.getElementById("app"));
+
+</script>
+
+</body>
+</html>
