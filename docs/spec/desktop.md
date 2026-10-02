@@ -144,7 +144,7 @@ One dialog, opened from ⚙ and from the tray menu.
 
 | Section | What it holds |
 |---|---|
-| **You** | Your cap on others' reminders, with a warning below Medium. Quiet hours, with "include maximum". Your retention limit, with its warning and the 7-day notice. |
+| **You** | Your cap on others' reminders, with a warning below Medium. Quiet hours, with "include maximum". Your home location, in the first release (see [Sun events](sources.md#sun-events)). Your retention limit, with its warning and the 7-day notice. |
 | **Priorities** | The built-ins read-only, with Copy. The custom-priority editor: style and interval while due, escalation steps once overdue, overdue interval, ring duration, server wait, swipe, and breaking Do Not Disturb. |
 | **Sources** | Every source you can see, with its owner, health and faking level, and an editor for each (below). The "sources need attention" banner links here. |
 | **This device** | Name, portable or stationary, loudest alert, "Quiet this device until…", which lists it holds, and start at login. |

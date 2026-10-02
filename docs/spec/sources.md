@@ -58,6 +58,7 @@ A **source** is something configured that the app watches, such as a specific ca
 
 - **Sunrise, sunset, civil dawn and civil dusk,** each with an offset ("30 minutes before sunset"), calculated on the device.
 - **Where:** they use a configured place (Home by default) or the device's current location, chosen per reminder.
+- **In the first release,** before places exist, sun events and the daylight and darkness conditions use the user's **home location**. The first time a reminder needs it, the app asks for it: "Use where I am now" on phones, or a latitude and longitude on any device. It's stored as the user's Home place, so places later build on it, and it can be changed in Settings → You. Since it's configured rather than sensed, desktops evaluate these reminders too. Decided while slicing the [First release](https://github.com/csnook/hab-bot/issues/35).
 - **No firing** on a day when the event doesn't happen, as in polar regions.
 
 ### Time zones and daylight saving
