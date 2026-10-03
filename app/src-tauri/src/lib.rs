@@ -3,7 +3,7 @@
 #[cfg(target_os = "android")]
 mod android;
 
-use hab_core::{Core, InboxItem, Millis};
+use hab_core::{Core, InboxItem, Millis, NewReminder, Trigger};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(desktop)]
@@ -30,26 +30,50 @@ fn now() -> Millis {
         .unwrap_or(0)
 }
 
+/// Tells the core the device's current time zone, which floating reminders follow.
+fn sync_zone(core: &mut Core) {
+    if let Ok(zone) = iana_time_zone::get_timezone() {
+        core.set_zone(&zone);
+    }
+}
+
 /// The alarm path on Android writes to the same database from a second core, so the
 /// commands reload the stream first.
 fn fresh(app: &App) -> std::sync::MutexGuard<'_, Core> {
     let mut core = app.core.lock().unwrap();
     let _ = core.refresh();
+    sync_zone(&mut core);
     core
 }
 
 #[tauri::command]
 fn inbox(app: tauri::State<App>) -> Vec<InboxItem> {
-    fresh(&app).inbox()
+    fresh(&app).inbox(now())
 }
 
 #[tauri::command]
 fn create_one_off(app: tauri::State<App>, title: String, due_at: Millis) -> Result<(), String> {
+    create(
+        app,
+        NewReminder {
+            title,
+            triggers: vec![Trigger::OneOff { at: due_at }],
+            tz: None,
+        },
+    )
+}
+
+/// Makes a reminder with any triggers: one-offs and RRULE schedules, floating or pinned.
+#[tauri::command]
+fn create_reminder(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
+    create(app, reminder)
+}
+
+fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     let mut core = fresh(&app);
-    core.create_one_off(&title, due_at, now())
-        .map_err(|e| e.to_string())?;
+    core.create(reminder, now()).map_err(|e| e.to_string())?;
     #[cfg(target_os = "android")]
-    android::schedule_alarm(core.next_due());
+    android::schedule_alarm(core.next_due(now()));
     Ok(())
 }
 
@@ -85,7 +109,10 @@ fn spawn_clock(handle: AppHandle) {
             let ids: Vec<String> = {
                 let state = handle.state::<App>();
                 let core = fresh(&state);
-                core.inbox().into_iter().map(|i| i.occurrence.id).collect()
+                core.inbox(now())
+                    .into_iter()
+                    .map(|i| i.occurrence.id)
+                    .collect()
             };
             if ids != last {
                 last = ids;
@@ -104,6 +131,7 @@ fn spawn_clock(handle: AppHandle) {
         let opened = {
             let state = handle.state::<App>();
             let mut core = state.core.lock().unwrap();
+            sync_zone(&mut core);
             core.fire_due(now()).unwrap_or_default()
         };
         for occurrence in &opened {
@@ -155,6 +183,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             inbox,
             create_one_off,
+            create_reminder,
             complete,
             missing_permissions,
             request_permissions
@@ -169,7 +198,7 @@ pub fn run() {
             let path = dir.join("reminders.db");
             let core = Core::open(path.to_str().expect("utf-8 data path"), USER)?;
             #[cfg(target_os = "android")]
-            android::schedule_alarm(core.next_due());
+            android::schedule_alarm(core.next_due(now()));
             app.manage(App {
                 core: Mutex::new(core),
             });

@@ -8,3 +8,6 @@ li { display: flex; gap: .75rem; align-items: center; padding: .5rem 0; border-b
 li span { flex: 1; }
 time, .empty { opacity: .7; font-size: .9em; }
 .error { color: #c33; width: 100%; }
+.expected, .completed, .missed { opacity: .7; }
+.missed span { text-decoration: line-through; }
+.days label { margin-right: .4rem; }

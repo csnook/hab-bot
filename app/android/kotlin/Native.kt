@@ -16,7 +16,7 @@ object Native {
     @JvmStatic external fun complete(db: String, occurrenceId: String, now: Long): Boolean
 
     /** When the next unfired reminder comes due, or -1. */
-    @JvmStatic external fun nextDue(db: String): Long
+    @JvmStatic external fun nextDue(db: String, now: Long): Long
 
     /** The same file the Rust side opens in the Activity (`files_dir` in android.rs). */
     fun dbPath(context: Context): String = File(context.filesDir, "reminders.db").absolutePath

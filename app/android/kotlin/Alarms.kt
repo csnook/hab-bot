@@ -37,6 +37,6 @@ object Alarms {
 
     /** Registers the alarm for the core's next reminder. Used after firing and at boot. */
     fun scheduleNext(context: Context) {
-        scheduleAt(context, Native.nextDue(Native.dbPath(context)))
+        scheduleAt(context, Native.nextDue(Native.dbPath(context), System.currentTimeMillis()))
     }
 }

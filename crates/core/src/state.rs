@@ -1,21 +1,47 @@
 use crate::{Event, Millis};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+
+/// What prompts a reminder to fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Trigger {
+    /// Once, at an instant.
+    OneOff { at: Millis },
+    /// An iCalendar recurrence rule (RRULE), starting at a wall-clock time such as
+    /// `2026-10-05T07:00`. Several times a day are several triggers.
+    Schedule { rule: String, start: String },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reminder {
     pub id: String,
     pub title: String,
-    pub due_at: Millis,
+    pub triggers: Vec<Trigger>,
+    /// A named time zone, or `None` for floating: the clock wherever the device is.
+    pub tz: Option<String>,
+    pub created_at: Millis,
     /// A one-off is finished once its occurrence is closed.
     pub finished: bool,
+}
+
+impl Reminder {
+    pub fn is_one_off(&self) -> bool {
+        self.triggers
+            .iter()
+            .all(|t| matches!(t, Trigger::OneOff { .. }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OccurrenceStatus {
+    /// Predicted to come due; becomes an occurrence only if the reminder fires.
+    Expected,
     Due,
     Completed,
+    /// Closed by the app: a newer instance fired, or it expired. Nobody chose it.
+    Missed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -27,13 +53,17 @@ pub struct Occurrence {
     pub fired_at: Millis,
     pub status: OccurrenceStatus,
     pub completed_by: Option<String>,
-    pub completed_at: Option<Millis>,
+    /// When it was closed: the recorded time for a completion, the time it was
+    /// superseded for a miss.
+    pub closed_at: Option<Millis>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboxSection {
     Due,
+    LaterToday,
+    EarlierToday,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,7 +77,7 @@ pub struct InboxItem {
 pub struct State {
     reminders: BTreeMap<String, Reminder>,
     occurrences: BTreeMap<String, Occurrence>,
-    fired: HashSet<(String, Millis)>,
+    fired: HashSet<(String, String)>,
 }
 
 impl State {
@@ -64,15 +94,24 @@ impl State {
             Event::ReminderCreated {
                 reminder_id,
                 title,
+                triggers,
+                tz,
                 due_at,
-                ..
+                created_at,
             } => {
+                // The walking skeleton recorded a bare `due_at`.
+                let mut triggers = triggers.clone();
+                if triggers.is_empty() {
+                    triggers.extend(due_at.map(|at| Trigger::OneOff { at }));
+                }
                 self.reminders.insert(
                     reminder_id.clone(),
                     Reminder {
                         id: reminder_id.clone(),
                         title: title.clone(),
-                        due_at: *due_at,
+                        triggers,
+                        tz: tz.clone(),
+                        created_at: *created_at,
                         finished: false,
                     },
                 );
@@ -92,7 +131,8 @@ impl State {
                     .get(reminder_id)
                     .map(|r| r.title.clone())
                     .unwrap_or_default();
-                self.fired.insert((reminder_id.clone(), *scheduled_at));
+                self.fired
+                    .insert((reminder_id.clone(), occurrence_id.clone()));
                 self.occurrences.insert(
                     occurrence_id.clone(),
                     Occurrence {
@@ -103,7 +143,7 @@ impl State {
                         fired_at: *fired_at,
                         status: OccurrenceStatus::Due,
                         completed_by: None,
-                        completed_at: None,
+                        closed_at: None,
                     },
                 );
             }
@@ -112,16 +152,32 @@ impl State {
                 by,
                 at,
             } => {
-                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
-                    if o.status == OccurrenceStatus::Due {
-                        o.status = OccurrenceStatus::Completed;
-                        o.completed_by = Some(by.clone());
-                        o.completed_at = Some(*at);
-                        if let Some(r) = self.reminders.get_mut(&o.reminder_id) {
-                            r.finished = true;
-                        }
-                    }
-                }
+                self.close(
+                    occurrence_id,
+                    OccurrenceStatus::Completed,
+                    *at,
+                    Some(by.clone()),
+                );
+            }
+            Event::OccurrenceMissed { occurrence_id, at } => {
+                self.close(occurrence_id, OccurrenceStatus::Missed, *at, None);
+            }
+        }
+    }
+
+    fn close(&mut self, id: &str, status: OccurrenceStatus, at: Millis, by: Option<String>) {
+        let Some(o) = self.occurrences.get_mut(id) else {
+            return;
+        };
+        if o.status != OccurrenceStatus::Due {
+            return;
+        }
+        o.status = status;
+        o.closed_at = Some(at);
+        o.completed_by = by;
+        if let Some(r) = self.reminders.get_mut(&o.reminder_id) {
+            if r.is_one_off() {
+                r.finished = true;
             }
         }
     }
@@ -130,8 +186,16 @@ impl State {
         self.reminders.values()
     }
 
+    pub fn reminder(&self, id: &str) -> Option<&Reminder> {
+        self.reminders.get(id)
+    }
+
     pub fn occurrence(&self, id: &str) -> Option<&Occurrence> {
         self.occurrences.get(id)
+    }
+
+    pub fn occurrences(&self) -> impl Iterator<Item = &Occurrence> {
+        self.occurrences.values()
     }
 
     pub fn is_open(&self, id: &str) -> bool {
@@ -139,31 +203,26 @@ impl State {
             .is_some_and(|o| o.status == OccurrenceStatus::Due)
     }
 
-    pub fn has_fired(&self, reminder_id: &str, scheduled_at: Millis) -> bool {
+    /// The reminder's open occurrence, if any. There is at most one (ADR 0001).
+    pub fn open_occurrence(&self, reminder_id: &str) -> Option<&Occurrence> {
+        self.occurrences
+            .values()
+            .find(|o| o.reminder_id == reminder_id && o.status == OccurrenceStatus::Due)
+    }
+
+    pub fn has_fired(&self, reminder_id: &str, occurrence_id: &str) -> bool {
         self.fired
-            .contains(&(reminder_id.to_string(), scheduled_at))
+            .contains(&(reminder_id.to_string(), occurrence_id.to_string()))
     }
 
-    pub fn inbox(&self) -> Vec<InboxItem> {
-        let mut items: Vec<_> = self
-            .occurrences
+    /// The latest scheduled time of any of the reminder's occurrences, or its creation:
+    /// instances after this have not been evaluated yet.
+    pub fn evaluated_through(&self, r: &Reminder) -> Millis {
+        self.occurrences
             .values()
-            .filter(|o| o.status == OccurrenceStatus::Due)
-            .cloned()
-            .map(|occurrence| InboxItem {
-                section: InboxSection::Due,
-                occurrence,
-            })
-            .collect();
-        items.sort_by_key(|i| i.occurrence.scheduled_at);
-        items
-    }
-
-    pub fn next_due(&self) -> Option<Millis> {
-        self.reminders
-            .values()
-            .filter(|r| !r.finished && !self.has_fired(&r.id, r.due_at))
-            .map(|r| r.due_at)
-            .min()
+            .filter(|o| o.reminder_id == r.id)
+            .map(|o| o.scheduled_at)
+            .max()
+            .map_or(r.created_at, |s| s.max(r.created_at))
     }
 }

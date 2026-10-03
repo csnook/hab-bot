@@ -14,6 +14,13 @@ use jni::JNIEnv;
 const USER: &str = "me";
 const PACKAGE: &str = "dev.habbot.reminders";
 
+/// Floating reminders follow the device's current zone.
+fn sync_zone(core: &mut Core) {
+    if let Ok(zone) = iana_time_zone::get_timezone() {
+        core.set_zone(&zone);
+    }
+}
+
 fn with_core<T>(db: &str, f: impl FnOnce(&mut Core) -> hab_core::Result<T>) -> Option<T> {
     let mut core = Core::open(db, USER).ok()?;
     f(&mut core).ok()
@@ -29,7 +36,11 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_fire<'l>(
     now: jlong,
 ) -> jstring {
     let db: String = env.get_string(&db).map(Into::into).unwrap_or_default();
-    let opened = with_core(&db, |core| core.fire_due(now)).unwrap_or_default();
+    let opened = with_core(&db, |core| {
+        sync_zone(core);
+        core.fire_due(now)
+    })
+    .unwrap_or_default();
     let json: Vec<_> = opened
         .iter()
         .map(|o| serde_json::json!({ "id": o.id, "title": o.title }))
@@ -56,17 +67,21 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_complete<'l>(
     with_core(&db, |core| core.complete(&id, now)).is_some() as jboolean
 }
 
-/// `Native.nextDue(db)`: when the next unfired reminder comes due, or -1.
+/// `Native.nextDue(db, now)`: when the next unfired reminder comes due, or -1.
 #[no_mangle]
 pub extern "system" fn Java_dev_habbot_reminders_Native_nextDue<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     db: JString<'l>,
+    now: jlong,
 ) -> jlong {
     let db: String = env.get_string(&db).map(Into::into).unwrap_or_default();
-    with_core(&db, |core| Ok(core.next_due()))
-        .flatten()
-        .unwrap_or(-1)
+    with_core(&db, |core| {
+        sync_zone(core);
+        Ok(core.next_due(now))
+    })
+    .flatten()
+    .unwrap_or(-1)
 }
 
 /// Runs `f` with an attached JNI environment and the application context.
