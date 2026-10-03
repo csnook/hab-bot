@@ -4,7 +4,11 @@
 
 ### Issue tracker
 
-GitHub Issues on `csnook/hab-bot`, driven through the GitHub MCP tools in cloud sessions. See `docs/agents/issue-tracker.md`.
+GitHub Issues on `csnook/hab-bot`, driven through the GitHub MCP tools, with `gh api` for native blocking links. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
