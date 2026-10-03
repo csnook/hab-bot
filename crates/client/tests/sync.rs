@@ -393,15 +393,14 @@ async fn another_device_downloads_the_history_in_bulk() {
             .state()
             .occurrences
             .values()
-            .all(|o| o.completed.is_some()));
+            .all(|o| o.completed().is_some()));
         let who = s
             .state()
             .occurrences
             .values()
             .next()
             .unwrap()
-            .completed
-            .clone()
+            .completed()
             .unwrap()
             .0;
         assert_eq!(who, format!("u{}", rig.first.profile.account_id));

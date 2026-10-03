@@ -3,8 +3,11 @@ use std::path::Path;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::event::{Event, Outgoing, Payload, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE};
-use crate::state::{DueItem, State, UpcomingItem};
+use crate::event::{
+    Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
+};
+use crate::hlc::Hlc;
+use crate::state::{ClosingKind, DueItem, State, UpcomingItem};
 use crate::store::Store;
 use crate::{Error, Result};
 
@@ -28,6 +31,28 @@ pub struct Snapshot {
     pub update_notice: Option<String>,
     /// Other devices of this user that signed in, not yet dismissed.
     pub sign_in_notices: Vec<SignInNotice>,
+    /// Actions of this user's devices that lost to a completion on another.
+    pub reconciliations: Vec<ReconciliationNotice>,
+}
+
+/// "Your phone skipped “Bins”. It counts as completed."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReconciliationNotice {
+    /// Names the notice, for dismissing it.
+    pub id: String,
+    pub occurrence_id: String,
+    /// The device whose action lost.
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub text: String,
+}
+
+/// New values for a reminder's settings; `None` leaves a setting alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditReminder {
+    pub title: Option<String>,
+    pub fire_at: Option<i64>,
+    pub note: Option<String>,
 }
 
 /// "New device signed in: <name>, just now. Not you? Remove it".
@@ -287,22 +312,145 @@ impl Core {
         Ok(fired)
     }
 
+    /// The id of an open occurrence, which may have merged into another's.
+    fn open_id(&self, occurrence_id: &str) -> Result<String> {
+        let id = self.state.resolve(occurrence_id).to_string();
+        match self.state.occurrences.get(&id) {
+            Some(o) if o.is_open() => Ok(id),
+            _ => Err(Error::NotOpen(occurrence_id.to_string())),
+        }
+    }
+
     /// Completes an open occurrence, recording who and when. The one-off
     /// reminder is then finished.
     pub fn complete(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
-        let open = self
-            .state
-            .occurrences
-            .get(occurrence_id)
-            .is_some_and(|o| o.completed.is_none());
-        if !open {
-            return Err(Error::NotOpen(occurrence_id.to_string()));
-        }
+        let id = self.open_id(occurrence_id)?;
         self.record(
             now,
             Event::OccurrenceCompleted {
-                occurrence_id: occurrence_id.to_string(),
+                occurrence_id: id,
                 completed_at: now,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Skips an open occurrence, with an optional note.
+    pub fn skip(&mut self, occurrence_id: &str, note: Option<&str>, now: i64) -> Result<()> {
+        let id = self.open_id(occurrence_id)?;
+        let note = note.map(str::trim).filter(|n| !n.is_empty());
+        self.record(
+            now,
+            Event::OccurrenceSkipped {
+                occurrence_id: id,
+                skipped_at: now,
+                note: note.map(str::to_string),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Closes an open occurrence as missed, because it expired.
+    pub fn mark_missed(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
+        let id = self.open_id(occurrence_id)?;
+        self.record(
+            now,
+            Event::OccurrenceMissed {
+                occurrence_id: id,
+                missed_at: now,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Quiets an open occurrence's alerts until `until`.
+    pub fn snooze(&mut self, occurrence_id: &str, until: i64, now: i64) -> Result<()> {
+        let id = self.open_id(occurrence_id)?;
+        self.record(
+            now,
+            Event::OccurrenceSnoozed {
+                occurrence_id: id,
+                until,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Silences an open occurrence's current alert on all of the user's devices.
+    pub fn acknowledge(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
+        let id = self.open_id(occurrence_id)?;
+        self.record(now, Event::OccurrenceAcknowledged { occurrence_id: id })?;
+        Ok(())
+    }
+
+    /// The clock for a change made now, later than any this device has seen.
+    fn next_hlc(&self, now: i64) -> Hlc {
+        Hlc::next(now, &self.device_id, self.state.latest_hlc())
+    }
+
+    /// Changes a reminder's settings. Each setting that differs is its own
+    /// change, judged on its own against changes from other devices.
+    pub fn edit_reminder(&mut self, reminder_id: &str, edit: EditReminder, now: i64) -> Result<()> {
+        let current = self
+            .state
+            .reminders
+            .get(reminder_id)
+            .ok_or_else(|| Error::NoReminder(reminder_id.to_string()))?
+            .clone();
+        let mut changes = Vec::new();
+        if let Some(title) = edit.title {
+            let title = title.trim().to_string();
+            if title.is_empty() {
+                return Err(Error::EmptyTitle);
+            }
+            if title != current.title {
+                changes.push(Change::Title(title));
+            }
+        }
+        if let Some(fire_at) = edit.fire_at.filter(|t| *t != current.fire_at) {
+            changes.push(Change::FireAt(fire_at));
+        }
+        if let Some(note) = edit.note.filter(|n| *n != current.note) {
+            changes.push(Change::Note(note));
+        }
+        for change in changes {
+            self.record(
+                now,
+                Event::ReminderEdited {
+                    reminder_id: reminder_id.to_string(),
+                    hlc: self.next_hlc(now),
+                    change,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Brings back a value a setting once had, such as the one that lost to
+    /// another device's change. It is a new change, so it wins now.
+    pub fn restore_setting(
+        &mut self,
+        reminder_id: &str,
+        setting: Setting,
+        version_event_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        if !self.state.reminders.contains_key(reminder_id) {
+            return Err(Error::NoReminder(reminder_id.to_string()));
+        }
+        let change = self
+            .state
+            .history(reminder_id, setting)
+            .into_iter()
+            .find(|v| v.event_id == version_event_id)
+            .ok_or(Error::NoSuchVersion)?
+            .change;
+        self.record(
+            now,
+            Event::ReminderEdited {
+                reminder_id: reminder_id.to_string(),
+                hlc: self.next_hlc(now),
+                change,
             },
         )?;
         Ok(())
@@ -371,8 +519,44 @@ impl Core {
         self.store.set_meta(&format!("dismissed:{id}"), "1")
     }
 
+    /// Closings by this user's devices that lost to a completion, which the
+    /// user hasn't dismissed.
+    fn reconciliation_notices(&self) -> Vec<ReconciliationNotice> {
+        self.state
+            .reconciliations
+            .iter()
+            .filter(|r| r.by == self.user_id)
+            .filter(|r| !matches!(self.store.meta(&format!("dismissed:{}", r.id)), Ok(Some(_))))
+            .map(|r| {
+                let title = self
+                    .state
+                    .occurrences
+                    .get(&r.occurrence_id)
+                    .and_then(|o| self.state.reminders.get(&o.reminder_id))
+                    .map_or("a reminder", |rem| rem.title.as_str());
+                let device_name = self.device_name(&r.device_id).map(str::to_string);
+                let device = device_name.as_deref().unwrap_or("another device");
+                let did = match r.lost {
+                    ClosingKind::Skipped => "skipped",
+                    ClosingKind::Missed => "missed",
+                    ClosingKind::Completed => "completed",
+                };
+                ReconciliationNotice {
+                    id: r.id.clone(),
+                    occurrence_id: r.occurrence_id.clone(),
+                    device_id: r.device_id.clone(),
+                    text: format!(
+                        "Your {device} {did} \u{201c}{title}\u{201d}. It counts as completed."
+                    ),
+                    device_name,
+                }
+            })
+            .collect()
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            reconciliations: self.reconciliation_notices(),
             sign_in_notices: self.sign_in_notices(),
             due: self.state.due(),
             upcoming: self.state.upcoming(),
@@ -489,7 +673,7 @@ mod tests {
 
         assert!(c.snapshot().due.is_empty());
         let o = &c.state().occurrences[&fired[0].occurrence_id];
-        assert_eq!(o.completed, Some((c.user_id().to_string(), T0 + 30)));
+        assert_eq!(o.completed(), Some((c.user_id().to_string(), T0 + 30)));
         assert!(c.state().is_finished(&rid));
         // Finished: it never fires again.
         assert!(c.tick(T0 + 1000).unwrap().is_empty());
@@ -554,7 +738,7 @@ mod tests {
         let mut c = Core::open(&path).unwrap();
         assert_eq!(c.snapshot().due.len(), 1);
         assert_eq!(c.snapshot().due[0].occurrence_id, open_id);
-        assert!(c.state().occurrences[&done_id].completed.is_some());
+        assert!(c.state().occurrences[&done_id].completed().is_some());
         assert_eq!(c.snapshot().upcoming.len(), 2);
 
         let fired = c.tick(T0 + 200).unwrap();

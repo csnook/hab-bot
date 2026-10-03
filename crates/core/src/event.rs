@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::hlc::Hlc;
+
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
 pub const FORMAT_VERSION: u32 = 1;
@@ -30,6 +32,29 @@ pub enum Event {
         occurrence_id: String,
         completed_at: i64,
     },
+    /// A reminder's setting was changed. Of two changes to the same setting,
+    /// the one with the later `hlc` wins; the other stays in the history and
+    /// can be restored by making the change again.
+    ReminderEdited {
+        reminder_id: String,
+        hlc: Hlc,
+        change: Change,
+    },
+    /// Someone closed the occurrence without doing it, with an optional note.
+    OccurrenceSkipped {
+        occurrence_id: String,
+        skipped_at: i64,
+        note: Option<String>,
+    },
+    /// The app closed the occurrence because it expired before anyone acted.
+    OccurrenceMissed {
+        occurrence_id: String,
+        missed_at: i64,
+    },
+    /// Someone quieted the occurrence's alerts until `until`.
+    OccurrenceSnoozed { occurrence_id: String, until: i64 },
+    /// Someone silenced the occurrence's current alert.
+    OccurrenceAcknowledged { occurrence_id: String },
     /// The device that made this event is called `name`. Device names live
     /// here, in the user's encrypted personal list, so the server never
     /// reads them. The first device says it when it joins.
@@ -37,6 +62,35 @@ pub enum Event {
     /// The device that made this event has just signed in to the account,
     /// and is called `name`. The user's other devices show it as a notice.
     DeviceSignedIn { name: String },
+}
+
+/// A reminder's settings, each of which is changed (and merged) on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Setting {
+    Title,
+    FireAt,
+    /// A free-text note. It is one value: concurrent edits never merge.
+    Note,
+}
+
+/// A new value for one setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "setting", content = "value", rename_all = "snake_case")]
+pub enum Change {
+    Title(String),
+    FireAt(i64),
+    Note(String),
+}
+
+impl Change {
+    pub fn setting(&self) -> Setting {
+        match self {
+            Change::Title(_) => Setting::Title,
+            Change::FireAt(_) => Setting::FireAt,
+            Change::Note(_) => Setting::Note,
+        }
+    }
 }
 
 /// An event with its place in its list's stream.

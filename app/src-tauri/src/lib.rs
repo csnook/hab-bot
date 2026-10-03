@@ -85,6 +85,22 @@ fn complete_occurrence(
     Ok(())
 }
 
+#[tauri::command]
+fn skip_occurrence(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .skip(&occurrence_id, None, now())
+        .map_err(|e| e.to_string())?;
+    app.sync_wake.notify_one();
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
+}
+
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -498,6 +514,7 @@ pub fn run() {
             snapshot,
             create_reminder,
             complete_occurrence,
+            skip_occurrence,
             setup_state,
             choose_standalone,
             probe_server,

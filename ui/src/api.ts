@@ -8,6 +8,8 @@ export interface DueItem {
   fired_at: number;
   /** The server hasn't received a change to it yet. */
   not_sent: boolean;
+  snoozed_until: number | null;
+  acknowledged: boolean;
 }
 
 export interface UpcomingItem {
@@ -26,10 +28,21 @@ export interface SignInNotice {
   at: number;
 }
 
+/** An action of one of this user's devices lost to a completion on another. */
+export interface ReconciliationNotice {
+  id: string;
+  occurrence_id: string;
+  device_id: string;
+  device_name: string | null;
+  /** "Your phone skipped “Bins”. It counts as completed." */
+  text: string;
+}
+
 export interface Snapshot {
   due: DueItem[];
   upcoming: UpcomingItem[];
   sign_in_notices: SignInNotice[];
+  reconciliations: ReconciliationNotice[];
   /** Set while the list holds changes from a newer app. */
   update_notice: string | null;
 }
@@ -39,6 +52,8 @@ export const createReminder = (title: string, fireAt: number) =>
   invoke<void>("create_reminder", { title, fireAt });
 export const completeOccurrence = (occurrenceId: string) =>
   invoke<void>("complete_occurrence", { occurrenceId });
+export const skipOccurrence = (occurrenceId: string) =>
+  invoke<void>("skip_occurrence", { occurrenceId });
 export const dismissNotice = (id: string) => invoke<void>("dismiss_notice", { id });
 export const onStateChanged = (f: () => void) => listen("state-changed", f);
 

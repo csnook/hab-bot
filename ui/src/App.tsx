@@ -4,6 +4,7 @@ import {
   createReminder,
   dismissNotice,
   onStateChanged,
+  skipOccurrence,
   snapshot,
   type Snapshot,
 } from "./api";
@@ -30,6 +31,7 @@ export function App() {
         <button aria-pressed={page === "settings"} onClick={() => setPage("settings")}>Settings</button>
       </nav>
       {setup.mode === "joined" && <SignInNotices onRemove={() => setPage("settings")} />}
+      {setup.mode === "joined" && <ReconciliationBanners />}
       {page === "inbox" ? (
         <Inbox />
       ) : (
@@ -74,11 +76,39 @@ function SignInNotices({ onRemove }: { onRemove: () => void }) {
   );
 }
 
+/** "Your phone skipped… It counts as completed.", when two devices disagreed. */
+function ReconciliationBanners() {
+  const [notices, setNotices] = useState<Snapshot["reconciliations"]>([]);
+
+  useEffect(() => {
+    const refresh = () => {
+      snapshot().then((s) => setNotices(s.reconciliations)).catch(() => {});
+    };
+    refresh();
+    const unlisten = onStateChanged(refresh);
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  return (
+    <>
+      {notices.map((n) => (
+        <p class="notice banner" role="status" key={n.id}>
+          {n.text}{" "}
+          <button type="button" onClick={() => dismissNotice(n.id).catch(() => {})}>Dismiss</button>
+        </p>
+      ))}
+    </>
+  );
+}
+
 function Inbox() {
   const [snap, setSnap] = useState<Snapshot>({
     due: [],
     upcoming: [],
     sign_in_notices: [],
+    reconciliations: [],
     update_notice: null,
   });
   const [error, setError] = useState("");
@@ -95,6 +125,8 @@ function Inbox() {
 
   const done = (id: string) =>
     completeOccurrence(id).catch((e) => setError(String(e)));
+  const skip = (id: string) =>
+    skipOccurrence(id).catch((e) => setError(String(e)));
 
   return (
     <main>
@@ -112,6 +144,7 @@ function Inbox() {
               {d.not_sent && <NotSent />}
               <span class="when">{formatTime(d.scheduled_at)}</span>
               <button onClick={() => done(d.occurrence_id)}>Done</button>
+              <button onClick={() => skip(d.occurrence_id)}>Skip</button>
             </li>
           ))}
         </ul>

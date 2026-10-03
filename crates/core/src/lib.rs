@@ -11,12 +11,19 @@
 
 mod core;
 mod event;
+mod hlc;
 mod state;
 mod store;
 
-pub use crate::core::{Core, Fired, SignInNotice, Snapshot};
-pub use event::{Event, Outgoing, Payload, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE};
-pub use state::{DueItem, Occurrence, Reminder, SignIn, State, UpcomingItem};
+pub use crate::core::{Core, EditReminder, Fired, ReconciliationNotice, SignInNotice, Snapshot};
+pub use event::{
+    Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
+};
+pub use hlc::{Hlc, MAX_AHEAD_MS};
+pub use state::{
+    Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder, SettingVersion, SignIn,
+    State, UpcomingItem,
+};
 pub use store::{HeldEvent, Store};
 
 /// Errors from the core.
@@ -28,6 +35,10 @@ pub enum Error {
     Corrupt(#[from] serde_json::Error),
     #[error("the title is empty")]
     EmptyTitle,
+    #[error("there is no reminder {0}")]
+    NoReminder(String),
+    #[error("that value was never one of the setting's")]
+    NoSuchVersion,
     #[error("there is no open occurrence {0}")]
     NotOpen(String),
     #[error("an event from the server could not be read: {0}")]
