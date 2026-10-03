@@ -9,7 +9,7 @@ use crate::event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
-use crate::priority::Priority;
+use crate::priority::{AlertStyle, Priority};
 use crate::schedule::{self, Schedule};
 use crate::state::{ClosingKind, DueItem, Reminder, State, UpcomingItem};
 use crate::store::Store;
@@ -891,6 +891,28 @@ impl Core {
             Event::OccurrenceAcknowledged { occurrence_id: id },
         )?;
         Ok(())
+    }
+
+    /// Records in the history that this device alerted its user about an
+    /// open occurrence in `style`: the first alert, or a change of style.
+    /// Repeats aren't recorded.
+    pub fn record_alert(&mut self, occurrence_id: &str, style: AlertStyle, now: i64) -> Result<()> {
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        self.record_in(
+            &list_id,
+            now,
+            Event::OccurrenceAlerted {
+                occurrence_id: id,
+                style,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// The style this device last recorded an alert in for the occurrence.
+    pub fn last_alert_style(&self, occurrence_id: &str) -> Option<AlertStyle> {
+        self.states()
+            .find_map(|(_, s)| s.last_alert_style(occurrence_id, &self.device_id))
     }
 
     /// The clock for a change made now, later than any this device has seen.

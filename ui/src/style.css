@@ -8,6 +8,7 @@ h1 { font-size: 1.4rem; margin: 0 0 12px; }
 h2 { font-size: 1rem; margin: 20px 0 6px; }
 ul { list-style: none; margin: 0; padding: 0; }
 li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #8884; }
+li.opened { outline: 2px solid #3584e4; outline-offset: 2px; }
 .title { flex: 1; font-weight: 600; }
 .when, .empty { color: #888; font-size: 0.9rem; }
 .error { color: #c33; }

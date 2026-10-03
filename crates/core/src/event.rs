@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hlc::Hlc;
-use crate::priority::Priority;
+use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -67,6 +67,13 @@ pub enum Event {
     OccurrenceSnoozed { occurrence_id: String, until: i64 },
     /// Someone silenced the occurrence's current alert.
     OccurrenceAcknowledged { occurrence_id: String },
+    /// The device that made this event alerted its user about the occurrence
+    /// in `style`. Recorded for the first alert and each change of style, not
+    /// for repeats. Format 4.
+    OccurrenceAlerted {
+        occurrence_id: String,
+        style: AlertStyle,
+    },
     /// The list is called `name`. A standalone device's reminders come into
     /// an account as a list named after the device, and say so with this.
     /// Of several, the latest in the stream counts.
@@ -152,6 +159,8 @@ impl Event {
                 change: Change::Priority(_) | Change::Overdue(_) | Change::Expiry(_),
                 ..
             } => 3,
+            // Alerts arrived in format 4.
+            Event::OccurrenceAlerted { .. } => 4,
             _ => 1,
         }
     }

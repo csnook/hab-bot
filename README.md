@@ -42,7 +42,17 @@ Everything goes through `cargo xtask`. It installs the UI's packages when they'r
 
 ## Using it
 
-Fill in the form (title, date, time) and press Create. At that time an occurrence opens, a notification shows the title, and the reminder appears under **Due** in the Inbox. **Done** completes it.
+Fill in the form (title, date, time) and press Create. At that time an occurrence opens, a notification with **Done** and **Skip** buttons shows the title, and the reminder appears under **Due** in the Inbox. **Done** completes it.
+
+## Notifications
+
+Alerts are our own `org.freedesktop.Notifications` calls through `zbus` (Tauri's notification plugin has no buttons, and `notify-rust` can only report a button by blocking a thread per notification). The code is in `app/src-tauri/src/notify.rs`; what to alert, and when, is decided by `hab_core::Alerter` (`crates/core/src/alerter.rs`), which Android can share.
+
+- **Styles:** silent is low urgency with `suppress-sound`; gentle is normal urgency with the `message-new-instant` sound from the sound theme and a 10 s timeout; insistent is gentle again every overdue interval until the occurrence closes. Each priority's due style and escalation steps are followed, counted from when the occurrence went overdue.
+- **Buttons:** Done and Skip, and a click on the notification (`default`) opens the window at that occurrence. They work with the window closed. Snooze joins with the snoozing ticket.
+- **Do Not Disturb:** the server's `Inhibited` property (Plasma). GNOME doesn't expose it, so there the `show-banners` setting is read with `gsettings`. While on, priorities that don't break it alert as silent, then catch up at their current level.
+- **History:** the first alert and each change of style are written to the list as `OccurrenceAlerted` events (format 4) with the device that alerted. Repeats aren't.
+- **Alarm** (#42) isn't built: where the alerter decides on an alarm it is delivered as an insistent notification, with `Notification::style` still `Alarm` for the alarm code to act on.
 
 Closing the window hides it and leaves the app running in the tray, where reminders still fire. Use **Quit** in the tray menu to exit. On Linux Tauri doesn't report tray clicks, so use **Open Reminders** in the tray menu to bring the window back. Starting the app a second time raises the running one.
 

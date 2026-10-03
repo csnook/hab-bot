@@ -13,18 +13,23 @@ use hab_client::{
     JoinRequest, KeyStore, NewDevice, PasswordCheck, PendingDevice, Pinned, Profile, Setup,
     SetupFile, SignInCode, SignInRequest, SignInTarget, Syncer,
 };
-use hab_core::{Core, Snapshot};
+use hab_core::{Alerter, Core, Snapshot};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{watch, Notify};
 
 /// How long the scheduler sleeps at most, so it notices clock changes and
 /// resumes from suspend promptly.
 const MAX_SLEEP: Duration = Duration::from_secs(30);
 const STATE_CHANGED: &str = "state-changed";
+/// Sent to the window when a notification is clicked; the payload is the
+/// occurrence's id.
+const OPEN_OCCURRENCE: &str = "open-occurrence";
+
+mod notify;
+use notify::{Delivery, UserAction};
 
 struct App {
     core: Arc<Mutex<Core>>,
@@ -771,20 +776,30 @@ async fn key_store_name(app: tauri::State<'_, App>) -> Result<String, String> {
     Ok(KeyStore::open(&app.data_dir).await.backend().to_string())
 }
 
-/// Fires what is due, shows a plain notification for each, and sleeps until
-/// the next reminder. The first pass fires reminders whose time passed while
-/// the app was closed.
+/// Fires what is due, alerts about every open occurrence in the style its
+/// priority calls for right now (see `hab_core::Alerter`), and sleeps until
+/// the next reminder, escalation, repeat or end of a snooze. The first pass
+/// fires reminders whose time passed while the app was closed.
+///
+/// Alerting looks at every open occurrence rather than only what `tick` just
+/// fired: that covers escalation, repeats, snoozes ending and catching up
+/// after Do Not Disturb, and it still alerts a late firing only for the
+/// latest instance because `tick` closes the earlier ones as missed.
 fn run_scheduler(
     app: AppHandle,
     core: Arc<Mutex<Core>>,
     sync_wake: Arc<Notify>,
     woken: mpsc::Receiver<()>,
+    delivery: Arc<Delivery>,
 ) {
     // When an open occurrence next goes overdue: the window then has to move
     // it from Due to Overdue.
     let mut overdue_at: Option<i64> = None;
+    let mut alerter = Alerter::new();
     loop {
-        let (fired, next, next_overdue) = {
+        // Asked of the notification server before taking the core's lock.
+        let inhibited = delivery.inhibited();
+        let (fired, next, next_overdue, pass) = {
             let mut core = core.lock().unwrap();
             // The user may have travelled: floating reminders follow.
             let _ = core.use_system_zone();
@@ -792,27 +807,35 @@ fn run_scheduler(
                 eprintln!("tick failed: {e}");
                 Vec::new()
             });
-            (fired, core.next_fire_at(), core.next_overdue_at(now()))
+            let pass = alerter
+                .pass(&mut core, now(), inhibited)
+                .unwrap_or_else(|e| {
+                    eprintln!("alerting failed: {e}");
+                    Default::default()
+                });
+            (
+                fired,
+                core.next_fire_at(),
+                core.next_overdue_at(now()),
+                pass,
+            )
         };
         let went_overdue = overdue_at.is_some_and(|t| t <= now());
         overdue_at = next_overdue;
         if went_overdue {
             let _ = app.emit(STATE_CHANGED, ());
         }
-        let next = next.into_iter().chain(next_overdue).min();
-        for f in &fired {
-            if let Err(e) = app
-                .notification()
-                .builder()
-                .title(&f.title)
-                .body("Reminder")
-                .show()
-            {
-                eprintln!("notification failed: {e}");
-            }
+        let next = next
+            .into_iter()
+            .chain(next_overdue)
+            .chain(pass.next_at)
+            .min();
+        delivery.apply(&pass.commands);
+        // Alerts are in the history, which syncs.
+        if !fired.is_empty() || !pass.commands.is_empty() {
+            sync_wake.notify_one();
         }
         if !fired.is_empty() {
-            sync_wake.notify_one();
             let _ = app.emit(STATE_CHANGED, ());
         }
         let wait = next
@@ -825,12 +848,39 @@ fn run_scheduler(
     }
 }
 
+/// What a click on a notification or one of its buttons does. It works with
+/// the window closed: Done and Skip act on the core directly.
+fn act_on_notification(
+    action: UserAction,
+    app: &AppHandle,
+    core: &Mutex<Core>,
+    sync_wake: &Notify,
+    wake: &Sender<()>,
+) {
+    let result = match &action {
+        UserAction::Done(id) => core.lock().unwrap().complete(id, now()),
+        UserAction::Skip(id) => core.lock().unwrap().skip(id, None, now()),
+        UserAction::Open(id) => {
+            show_window(app);
+            let _ = app.emit(OPEN_OCCURRENCE, id);
+            return;
+        }
+    };
+    if let Err(e) = result {
+        // Most likely closed elsewhere a moment ago.
+        eprintln!("notification action failed: {e}");
+    }
+    sync_wake.notify_one();
+    // The scheduler takes the notification down.
+    let _ = wake.send(());
+    let _ = app.emit(STATE_CHANGED, ());
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app);
         }))
-        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             snapshot,
             create_reminder,
@@ -869,6 +919,7 @@ pub fn run() {
             let data_dir = data_dir_of(&db);
             let setup = SetupFile::in_dir(&data_dir).load()?;
             let (wake, woken) = mpsc::channel();
+            let wake_scheduler = wake.clone();
             let sync_wake = Arc::new(Notify::new());
             let (sync_stop, stop) = watch::channel(false);
             let syncer: SyncerSlot = Arc::new(Mutex::new(None));
@@ -923,7 +974,26 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            std::thread::spawn(move || run_scheduler(handle, core, sync_wake, woken));
+            let delivery = Arc::new(Delivery::new(Box::new(notify::DbusNotifier::session())));
+            {
+                let (delivery, handle, core, sync_wake, wake) = (
+                    delivery.clone(),
+                    handle.clone(),
+                    core.clone(),
+                    sync_wake.clone(),
+                    wake_scheduler,
+                );
+                notify::listen(None, move |signal| {
+                    // A change to Do Not Disturb is noticed at once.
+                    if signal == notify::Signal::PropertiesChanged {
+                        let _ = wake.send(());
+                    }
+                    if let Some(action) = delivery.on_signal(&signal) {
+                        act_on_notification(action, &handle, &core, &sync_wake, &wake);
+                    }
+                })?;
+            }
+            std::thread::spawn(move || run_scheduler(handle, core, sync_wake, woken, delivery));
             Ok(())
         })
         .on_window_event(|window, event| {

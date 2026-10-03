@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
   completeOccurrence,
   type DueItem,
@@ -8,6 +8,7 @@ import {
   dismissNotice,
   inbox,
   type Inbox as InboxSections,
+  onOpenOccurrence,
   onStateChanged,
   skipOccurrence,
   snapshot,
@@ -140,6 +141,8 @@ function Inbox() {
     earlier_today: [],
   });
   const [error, setError] = useState("");
+  // The occurrence a clicked notification asked for.
+  const [opened, setOpened] = useState<string | null>(null);
 
   const refresh = () => {
     snapshot().then(setSnap).catch((e) => setError(String(e)));
@@ -149,6 +152,13 @@ function Inbox() {
   useEffect(() => {
     refresh();
     const unlisten = onStateChanged(refresh);
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = onOpenOccurrence(setOpened);
     return () => {
       unlisten.then((f) => f());
     };
@@ -170,7 +180,7 @@ function Inbox() {
         {sections.overdue.length === 0 && <p class="empty">Nothing overdue.</p>}
         <ul>
           {sections.overdue.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} opened={opened === d.occurrence_id} />
           ))}
         </ul>
       </section>
@@ -180,7 +190,7 @@ function Inbox() {
         {sections.due.length === 0 && <p class="empty">Nothing due.</p>}
         <ul>
           {sections.due.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} opened={opened === d.occurrence_id} />
           ))}
         </ul>
       </section>
@@ -236,13 +246,20 @@ function OpenItem({
   item: d,
   done,
   skip,
+  opened,
 }: {
   item: DueItem;
   done: (id: string) => void;
   skip: (id: string) => void;
+  opened: boolean;
 }) {
+  const row = useRef<HTMLLIElement>(null);
+  // A clicked notification brings its occurrence into view.
+  useEffect(() => {
+    if (opened) row.current?.scrollIntoView?.({ block: "center" });
+  }, [opened]);
   return (
-    <li>
+    <li ref={row} class={opened ? "opened" : undefined} aria-current={opened ? "true" : undefined}>
       <span class="title">{d.title}</span>
       <span class="priority">{d.priority}</span>
       {d.not_sent && <NotSent />}

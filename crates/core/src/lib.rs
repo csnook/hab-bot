@@ -9,6 +9,7 @@
 //! client; the core only keeps what it needs to be synced: which events the
 //! server has numbered, which it hasn't, and which are in a format it can't read.
 
+mod alerter;
 mod core;
 mod event;
 mod hlc;
@@ -21,6 +22,7 @@ pub use crate::core::{
     Core, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox, ListInfo,
     ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
 };
+pub use alerter::{Alerter, Command, Notification, Urgency, ACTION_DONE, ACTION_OPEN, ACTION_SKIP};
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
@@ -30,8 +32,8 @@ pub use priority::{
 };
 pub use schedule::{day_bounds, system_zone_name, zone, Pattern, Schedule};
 pub use state::{
-    Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder, SettingVersion, SignIn,
-    State, UpcomingItem,
+    AlertRecord, Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder,
+    SettingVersion, SignIn, State, UpcomingItem,
 };
 pub use store::{HeldEvent, Store};
 

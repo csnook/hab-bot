@@ -131,6 +131,9 @@ export const skipOccurrence = (occurrenceId: string) =>
   invoke<void>("skip_occurrence", { occurrenceId });
 export const dismissNotice = (id: string) => invoke<void>("dismiss_notice", { id });
 export const onStateChanged = (f: () => void) => listen("state-changed", f);
+/** A notification was clicked: the payload is its occurrence's id. */
+export const onOpenOccurrence = (f: (occurrenceId: string) => void) =>
+  listen<string>("open-occurrence", (e) => f(e.payload));
 
 export interface Profile {
   server_address: string;

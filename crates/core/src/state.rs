@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::event::{Change, Event, Setting, StoredEvent};
 use crate::hlc::Hlc;
-use crate::priority::Priority;
+use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +146,20 @@ pub struct SignIn {
     pub at: i64,
 }
 
+/// An alert in the history: the first for an occurrence, or a change of style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertRecord {
+    pub event_id: String,
+    pub occurrence_id: String,
+    /// The user who was alerted.
+    pub user: String,
+    /// The device that alerted, as it appears on its events. Other users see
+    /// who, never which device.
+    pub device_id: String,
+    pub style: AlertStyle,
+    pub at: i64,
+}
+
 /// One value a setting has had.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingVersion {
@@ -189,6 +203,9 @@ pub struct State {
     pub removed_devices: BTreeSet<String>,
     /// Closings that lost to a completion on another device, in stream order.
     pub reconciliations: Vec<Reconciliation>,
+    /// Alerts, in stream order: the first and each change of style, per user
+    /// and device. Repeats aren't recorded.
+    pub alerts: Vec<AlertRecord>,
     /// Every value each reminder setting has had.
     versions: BTreeMap<(String, Setting), Vec<SettingVersion>>,
     /// Occurrences opened for a reminder that already had one (it fired on
@@ -224,7 +241,9 @@ impl State {
                     let id = self.resolve(occurrence_id).to_string();
                     self.unsent_occurrences.insert(id);
                 }
-                Event::ListNamed { .. }
+                // An alert is history only: it isn't a change the user waits on.
+                Event::OccurrenceAlerted { .. }
+                | Event::ListNamed { .. }
                 | Event::DeviceNamed { .. }
                 | Event::DeviceSignedIn { .. }
                 | Event::DeviceRemoved { .. } => {}
@@ -387,6 +406,22 @@ impl State {
                     o.acknowledged = true;
                 }
             }
+            Event::OccurrenceAlerted {
+                occurrence_id,
+                style,
+            } => {
+                let occurrence_id = self.resolve(occurrence_id).to_string();
+                if !self.alerts.iter().any(|a| a.event_id == stored.event_id) {
+                    self.alerts.push(AlertRecord {
+                        event_id: stored.event_id.clone(),
+                        occurrence_id,
+                        user: stored.author.clone(),
+                        device_id: stored.device_id.clone(),
+                        style: *style,
+                        at: stored.recorded_at,
+                    });
+                }
+            }
             Event::ListNamed { name } => {
                 self.list_name = Some(name.clone());
             }
@@ -408,6 +443,16 @@ impl State {
                 });
             }
         }
+    }
+
+    /// The style `device_id` last recorded an alert in for the occurrence.
+    pub fn last_alert_style(&self, occurrence_id: &str, device_id: &str) -> Option<AlertStyle> {
+        let id = self.resolve(occurrence_id);
+        self.alerts
+            .iter()
+            .rev()
+            .find(|a| a.occurrence_id == id && a.device_id == device_id)
+            .map(|a| a.style)
     }
 
     /// The occurrence an id stands for, which is another's if it merged.

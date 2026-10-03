@@ -22,7 +22,7 @@ pub enum Priority {
 }
 
 /// How loud one alert is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertStyle {
     /// Only listed (on desktop).
@@ -63,6 +63,30 @@ pub struct PrioritySettings {
     /// Whether a swipe on Android is allowed (as a snooze).
     pub swipeable: bool,
     pub breaks_do_not_disturb: bool,
+}
+
+impl PrioritySettings {
+    /// The style an occurrence that went (or goes) overdue at `overdue_at`
+    /// alerts in at `now`: the due style until then, then the step with the
+    /// largest `after` that has been reached. Steps count from `overdue_at`.
+    pub fn style_at(&self, overdue_at: i64, now: i64) -> AlertStyle {
+        if now < overdue_at {
+            return self.due_style;
+        }
+        let overdue_for = now - overdue_at;
+        self.overdue_steps
+            .iter()
+            .filter(|s| s.after <= overdue_for)
+            .max_by_key(|s| s.after)
+            .map_or(self.due_style, |s| s.style)
+    }
+
+    /// How often an insistent alert repeats: the overdue interval, which is
+    /// also the snooze length. Never less than a minute, so a priority with
+    /// an interval of 0 can't make the desktop spin.
+    pub fn repeat_every(&self) -> i64 {
+        self.overdue_interval.max(MINUTE)
+    }
 }
 
 const MINUTE: i64 = 60;
