@@ -273,7 +273,8 @@ async fn the_server_database_holds_no_reminder_content() {
         "fire_at",
         "title",
         "recorded_at",
-        &format!("u{}", d.profile.account_id),
+        // Long enough that random ciphertext can not match it by chance.
+        &format!("\"author\":\"u{}\"", d.profile.account_id),
     ] {
         assert!(
             !file.windows(needle.len()).any(|w| w == needle.as_bytes()),

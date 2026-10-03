@@ -10,6 +10,28 @@ export interface DueItem {
   not_sent: boolean;
   snoozed_until: number | null;
   acknowledged: boolean;
+  priority: PriorityName;
+  /** When it goes (or went) overdue, in unix seconds. */
+  overdue_at: number;
+}
+
+export type PriorityName = "minimum" | "low" | "medium" | "high" | "maximum";
+export type AlertStyle = "silent" | "gentle" | "insistent" | "alarm";
+
+/** A built-in priority with every setting in the spec's table. Times in seconds. */
+export interface PriorityInfo {
+  priority: PriorityName;
+  name: string;
+  settings: {
+    due_style: AlertStyle;
+    due_interval: number;
+    overdue_steps: Array<{ after: number; style: AlertStyle }>;
+    overdue_interval: number;
+    ring_duration: number | null;
+    server_wait: number | null;
+    swipeable: boolean;
+    breaks_do_not_disturb: boolean;
+  };
 }
 
 export interface UpcomingItem {
@@ -73,6 +95,9 @@ export interface EarlierItem {
 
 /** The Inbox's Later today and Earlier today. */
 export interface Inbox {
+  /** Highest priority first, then the longest overdue. */
+  overdue: DueItem[];
+  due: DueItem[];
   later_today: ExpectedItem[];
   earlier_today: EarlierItem[];
 }
@@ -86,8 +111,10 @@ export type Pattern =
   | { kind: "monthly_by_weekday"; ordinal: number; weekday: string };
 
 export const snapshot = () => invoke<Snapshot>("snapshot");
-export const createReminder = (title: string, fireAt: number) =>
-  invoke<void>("create_reminder", { title, fireAt });
+export const createReminder = (title: string, fireAt: number, priority: PriorityName) =>
+  invoke<void>("create_reminder", { title, fireAt, priority });
+export const priorities = () => invoke<PriorityInfo[]>("priorities");
+export const appVersion = () => invoke<string>("app_version");
 export const inbox = () => invoke<Inbox>("inbox");
 /** `date` is "2026-10-03", `time` "09:30". No `zone` makes it floating. */
 export const createRecurringReminder = (
@@ -96,7 +123,8 @@ export const createRecurringReminder = (
   date: string,
   time: string,
   zone: string | null,
-) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone });
+  priority: PriorityName,
+) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
 export const completeOccurrence = (occurrenceId: string) =>
   invoke<void>("complete_occurrence", { occurrenceId });
 export const skipOccurrence = (occurrenceId: string) =>

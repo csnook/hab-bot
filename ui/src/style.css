@@ -43,3 +43,10 @@ dd { margin: 0; }
 .devices { list-style: none; padding: 0; }
 .devices li { margin: 8px 0; }
 .devices li > * { margin-right: 8px; }
+
+.priority { color: #888; font-size: 0.85rem; text-transform: capitalize; }
+dialog.settings { max-width: min(96vw, 900px); width: 100%; box-sizing: border-box; }
+dialog.settings header { display: flex; justify-content: space-between; align-items: center; }
+dialog.settings .tabs { padding: 0; margin: 0 0 8px; max-width: none; }
+dialog.settings table { border-collapse: collapse; font-size: 0.85rem; }
+dialog.settings th, dialog.settings td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #8884; }

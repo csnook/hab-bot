@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::event::{Change, Event, Setting, StoredEvent};
 use crate::hlc::Hlc;
+use crate::priority::Priority;
 use crate::schedule::Schedule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,9 +26,34 @@ pub struct Reminder {
     /// or its schedules or zone were last changed. Setting a 7:00 reminder at
     /// 8:00 doesn't fire this morning's.
     pub active_from: i64,
+    pub priority: Priority,
+    /// Overrides the priority's due interval: seconds after the scheduled time
+    /// that an occurrence goes overdue.
+    pub overdue_override: Option<i64>,
+    /// Seconds after the scheduled time that an open occurrence is missed.
+    /// Firing again always expires it too (ADR 0001).
+    pub expiry_after: Option<i64>,
 }
 
 impl Reminder {
+    /// Seconds after an occurrence's scheduled time that it goes overdue: the
+    /// override if there is one, otherwise the priority's due interval.
+    pub fn overdue_after(&self) -> i64 {
+        self.overdue_override
+            .unwrap_or_else(|| self.priority.settings().due_interval)
+    }
+
+    /// When an occurrence scheduled at `scheduled_at` goes overdue.
+    pub fn overdue_at(&self, scheduled_at: i64) -> i64 {
+        scheduled_at.saturating_add(self.overdue_after())
+    }
+
+    /// When an occurrence scheduled at `scheduled_at` is missed for want of
+    /// action, if the reminder has such an expiry.
+    pub fn expires_at(&self, scheduled_at: i64) -> Option<i64> {
+        self.expiry_after.map(|d| scheduled_at.saturating_add(d))
+    }
+
     pub fn repeats(&self) -> bool {
         !self.schedules.is_empty()
     }
@@ -95,6 +121,9 @@ pub struct DueItem {
     pub not_sent: bool,
     pub snoozed_until: Option<i64>,
     pub acknowledged: bool,
+    pub priority: Priority,
+    /// When it goes (or went) overdue, counted from `scheduled_at`.
+    pub overdue_at: i64,
 }
 
 /// A reminder that has not fired yet.
@@ -225,6 +254,9 @@ impl State {
                             zone: None,
                             created_at: stored.recorded_at,
                             active_from: stored.recorded_at,
+                            priority: Priority::default(),
+                            overdue_override: None,
+                            expiry_after: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -256,6 +288,9 @@ impl State {
                             zone: zone.clone(),
                             created_at: stored.recorded_at,
                             active_from: stored.recorded_at,
+                            priority: Priority::default(),
+                            overdue_override: None,
+                            expiry_after: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -514,6 +549,9 @@ impl State {
             Setting::Note,
             Setting::Schedules,
             Setting::Zone,
+            Setting::Priority,
+            Setting::Overdue,
+            Setting::Expiry,
         ] {
             let latest = self
                 .versions
@@ -534,6 +572,9 @@ impl State {
                 Some(Change::Note(n)) => r.note = n,
                 Some(Change::Schedules(s)) => r.schedules = s,
                 Some(Change::Zone(z)) => r.zone = z,
+                Some(Change::Priority(p)) => r.priority = p,
+                Some(Change::Overdue(o)) => r.overdue_override = o,
+                Some(Change::Expiry(e)) => r.expiry_after = e,
                 None => {}
             }
         }
@@ -591,8 +632,8 @@ impl State {
             .min()
     }
 
-    /// Open occurrences, oldest first. (Overdue arrives with priorities;
-    /// for now every open occurrence is due.)
+    /// Every open occurrence, oldest firing first, due or overdue alike. The
+    /// Inbox splits them ([`crate::Core::inbox`]).
     pub fn due(&self) -> Vec<DueItem> {
         let mut v: Vec<DueItem> = self
             .occurrences
@@ -609,6 +650,8 @@ impl State {
                         || self.unsent_reminders.contains(&r.id),
                     snoozed_until: o.snoozed_until,
                     acknowledged: o.acknowledged,
+                    priority: r.priority,
+                    overdue_at: r.overdue_at(o.scheduled_at),
                 })
             })
             .collect();

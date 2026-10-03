@@ -9,6 +9,7 @@ use crate::event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
+use crate::priority::Priority;
 use crate::schedule::{self, Schedule};
 use crate::state::{ClosingKind, DueItem, Reminder, State, UpcomingItem};
 use crate::store::Store;
@@ -25,7 +26,7 @@ pub struct Fired {
 /// What the window shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
-    /// The Inbox's Due section.
+    /// Every open occurrence, due or overdue. The Inbox splits them (`Core::inbox`).
     pub due: Vec<DueItem>,
     /// Reminders that haven't fired yet.
     pub upcoming: Vec<UpcomingItem>,
@@ -109,6 +110,13 @@ pub struct EditReminder {
     /// Pins the reminder to a time zone, or with `Some(None)` makes it
     /// floating.
     pub zone: Option<Option<String>>,
+    pub priority: Option<Priority>,
+    /// Overrides the priority's overdue time with a number of seconds after
+    /// the scheduled time, or with `Some(None)` goes back to following it.
+    pub overdue: Option<Option<i64>>,
+    /// Seconds after the scheduled time that an open occurrence is missed,
+    /// or with `Some(None)` no such expiry.
+    pub expiry: Option<Option<i64>>,
 }
 
 /// An occurrence predicted to come due: it becomes an occurrence only if the
@@ -133,6 +141,11 @@ pub struct EarlierItem {
 /// The Inbox's sections about the rest of today and what's behind it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Inbox {
+    /// Open occurrences past their overdue time: highest priority first,
+    /// then the longest overdue.
+    pub overdue: Vec<DueItem>,
+    /// Open occurrences not yet overdue, oldest firing first.
+    pub due: Vec<DueItem>,
     /// Expected occurrences from now to the end of today, earliest first.
     pub later_today: Vec<ExpectedItem>,
     /// Occurrences closed today, including missed ones, latest first.
@@ -616,8 +629,10 @@ impl Core {
     }
 
     /// Fires every reminder whose time has come, opening an occurrence for
-    /// each. A reminder whose time passed while the app was closed fires late,
-    /// on the first tick after start.
+    /// each, and closes as missed the open occurrences whose expiry has come.
+    /// A reminder whose time passed while the app was closed fires late, on
+    /// the first tick after start; if its expiry has passed too it is missed
+    /// at once and, as nobody should be alerted, not returned.
     pub fn tick(&mut self, now: i64) -> Result<Vec<Fired>> {
         let pending: Vec<(String, String, String, i64)> = self
             .states()
@@ -657,7 +672,60 @@ impl Core {
             });
         }
         fired.extend(self.fire_schedules(now)?);
+        let expired = self.expire_open(now)?;
+        fired.retain(|f| !expired.contains(&f.occurrence_id));
         Ok(fired)
+    }
+
+    /// Closes as missed every open occurrence whose reminder's expiry delay,
+    /// counted from the scheduled time, has passed. It is missed as of when
+    /// the expiry came, not when this device noticed. Returns their ids.
+    fn expire_open(&mut self, now: i64) -> Result<Vec<String>> {
+        let due: Vec<(String, String, i64)> = self
+            .states()
+            .flat_map(|(list_id, s)| {
+                s.occurrences
+                    .values()
+                    .filter(|o| o.is_open())
+                    .filter_map(move |o| {
+                        let at = s
+                            .reminders
+                            .get(&o.reminder_id)?
+                            .expires_at(o.scheduled_at)?;
+                        (at <= now).then(|| (list_id.to_string(), o.id.clone(), at))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut ids = Vec::new();
+        for (list_id, id, at) in due {
+            self.record_in(
+                &list_id,
+                now,
+                Event::OccurrenceMissed {
+                    occurrence_id: id.clone(),
+                    missed_at: at,
+                },
+            )?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// When the next open occurrence goes overdue after `now`, so the window
+    /// can move it from Due to Overdue, and the platform can escalate.
+    pub fn next_overdue_at(&self, now: i64) -> Option<i64> {
+        self.states()
+            .flat_map(|(_, s)| {
+                s.occurrences
+                    .values()
+                    .filter(|o| o.is_open())
+                    .filter_map(|o| {
+                        let at = s.reminders.get(&o.reminder_id)?.overdue_at(o.scheduled_at);
+                        (at > now).then_some(at)
+                    })
+            })
+            .min()
     }
 
     /// Fires the schedules whose instants have come. A device that was off or
@@ -861,6 +929,24 @@ impl Core {
             check_schedules(&current.schedules, zone.as_deref())?;
             changes.push(Change::Zone(zone));
         }
+        if let Some(p) = edit.priority.filter(|p| *p != current.priority) {
+            changes.push(Change::Priority(p));
+        }
+        for (new, now_value, make) in [
+            (
+                edit.overdue,
+                current.overdue_override,
+                Change::Overdue as fn(Option<i64>) -> Change,
+            ),
+            (edit.expiry, current.expiry_after, Change::Expiry),
+        ] {
+            if let Some(v) = new.filter(|v| *v != now_value) {
+                if v.is_some_and(|d| d < 0) {
+                    return Err(Error::BadDuration);
+                }
+                changes.push(make(v));
+            }
+        }
         for change in changes {
             let hlc = self.next_hlc(&list_id, now);
             self.record_in(
@@ -907,7 +993,8 @@ impl Core {
         Ok(())
     }
 
-    /// When the next unfired reminder is due, so the scheduler can sleep.
+    /// When the next unfired reminder is due or the next open occurrence
+    /// expires, so the scheduler can sleep.
     pub fn next_fire_at(&self) -> Option<i64> {
         let one_off = self.states().filter_map(|(_, s)| s.next_fire_at()).min();
         let scheduled = self
@@ -926,7 +1013,16 @@ impl Core {
                     })
             })
             .min();
-        one_off.into_iter().chain(scheduled).min()
+        let expiring = self
+            .states()
+            .flat_map(|(_, s)| {
+                s.occurrences
+                    .values()
+                    .filter(|o| o.is_open())
+                    .filter_map(|o| s.reminders.get(&o.reminder_id)?.expires_at(o.scheduled_at))
+            })
+            .min();
+        one_off.into_iter().chain(scheduled).chain(expiring).min()
     }
 
     /// Occurrences predicted after `now` and up to `until`, earliest first:
@@ -985,7 +1081,27 @@ impl Core {
             .collect();
         earlier
             .sort_by(|a, b| (b.closed_at, &b.occurrence_id).cmp(&(a.closed_at, &a.occurrence_id)));
+        let (mut overdue, due): (Vec<DueItem>, Vec<DueItem>) = self
+            .states()
+            .flat_map(|(_, s)| s.due())
+            .partition(|d| d.overdue_at <= now);
+        overdue.sort_by(|a, b| {
+            (
+                std::cmp::Reverse(a.priority),
+                a.overdue_at,
+                &a.occurrence_id,
+            )
+                .cmp(&(
+                    std::cmp::Reverse(b.priority),
+                    b.overdue_at,
+                    &b.occurrence_id,
+                ))
+        });
+        let mut due = due;
+        due.sort_by(|a, b| (a.fired_at, &a.occurrence_id).cmp(&(b.fired_at, &b.occurrence_id)));
         Inbox {
+            overdue,
+            due,
             later_today: self.expected(now, end - 1),
             earlier_today: earlier,
         }

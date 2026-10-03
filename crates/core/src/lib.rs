@@ -12,6 +12,7 @@
 mod core;
 mod event;
 mod hlc;
+mod priority;
 mod schedule;
 mod state;
 mod store;
@@ -24,6 +25,9 @@ pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 pub use hlc::{Hlc, MAX_AHEAD_MS};
+pub use priority::{
+    built_in_priorities, AlertStyle, EscalationStep, Priority, PriorityInfo, PrioritySettings,
+};
 pub use schedule::{day_bounds, system_zone_name, zone, Pattern, Schedule};
 pub use state::{
     Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder, SettingVersion, SignIn,
@@ -44,6 +48,8 @@ pub enum Error {
     BadSchedule(String),
     #[error("{0} is not a time zone this device knows")]
     BadZone(String),
+    #[error("a duration can't be negative")]
+    BadDuration,
     #[error("there is no reminder {0}")]
     NoReminder(String),
     #[error("that value was never one of the setting's")]

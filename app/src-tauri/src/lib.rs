@@ -70,18 +70,47 @@ fn snapshot(app: tauri::State<'_, App>) -> Snapshot {
     app.core.lock().unwrap().snapshot()
 }
 
+/// Gives a reminder just made the priority the editor chose.
+fn set_priority(
+    core: &mut Core,
+    id: &str,
+    priority: Option<hab_core::Priority>,
+) -> Result<(), String> {
+    let edit = hab_core::EditReminder {
+        priority,
+        ..Default::default()
+    };
+    core.edit_reminder(id, edit, now())
+        .map_err(|e| e.to_string())
+}
+
+/// The built-in priorities, for the editor and Settings → Priorities.
+#[tauri::command]
+fn priorities() -> Vec<hab_core::PriorityInfo> {
+    hab_core::built_in_priorities()
+}
+
+/// The app's version, for Settings → About.
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 fn create_reminder(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     title: String,
     fire_at: i64,
+    priority: Option<hab_core::Priority>,
 ) -> Result<(), String> {
-    app.core
-        .lock()
-        .unwrap()
-        .create_reminder(&title, fire_at, now())
-        .map_err(|e| e.to_string())?;
+    {
+        let mut core = app.core.lock().unwrap();
+        let id = core
+            .create_reminder(&title, fire_at, now())
+            .map_err(|e| e.to_string())?;
+        set_priority(&mut core, &id, priority)?;
+    }
     app.sync_wake.notify_one();
     let _ = app.wake.send(());
     let _ = handle.emit(STATE_CHANGED, ());
@@ -91,6 +120,7 @@ fn create_reminder(
 /// A reminder that repeats: a common pattern from a date, at a time of day,
 /// pinned to a time zone or, with none, floating.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn create_recurring_reminder(
     app: tauri::State<'_, App>,
     handle: AppHandle,
@@ -99,14 +129,17 @@ fn create_recurring_reminder(
     date: String,
     time: String,
     zone: Option<String>,
+    priority: Option<hab_core::Priority>,
 ) -> Result<(), String> {
     let schedule =
         hab_core::Schedule::from_pattern(&pattern, &date, &time).map_err(|e| e.to_string())?;
     {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
-        core.create_recurring_reminder(&title, vec![schedule], zone.as_deref(), now())
+        let id = core
+            .create_recurring_reminder(&title, vec![schedule], zone.as_deref(), now())
             .map_err(|e| e.to_string())?;
+        set_priority(&mut core, &id, priority)?;
     }
     app.sync_wake.notify_one();
     let _ = app.wake.send(());
@@ -114,7 +147,7 @@ fn create_recurring_reminder(
     Ok(())
 }
 
-/// Later today and Earlier today, and the zone the device is in.
+/// Overdue, Due, Later today and Earlier today.
 #[tauri::command]
 fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
     let core = app.core.lock().unwrap();
@@ -747,8 +780,11 @@ fn run_scheduler(
     sync_wake: Arc<Notify>,
     woken: mpsc::Receiver<()>,
 ) {
+    // When an open occurrence next goes overdue: the window then has to move
+    // it from Due to Overdue.
+    let mut overdue_at: Option<i64> = None;
     loop {
-        let (fired, next) = {
+        let (fired, next, next_overdue) = {
             let mut core = core.lock().unwrap();
             // The user may have travelled: floating reminders follow.
             let _ = core.use_system_zone();
@@ -756,8 +792,14 @@ fn run_scheduler(
                 eprintln!("tick failed: {e}");
                 Vec::new()
             });
-            (fired, core.next_fire_at())
+            (fired, core.next_fire_at(), core.next_overdue_at(now()))
         };
+        let went_overdue = overdue_at.is_some_and(|t| t <= now());
+        overdue_at = next_overdue;
+        if went_overdue {
+            let _ = app.emit(STATE_CHANGED, ());
+        }
+        let next = next.into_iter().chain(next_overdue).min();
         for f in &fired {
             if let Err(e) = app
                 .notification()
@@ -793,6 +835,8 @@ pub fn run() {
             snapshot,
             create_reminder,
             create_recurring_reminder,
+            priorities,
+            app_version,
             inbox,
             complete_occurrence,
             skip_occurrence,

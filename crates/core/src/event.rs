@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hlc::Hlc;
+use crate::priority::Priority;
 use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -94,6 +95,14 @@ pub enum Setting {
     Schedules,
     /// The time zone a reminder is pinned to, or floating.
     Zone,
+    /// The reminder's priority.
+    Priority,
+    /// How long after its scheduled time an occurrence goes overdue, if the
+    /// reminder overrides its priority's.
+    Overdue,
+    /// How long after its scheduled time an open occurrence is missed, if the
+    /// reminder has such an expiry.
+    Expiry,
 }
 
 /// A new value for one setting.
@@ -106,6 +115,11 @@ pub enum Change {
     Schedules(Vec<Schedule>),
     /// `None` is floating.
     Zone(Option<String>),
+    Priority(Priority),
+    /// Seconds after the scheduled time. `None` follows the priority.
+    Overdue(Option<i64>),
+    /// Seconds after the scheduled time. `None` is no delay-based expiry.
+    Expiry(Option<i64>),
 }
 
 impl Change {
@@ -116,6 +130,9 @@ impl Change {
             Change::Note(_) => Setting::Note,
             Change::Schedules(_) => Setting::Schedules,
             Change::Zone(_) => Setting::Zone,
+            Change::Priority(_) => Setting::Priority,
+            Change::Overdue(_) => Setting::Overdue,
+            Change::Expiry(_) => Setting::Expiry,
         }
     }
 }
@@ -130,6 +147,11 @@ impl Event {
                 change: Change::Schedules(_) | Change::Zone(_),
                 ..
             } => 2,
+            // Priorities, overdue times and expiry arrived in format 3.
+            Event::ReminderEdited {
+                change: Change::Priority(_) | Change::Overdue(_) | Change::Expiry(_),
+                ..
+            } => 3,
             _ => 1,
         }
     }
