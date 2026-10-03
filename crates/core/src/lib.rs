@@ -9,7 +9,9 @@ mod state;
 mod store;
 pub mod time;
 
-pub use state::{InboxItem, InboxSection, Occurrence, OccurrenceStatus, Reminder, State, Trigger};
+pub use state::{
+    CountdownUnit, InboxItem, InboxSection, Occurrence, OccurrenceStatus, Reminder, State, Trigger,
+};
 pub use store::Store;
 
 use chrono_tz::Tz;
@@ -134,7 +136,7 @@ impl Core {
         Ok(())
     }
 
-    fn record(&mut self, event: Event) -> Result<()> {
+    pub(crate) fn record(&mut self, event: Event) -> Result<()> {
         self.store.append(PERSONAL_LIST, &event)?;
         self.state.apply(&event);
         Ok(())
@@ -165,8 +167,30 @@ impl Core {
             time::parse_zone(tz)?;
         }
         for trigger in &new.triggers {
-            if let Trigger::Schedule { rule, start } = trigger {
-                time::validate(rule, time::parse_wall(start)?)?;
+            match trigger {
+                Trigger::Schedule { rule, start } => {
+                    time::validate(rule, time::parse_wall(start)?)?
+                }
+                Trigger::Countdown {
+                    amount, at, unit, ..
+                } => {
+                    if *amount == 0 {
+                        return Err(Error::BadSchedule("a countdown needs an amount".into()));
+                    }
+                    if at.is_some() && *unit == CountdownUnit::Hours {
+                        return Err(Error::BadSchedule(
+                            "only day countdowns have a time of day".into(),
+                        ));
+                    }
+                    if let Some(at) = at {
+                        chrono::NaiveTime::parse_from_str(at, "%H:%M")
+                            .map_err(|_| Error::BadSchedule(format!("bad time {at:?}")))?;
+                    }
+                    if new.triggers.len() > 1 {
+                        return Err(Error::BadSchedule("a countdown stands alone".into()));
+                    }
+                }
+                Trigger::OneOff { .. } => {}
             }
         }
         let reminder_id = uuid::Uuid::new_v4().to_string();
@@ -200,12 +224,8 @@ impl Core {
         for rid in ids {
             let reminder = self.state.reminder(&rid).expect("listed").clone();
             // A one-off scheduled in the past still fires once; its identity stops repeats.
-            let after = if reminder.is_one_off() {
-                Millis::MIN
-            } else {
-                self.state.evaluated_through(&reminder)
-            };
-            let due: Vec<_> = schedule::instances(&reminder, self.zone, after, now)
+            let after = self.window_start(&reminder);
+            let due: Vec<_> = schedule::instances(&self.state, &reminder, self.zone, after, now)
                 .into_iter()
                 .filter(|i| !self.state.has_fired(&rid, &occurrence_id(&rid, &i.key)))
                 .collect();
@@ -236,6 +256,38 @@ impl Core {
         Ok(opened)
     }
 
+    /// Completes a reminder ahead of its next expected occurrence: that occurrence never
+    /// fires, and a countdown restarts from `at`. Returns the instance that was closed.
+    pub fn complete_early(&mut self, reminder_id: &str, at: Millis, now: Millis) -> Result<()> {
+        let reminder = self
+            .state
+            .reminder(reminder_id)
+            .ok_or_else(|| Error::NoOpenOccurrence(reminder_id.to_string()))?
+            .clone();
+        let next = self
+            .expected(now, now.saturating_add(HORIZON))
+            .into_iter()
+            .find(|o| o.reminder_id == reminder.id)
+            .ok_or_else(|| Error::NoOpenOccurrence(reminder_id.to_string()))?;
+        if let Some(open) = self
+            .state
+            .open_occurrence(reminder_id)
+            .map(|o| o.id.clone())
+        {
+            self.record(Event::OccurrenceMissed {
+                occurrence_id: open,
+                at: now,
+            })?;
+        }
+        self.record(Event::OccurrenceFired {
+            occurrence_id: next.id.clone(),
+            reminder_id: reminder.id,
+            scheduled_at: next.scheduled_at,
+            fired_at: now,
+        })?;
+        self.complete(&next.id, at)
+    }
+
     /// Completes an open occurrence, recording who and when. A one-off is then finished.
     pub fn complete(&mut self, occurrence_id: &str, now: Millis) -> Result<()> {
         if !self.state.is_open(occurrence_id) {
@@ -248,11 +300,22 @@ impl Core {
         })
     }
 
+    /// Where evaluation resumes. One-offs and countdowns are tracked by identity instead,
+    /// so a one-off scheduled in the past still fires once, and a countdown's next
+    /// firing may come before the last one's scheduled time (completed early).
+    fn window_start(&self, r: &Reminder) -> Millis {
+        if r.is_one_off() || r.is_countdown() {
+            Millis::MIN
+        } else {
+            self.state.evaluated_through(r)
+        }
+    }
+
     /// Occurrences predicted to come due in `(now, to]`, soonest first.
     pub fn expected(&self, now: Millis, to: Millis) -> Vec<Occurrence> {
         let mut out = Vec::new();
         for r in self.state.reminders().filter(|r| !r.finished) {
-            for i in schedule::instances(r, self.zone, now, to) {
+            for i in schedule::instances(&self.state, r, self.zone, now, to) {
                 let id = occurrence_id(&r.id, &i.key);
                 if self.state.has_fired(&r.id, &id) {
                     continue;
@@ -332,15 +395,17 @@ impl Core {
             .reminders()
             .filter(|r| !r.finished)
             .filter_map(|r| {
-                let after = if r.is_one_off() {
-                    Millis::MIN
-                } else {
-                    self.state.evaluated_through(r)
-                };
-                schedule::instances(r, self.zone, after, now.saturating_add(HORIZON))
-                    .into_iter()
-                    .find(|i| !self.state.has_fired(&r.id, &occurrence_id(&r.id, &i.key)))
-                    .map(|i| i.scheduled_at)
+                let after = self.window_start(r);
+                schedule::instances(
+                    &self.state,
+                    r,
+                    self.zone,
+                    after,
+                    now.saturating_add(HORIZON),
+                )
+                .into_iter()
+                .find(|i| !self.state.has_fired(&r.id, &occurrence_id(&r.id, &i.key)))
+                .map(|i| i.scheduled_at)
             })
             .min()
     }

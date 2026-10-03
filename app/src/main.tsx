@@ -29,7 +29,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
   const [when, setWhen] = useState(localInputValue(Date.now() + 60_000));
   // further times of day, for "several times a day": each is its own schedule trigger
   const [extra, setExtra] = useState<string[]>([]);
-  const [choice, setChoice] = useState<Choice>({ pattern: "once", days: [0], ordinal: 0, weekday: 0, custom: "" });
+  const [choice, setChoice] = useState<Choice>({ pattern: "once", days: [0], ordinal: 0, weekday: 0, custom: "", amount: 3, unit: "days", timeOfDay: "", lastDone: localInputValue(Date.now()) });
   const [pin, setPin] = useState(false);
   const [error, setError] = useState("");
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -41,10 +41,20 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
       const first = new Date(when);
       const r = rule(choice, first);
       const triggers: api.Trigger[] =
-        r === null
+        choice.pattern === "countdown"
+          ? [
+              {
+                kind: "countdown",
+                unit: choice.unit,
+                amount: choice.amount,
+                at: choice.unit === "days" && choice.timeOfDay ? choice.timeOfDay : null,
+                last_done: choice.lastDone ? new Date(choice.lastDone).getTime() : null,
+              },
+            ]
+          : r === null
           ? [{ kind: "one_off", at: first.getTime() }]
           : [when, ...extra].map((w) => ({ kind: "schedule", rule: r, start: wall(new Date(w)) }));
-      await api.createReminder({ title, triggers, tz: pin && r !== null ? zone : null });
+      await api.createReminder({ title, triggers, tz: pin && (r !== null || choice.pattern === "countdown") ? zone : null });
       setTitle("");
       setExtra([]);
       setError("");
@@ -55,7 +65,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
     }
   };
 
-  const repeating = choice.pattern !== "once";
+  const repeating = choice.pattern !== "once" && choice.pattern !== "countdown";
   return (
     <form onSubmit={submit}>
       <input placeholder="Remind me to…" value={title} onInput={(e) => setTitle(e.currentTarget.value)} />
@@ -67,6 +77,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
         <option value="monthly_date">Monthly by date</option>
         <option value="monthly_weekday">Monthly by weekday</option>
         <option value="custom">Custom (RRULE)</option>
+        <option value="countdown">After the last time…</option>
       </select>
       {choice.pattern === "weekly" && (
         <span class="days">
@@ -95,7 +106,40 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
       {choice.pattern === "custom" && (
         <input placeholder="FREQ=MONTHLY;BYMONTHDAY=1,15" value={choice.custom} onInput={(e) => set({ custom: e.currentTarget.value })} />
       )}
-      <input type="datetime-local" value={when} onInput={(e) => setWhen(e.currentTarget.value)} />
+      {choice.pattern === "countdown" && (
+        <span>
+          <input type="number" min="1" value={choice.amount} onInput={(e) => set({ amount: Number(e.currentTarget.value) })} />
+          <select value={choice.unit} onChange={(e) => set({ unit: e.currentTarget.value as "hours" | "days" })}>
+            <option value="hours">hours</option>
+            <option value="days">days</option>
+          </select>
+          {choice.unit === "days" && (
+            <label>
+              at <input type="time" value={choice.timeOfDay} onInput={(e) => set({ timeOfDay: e.currentTarget.value })} />
+            </label>
+          )}
+          <label>
+            Last done{" "}
+            <input
+              type="datetime-local"
+              value={choice.lastDone}
+              disabled={choice.lastDone === ""}
+              onInput={(e) => set({ lastDone: e.currentTarget.value })}
+            />
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={choice.lastDone === ""}
+              onChange={() => set({ lastDone: choice.lastDone === "" ? localInputValue(Date.now()) : "" })}
+            />
+            never
+          </label>
+        </span>
+      )}
+      {choice.pattern !== "countdown" && (
+        <input type="datetime-local" value={when} onInput={(e) => setWhen(e.currentTarget.value)} />
+      )}
       {repeating &&
         extra.map((w, i) => (
           <input
@@ -109,7 +153,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
           Add another time
         </button>
       )}
-      {repeating && (
+      {choice.pattern !== "once" && (
         <label>
           <input type="checkbox" checked={pin} onChange={() => setPin(!pin)} />
           Keep to {zone}
@@ -158,6 +202,7 @@ function Inbox() {
               <li key={o.id} class="expected">
                 <span>{o.title}</span>
                 <time>{hhmm(o.scheduled_at)}</time>
+                <button onClick={() => api.completeEarly(o.reminder_id).then(refresh)}>Done early</button>
               </li>
             ))}
           </ul>

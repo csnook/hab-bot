@@ -512,3 +512,176 @@ mod schedules {
         );
     }
 }
+
+mod countdowns {
+    use super::*;
+
+    const HOUR: Millis = 3_600_000;
+    const DAY: Millis = 24 * HOUR;
+
+    fn countdown(
+        core: &mut Core,
+        unit: CountdownUnit,
+        amount: u32,
+        at: Option<&str>,
+        last: Option<Millis>,
+        now: Millis,
+    ) -> String {
+        core.create(
+            NewReminder {
+                title: "Water the plants".into(),
+                triggers: vec![Trigger::Countdown {
+                    unit,
+                    amount,
+                    at: at.map(String::from),
+                    last_done: last,
+                }],
+                tz: None,
+            },
+            now,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn counts_elapsed_time_from_when_it_was_last_done() {
+        let mut c = core();
+        let id = countdown(
+            &mut c,
+            CountdownUnit::Hours,
+            8,
+            None,
+            Some(T0 - 2 * HOUR),
+            T0,
+        );
+        assert_eq!(c.next_due(T0), Some(T0 + 6 * HOUR));
+        assert!(c.fire_due(T0 + 6 * HOUR - 1).unwrap().is_empty());
+        let fired = c.fire_due(T0 + 6 * HOUR).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].reminder_id, id);
+        // while open, it does not predict or fire again
+        assert_eq!(c.next_due(T0 + 7 * HOUR), None);
+        assert!(c.fire_due(T0 + 30 * HOUR).unwrap().is_empty());
+        assert!(c.expected(T0 + 7 * HOUR, T0 + 99 * DAY).is_empty());
+    }
+
+    #[test]
+    fn never_done_fires_at_once() {
+        let mut c = core();
+        countdown(&mut c, CountdownUnit::Days, 3, None, None, T0);
+        assert_eq!(c.fire_due(T0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_completion_restarts_it_from_the_recorded_time() {
+        let mut c = core();
+        countdown(&mut c, CountdownUnit::Hours, 8, None, None, T0);
+        let occ = c.fire_due(T0).unwrap().remove(0);
+        // done at 11:00 but recorded as 9:40 (an hour and twenty before)
+        let tapped = T0 + 100 * 60_000;
+        let recorded = T0 + 40 * 60_000;
+        c.complete(&occ.id, recorded).unwrap();
+        let _ = tapped;
+        assert_eq!(c.next_due(tapped), Some(recorded + 8 * HOUR));
+        assert!(c.fire_due(recorded + 8 * HOUR - 1).unwrap().is_empty());
+        assert_eq!(c.fire_due(recorded + 8 * HOUR).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_miss_restarts_it_from_when_it_closed() {
+        let mut c = core();
+        countdown(&mut c, CountdownUnit::Hours, 8, None, None, T0);
+        let occ = c.fire_due(T0).unwrap().remove(0);
+        // the app closes it as missed (as expiry will)
+        c.record(Event::OccurrenceMissed {
+            occurrence_id: occ.id,
+            at: T0 + 20 * HOUR,
+        })
+        .unwrap();
+        assert_eq!(c.next_due(T0 + 20 * HOUR), Some(T0 + 28 * HOUR));
+    }
+
+    #[test]
+    fn completing_early_restarts_it_and_cancels_the_pending_firing() {
+        let mut c = core();
+        let id = countdown(&mut c, CountdownUnit::Hours, 8, None, Some(T0), T0);
+        let first_due = T0 + 8 * HOUR;
+        assert_eq!(c.next_due(T0), Some(first_due));
+        // done 2 hours in, ahead of it
+        c.complete_early(&id, T0 + 2 * HOUR, T0 + 2 * HOUR).unwrap();
+        assert!(
+            c.fire_due(first_due).unwrap().is_empty(),
+            "the pending firing is cancelled"
+        );
+        assert_eq!(c.next_due(first_due), Some(T0 + 10 * HOUR));
+        assert_eq!(c.fire_due(T0 + 10 * HOUR).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn it_predicts_only_its_next_occurrence() {
+        let mut c = core();
+        countdown(&mut c, CountdownUnit::Hours, 1, None, Some(T0), T0);
+        assert_eq!(c.expected(T0, T0 + 30 * DAY).len(), 1);
+    }
+
+    #[test]
+    fn days_can_fire_at_a_time_of_day_in_the_reminders_zone() {
+        let mut c = core();
+        c.set_zone("UTC");
+        // last done 2026-10-05 12:00 UTC; 3 days later at 9:00
+        let last = chrono::NaiveDate::from_ymd_opt(2026, 10, 5)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        countdown(
+            &mut c,
+            CountdownUnit::Days,
+            3,
+            Some("09:00"),
+            Some(last),
+            last,
+        );
+        let want = chrono::NaiveDate::from_ymd_opt(2026, 10, 8)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        assert_eq!(c.next_due(last), Some(want));
+    }
+
+    #[test]
+    fn elapsed_countdowns_ignore_the_time_zone() {
+        let mut a = core();
+        let mut b = core();
+        a.set_zone("Asia/Tokyo");
+        b.set_zone("America/New_York");
+        countdown(&mut a, CountdownUnit::Hours, 8, None, Some(T0), T0);
+        countdown(&mut b, CountdownUnit::Hours, 8, None, Some(T0), T0);
+        assert_eq!(a.next_due(T0), b.next_due(T0));
+    }
+
+    #[test]
+    fn bad_countdowns_are_refused() {
+        let mut c = core();
+        let make = |unit, amount, at: Option<&str>| NewReminder {
+            title: "x".into(),
+            triggers: vec![Trigger::Countdown {
+                unit,
+                amount,
+                at: at.map(String::from),
+                last_done: None,
+            }],
+            tz: None,
+        };
+        assert!(c.create(make(CountdownUnit::Days, 0, None), T0).is_err());
+        assert!(c
+            .create(make(CountdownUnit::Hours, 2, Some("09:00")), T0)
+            .is_err());
+        assert!(c
+            .create(make(CountdownUnit::Days, 2, Some("25:99")), T0)
+            .is_err());
+    }
+}

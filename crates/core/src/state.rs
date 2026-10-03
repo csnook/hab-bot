@@ -11,6 +11,25 @@ pub enum Trigger {
     /// An iCalendar recurrence rule (RRULE), starting at a wall-clock time such as
     /// `2026-10-05T07:00`. Several times a day are several triggers.
     Schedule { rule: String, start: String },
+    /// A set time after the reminder's last occurrence closed.
+    Countdown {
+        /// `Hours` count elapsed time, whatever the zone. `Days` are calendar days and,
+        /// with `at`, fire at a time of day in the reminder's zone ("3 days later, 9:00").
+        unit: CountdownUnit,
+        amount: u32,
+        #[serde(default)]
+        at: Option<String>,
+        /// When it was last done, as asked on creation. `None` ("never") fires at once.
+        #[serde(default)]
+        last_done: Option<Millis>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountdownUnit {
+    Hours,
+    Days,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,6 +49,14 @@ impl Reminder {
         self.triggers
             .iter()
             .all(|t| matches!(t, Trigger::OneOff { .. }))
+    }
+
+    /// Whether this is a countdown: its instances depend on when things closed, so fired
+    /// instances are tracked by identity rather than by scheduled time.
+    pub fn is_countdown(&self) -> bool {
+        self.triggers
+            .iter()
+            .any(|t| matches!(t, Trigger::Countdown { .. }))
     }
 }
 
@@ -213,6 +240,16 @@ impl State {
     pub fn has_fired(&self, reminder_id: &str, occurrence_id: &str) -> bool {
         self.fired
             .contains(&(reminder_id.to_string(), occurrence_id.to_string()))
+    }
+
+    /// When a countdown restarts from: the latest closing among the reminder's occurrences.
+    /// A completion counts from its recorded time, a skip or a miss from when it closed.
+    pub fn last_closed(&self, reminder_id: &str) -> Option<Millis> {
+        self.occurrences
+            .values()
+            .filter(|o| o.reminder_id == reminder_id)
+            .filter_map(|o| o.closed_at)
+            .max()
     }
 
     /// The latest scheduled time of any of the reminder's occurrences, or its creation:

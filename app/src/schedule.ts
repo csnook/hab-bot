@@ -1,6 +1,6 @@
 /** The common schedule patterns, as iCalendar recurrence rules (RRULE). */
 
-export type Pattern = "once" | "daily" | "weekdays" | "weekly" | "monthly_date" | "monthly_weekday" | "custom";
+export type Pattern = "once" | "daily" | "weekdays" | "weekly" | "monthly_date" | "monthly_weekday" | "custom" | "countdown";
 
 export const DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] as const;
 export const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -15,6 +15,13 @@ export interface Choice {
   ordinal: number;
   weekday: number;
   custom: string;
+  /** For "countdown". */
+  amount: number;
+  unit: "hours" | "days";
+  /** "HH:MM" for a day countdown that fires at a time of day, or "" to keep the restart's time. */
+  timeOfDay: string;
+  /** "When was this last done?": a datetime-local value, or "" for never. */
+  lastDone: string;
 }
 
 /** The RRULE for a choice, or null for "once". The start's date supplies "monthly by date". */
@@ -32,6 +39,8 @@ export function rule(c: Choice, start: Date): string | null {
       return `FREQ=MONTHLY;BYMONTHDAY=${start.getDate()}`;
     case "monthly_weekday":
       return `FREQ=MONTHLY;BYDAY=${ORDINALS[c.ordinal][1]}${DAYS[c.weekday]}`;
+    case "countdown":
+      return null;
     case "custom":
       return c.custom.trim().replace(/^RRULE:/i, "");
   }

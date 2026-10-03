@@ -13,7 +13,8 @@ export interface Occurrence {
 
 export type Trigger =
   | { kind: "one_off"; at: number }
-  | { kind: "schedule"; rule: string; start: string };
+  | { kind: "schedule"; rule: string; start: string }
+  | { kind: "countdown"; unit: "hours" | "days"; amount: number; at: string | null; last_done: number | null };
 
 export interface NewReminder {
   title: string;
@@ -31,6 +32,7 @@ export const inbox = () => invoke<InboxItem[]>("inbox");
 export const createOneOff = (title: string, dueAt: number) =>
   invoke<void>("create_one_off", { title, dueAt });
 export const createReminder = (reminder: NewReminder) => invoke<void>("create_reminder", { reminder });
+export const completeEarly = (reminderId: string) => invoke<void>("complete_early", { reminderId });
 export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
 /** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */
 export const onChanged = (f: () => void) => listen("changed", f);

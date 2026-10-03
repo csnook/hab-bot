@@ -77,6 +77,17 @@ fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     Ok(())
 }
 
+/// Completes a reminder ahead of its next expected occurrence, which then never fires.
+#[tauri::command]
+fn complete_early(app: tauri::State<App>, reminder_id: String) -> Result<(), String> {
+    let mut core = fresh(&app);
+    core.complete_early(&reminder_id, now(), now())
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
+    android::schedule_alarm(core.next_due(now()));
+    Ok(())
+}
+
 /// The permissions still missing on Android; the UI explains each before asking.
 #[tauri::command]
 fn missing_permissions() -> Vec<String> {
@@ -185,6 +196,7 @@ pub fn run() {
             create_one_off,
             create_reminder,
             complete,
+            complete_early,
             missing_permissions,
             request_permissions
         ])
