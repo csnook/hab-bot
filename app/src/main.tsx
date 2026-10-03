@@ -214,12 +214,17 @@ function Settings({ onClose }: { onClose: () => void }) {
 function Inbox() {
   const [items, setItems] = useState<api.InboxItem[]>([]);
   const [settings, setSettings] = useState(false);
+  const [opened, setOpened] = useState("");
   const refresh = () => api.inbox().then(setItems);
 
   useEffect(() => {
     refresh();
     const unlisten = api.onChanged(refresh);
-    return () => void unlisten.then((f) => f());
+    const unlistenOpen = api.onOpen(setOpened);
+    return () => {
+      void unlisten.then((f) => f());
+      void unlistenOpen.then((f) => f());
+    };
   }, []);
 
   const by = (section: api.InboxItem["section"]) => items.filter((i) => i.section === section);
@@ -236,12 +241,13 @@ function Inbox() {
           <h2>Overdue</h2>
           <ul>
             {by("overdue").map(({ occurrence: o }) => (
-              <li key={o.id} class="overdue">
+              <li key={o.id} class={`overdue ${o.id === opened ? "opened" : ""}`}>
                 <span>
                   {o.title} <small>{o.priority}</small>
                 </span>
                 <time>since {new Date(o.overdue_at).toLocaleString()}</time>
                 <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+                <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
               </li>
             ))}
           </ul>
@@ -252,10 +258,11 @@ function Inbox() {
         {by("due").length === 0 && <p class="empty">Nothing due.</p>}
         <ul>
           {by("due").map(({ occurrence: o }) => (
-            <li key={o.id}>
+            <li key={o.id} class={o.id === opened ? "opened" : ""}>
               <span>{o.title}</span>
               <time>{new Date(o.scheduled_at).toLocaleString()}</time>
               <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+              <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
             </li>
           ))}
         </ul>
@@ -282,7 +289,7 @@ function Inbox() {
               <li key={o.id} class={o.status}>
                 <span>{o.title}</span>
                 <time>
-                  {o.status === "missed" ? "Missed" : "Done"} {hhmm(o.closed_at ?? o.scheduled_at)}
+                  {o.status === "missed" ? "Missed" : o.status === "skipped" ? "Skipped" : "Done"} {hhmm(o.closed_at ?? o.scheduled_at)}
                 </time>
               </li>
             ))}

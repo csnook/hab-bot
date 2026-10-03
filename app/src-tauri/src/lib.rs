@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "linux")]
+mod linux;
 
 use hab_core::{Core, InboxItem, Millis, NewReminder, Trigger};
 use std::sync::Mutex;
@@ -13,7 +15,7 @@ use tauri::tray::TrayIconBuilder;
 #[cfg(desktop)]
 use tauri::WindowEvent;
 use tauri::{AppHandle, Emitter, Manager};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 use tauri_plugin_notification::NotificationExt;
 
 /// The personal user's name in the skeleton, until accounts exist.
@@ -76,6 +78,13 @@ fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     #[cfg(target_os = "android")]
     android::schedule_alarm(core.next_due(now()));
     Ok(())
+}
+
+#[tauri::command]
+fn skip(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
+    fresh(&app)
+        .skip(&occurrence_id, None, now())
+        .map_err(|e| e.to_string())
 }
 
 /// Completes a reminder ahead of its next expected occurrence, which then never fires.
@@ -147,29 +156,62 @@ fn spawn_clock(handle: AppHandle) {
 }
 
 /// Fires whatever is due, once now (which catches up on time that passed while the app
-/// was closed) and then on every tick, whether or not the window is open.
+/// was closed) and then every second, whether or not the window is open. The core's
+/// alert engine says what to show, and `linux.rs` shows it.
 #[cfg(not(target_os = "android"))]
 fn spawn_clock(handle: AppHandle) {
-    std::thread::spawn(move || loop {
-        let opened = {
-            let state = handle.state::<App>();
-            let mut core = state.core.lock().unwrap();
-            sync_zone(&mut core);
-            core.fire_due(now()).unwrap_or_default()
-        };
-        for occurrence in &opened {
-            let _ = handle
-                .notification()
-                .builder()
-                .title(&occurrence.title)
-                .body("Due now")
-                .show();
+    std::thread::spawn(move || {
+        let mut engine = hab_core::AlertEngine::new(&device_name());
+        #[cfg(target_os = "linux")]
+        let mut shown = linux::Shown::default();
+        loop {
+            // asked before taking the lock: it's a D-Bus call
+            #[cfg(target_os = "linux")]
+            let dnd = linux::do_not_disturb();
+            #[cfg(not(target_os = "linux"))]
+            let dnd = false;
+            let (poll, changed) = {
+                let state = handle.state::<App>();
+                let mut core = state.core.lock().unwrap();
+                sync_zone(&mut core);
+                let fired = core.fire_due(now()).unwrap_or_default();
+                let poll = engine.poll(&mut core, now(), dnd).unwrap_or_default();
+                let changed =
+                    !fired.is_empty() || !poll.alerts.is_empty() || !poll.dismissed.is_empty();
+                (poll, changed)
+            };
+            #[cfg(target_os = "linux")]
+            {
+                for id in &poll.dismissed {
+                    linux::dismiss(&mut shown, id);
+                }
+                for alert in &poll.alerts {
+                    linux::show(&handle, &mut shown, alert);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            for alert in &poll.alerts {
+                let _ = handle
+                    .notification()
+                    .builder()
+                    .title(&alert.title)
+                    .body("Due now")
+                    .show();
+            }
+            if changed {
+                let _ = handle.emit("changed", ());
+            }
+            std::thread::sleep(Duration::from_secs(1));
         }
-        if !opened.is_empty() {
-            let _ = handle.emit("changed", ());
-        }
-        std::thread::sleep(Duration::from_secs(1));
     });
+}
+
+#[cfg(not(target_os = "android"))]
+fn device_name() -> String {
+    #[cfg(target_os = "linux")]
+    return linux::device_name();
+    #[cfg(not(target_os = "linux"))]
+    "this device".into()
 }
 
 #[cfg(desktop)]
@@ -208,6 +250,7 @@ pub fn run() {
             create_one_off,
             create_reminder,
             complete,
+            skip,
             priorities,
             about,
             complete_early,

@@ -24,7 +24,7 @@ export interface Occurrence {
   fired_at: number;
   priority: Priority;
   overdue_at: number;
-  status: "expected" | "due" | "completed" | "missed";
+  status: "expected" | "due" | "completed" | "skipped" | "missed";
   closed_at: number | null;
 }
 
@@ -50,6 +50,7 @@ export const inbox = () => invoke<InboxItem[]>("inbox");
 export const createOneOff = (title: string, dueAt: number) =>
   invoke<void>("create_one_off", { title, dueAt });
 export const createReminder = (reminder: NewReminder) => invoke<void>("create_reminder", { reminder });
+export const skip = (occurrenceId: string) => invoke<void>("skip", { occurrenceId });
 export const completeEarly = (reminderId: string) => invoke<void>("complete_early", { reminderId });
 export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
 /** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */
@@ -59,3 +60,5 @@ export const missingPermissions = () => invoke<string[]>("missing_permissions");
 export const requestPermissions = () => invoke<void>("request_permissions");
 export const priorities = () => invoke<PrioritySettings[]>("priorities");
 export const about = () => invoke<string>("about");
+/** A notification was clicked: the occurrence to show. */
+export const onOpen = (f: (occurrenceId: string) => void) => listen<string>("open", (e) => f(e.payload));

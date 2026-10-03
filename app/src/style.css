@@ -17,3 +17,4 @@ small { opacity: .7; margin-left: .3rem; }
 dialog { max-width: 95vw; overflow: auto; z-index: 1; }
 table { border-collapse: collapse; font-size: .85em; }
 td, th { padding: .2rem .5rem; text-align: left; border-bottom: 1px solid #8884; }
+.opened { background: #3366cc22; }

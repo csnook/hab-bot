@@ -4,12 +4,14 @@
 //! [`State`] is never stored; it is rebuilt by applying the stream (ADR 0005), so
 //! sync can later merge streams from several devices.
 
+mod alerts;
 mod priority;
 mod schedule;
 mod state;
 mod store;
 pub mod time;
 
+pub use alerts::{Alert, AlertEngine, AlertKind, Poll};
 pub use priority::{all_settings, AlertStyle, Escalation, Priority, PrioritySettings};
 pub use state::{
     CountdownUnit, InboxItem, InboxSection, Occurrence, OccurrenceStatus, Reminder, State, Trigger,
@@ -74,6 +76,21 @@ pub enum Event {
         by: String,
         /// The recorded time of doing it.
         at: Millis,
+    },
+    /// An alert changed style on a device: the first alert, or a step of escalation. History
+    /// keeps these, not repeats.
+    AlertChanged {
+        occurrence_id: String,
+        style: AlertStyle,
+        device: String,
+        at: Millis,
+    },
+    /// Closed by someone's choice, with an optional note.
+    OccurrenceSkipped {
+        occurrence_id: String,
+        by: String,
+        at: Millis,
+        note: Option<String>,
     },
     PriorityChanged {
         reminder_id: String,
@@ -361,6 +378,52 @@ impl Core {
         out
     }
 
+    /// Open occurrences as they stand now: a reminder's priority can change, which moves
+    /// its overdue time unless overridden.
+    pub fn open_occurrences(&self) -> Vec<Occurrence> {
+        self.state
+            .occurrences()
+            .filter(|o| o.status == OccurrenceStatus::Due)
+            .map(|o| {
+                let mut o = o.clone();
+                if let Some(r) = self.state.reminder(&o.reminder_id) {
+                    o.priority = r.priority;
+                    o.overdue_at = r.priority.overdue_at(o.scheduled_at);
+                }
+                o
+            })
+            .collect()
+    }
+
+    /// Records that an alert on `device` changed style.
+    pub(crate) fn record_alert(
+        &mut self,
+        occurrence_id: &str,
+        style: AlertStyle,
+        device: &str,
+        at: Millis,
+    ) -> Result<()> {
+        self.record(Event::AlertChanged {
+            occurrence_id: occurrence_id.into(),
+            style,
+            device: device.into(),
+            at,
+        })
+    }
+
+    /// Skips an open occurrence: closed without doing it, by choice.
+    pub fn skip(&mut self, occurrence_id: &str, note: Option<String>, now: Millis) -> Result<()> {
+        if !self.state.is_open(occurrence_id) {
+            return Err(Error::NoOpenOccurrence(occurrence_id.to_string()));
+        }
+        self.record(Event::OccurrenceSkipped {
+            occurrence_id: occurrence_id.into(),
+            by: self.user.clone(),
+            at: now,
+            note,
+        })
+    }
+
     /// The Inbox: open occurrences under Due, what's expected for the rest of today under
     /// Later today, and what closed today (including missed) under Earlier today.
     pub fn inbox(&self, now: Millis) -> Vec<InboxItem> {
@@ -377,20 +440,9 @@ impl Core {
             occurrence,
         };
 
-        // A reminder's priority can change, which moves its overdue time unless overridden.
-        let current = |o: &Occurrence| {
-            let mut o = o.clone();
-            if let Some(r) = self.state.reminder(&o.reminder_id) {
-                o.priority = r.priority;
-                o.overdue_at = r.priority.overdue_at(o.scheduled_at);
-            }
-            o
-        };
         let (mut overdue, mut due): (Vec<_>, Vec<_>) = self
-            .state
-            .occurrences()
-            .filter(|o| o.status == OccurrenceStatus::Due)
-            .map(current)
+            .open_occurrences()
+            .into_iter()
             .partition(|o| now >= o.overdue_at);
         // Overdue: highest priority first, then longest overdue.
         overdue.sort_by_key(|o| (std::cmp::Reverse(o.priority), o.overdue_at));
@@ -401,7 +453,9 @@ impl Core {
             .filter(|o| {
                 matches!(
                     o.status,
-                    OccurrenceStatus::Completed | OccurrenceStatus::Missed
+                    OccurrenceStatus::Completed
+                        | OccurrenceStatus::Skipped
+                        | OccurrenceStatus::Missed
                 )
             })
             .filter(|o| o.closed_at.is_some_and(|c| c >= start && c < end))
@@ -446,6 +500,11 @@ impl Core {
                 .map(|i| i.scheduled_at)
             })
             .min()
+    }
+
+    /// Every event in the personal list's stream, oldest first: the history.
+    pub fn history(&self) -> Vec<Event> {
+        self.store.events(PERSONAL_LIST).unwrap_or_default()
     }
 
     pub fn state(&self) -> &State {

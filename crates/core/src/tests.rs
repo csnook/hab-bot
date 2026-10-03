@@ -853,3 +853,235 @@ mod priorities {
         assert_eq!(s.reminder("r").unwrap().priority, Priority::Medium);
     }
 }
+
+mod alert_tests {
+    use super::*;
+
+    const MINUTE: Millis = 60_000;
+    const HOUR: Millis = 60 * MINUTE;
+    const DAY: Millis = 24 * HOUR;
+
+    fn setup(priority: Priority) -> (Core, AlertEngine) {
+        let mut c = core();
+        c.create(
+            NewReminder {
+                title: "Call".into(),
+                triggers: vec![Trigger::OneOff { at: T0 }],
+                tz: None,
+                priority,
+            },
+            T0,
+        )
+        .unwrap();
+        c.fire_due(T0).unwrap();
+        (c, AlertEngine::new("laptop"))
+    }
+
+    fn styles(p: &Poll) -> Vec<(AlertKind, AlertStyle)> {
+        p.alerts.iter().map(|a| (a.kind, a.style)).collect()
+    }
+
+    #[test]
+    fn gentle_alerts_once_and_does_not_repeat() {
+        let (mut c, mut e) = setup(Priority::Low);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, false).unwrap()),
+            [(AlertKind::First, AlertStyle::Gentle)]
+        );
+        assert!(e.poll(&mut c, T0 + HOUR, false).unwrap().alerts.is_empty());
+        // overdue after a day: Low goes silent, in the overdue list
+        let p = e.poll(&mut c, T0 + DAY, false).unwrap();
+        assert_eq!(styles(&p), [(AlertKind::StyleChange, AlertStyle::Silent)]);
+        assert!(p.alerts[0].overdue);
+        assert!(e
+            .poll(&mut c, T0 + 5 * DAY, false)
+            .unwrap()
+            .alerts
+            .is_empty());
+    }
+
+    #[test]
+    fn minimum_is_silent_throughout() {
+        let (mut c, mut e) = setup(Priority::Minimum);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, false).unwrap()),
+            [(AlertKind::First, AlertStyle::Silent)]
+        );
+        assert!(e
+            .poll(&mut c, T0 + 2 * DAY, false)
+            .unwrap()
+            .alerts
+            .is_empty());
+    }
+
+    #[test]
+    fn medium_goes_insistent_then_alarm_and_repeats_every_interval() {
+        let (mut c, mut e) = setup(Priority::Medium);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, false).unwrap()),
+            [(AlertKind::First, AlertStyle::Gentle)]
+        );
+        // due for an hour, then overdue: insistent
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + HOUR, false).unwrap()),
+            [(AlertKind::StyleChange, AlertStyle::Insistent)]
+        );
+        assert!(e
+            .poll(&mut c, T0 + HOUR + 9 * MINUTE, false)
+            .unwrap()
+            .alerts
+            .is_empty());
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + HOUR + 10 * MINUTE, false).unwrap()),
+            [(AlertKind::Repeat, AlertStyle::Insistent)]
+        );
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + HOUR + 20 * MINUTE, false).unwrap()),
+            [(AlertKind::Repeat, AlertStyle::Insistent)]
+        );
+        // an hour overdue: the alarm, which keeps escalating until it closes
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + 2 * HOUR, false).unwrap()),
+            [(AlertKind::StyleChange, AlertStyle::Alarm)]
+        );
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + 2 * HOUR + 10 * MINUTE, false).unwrap()),
+            [(AlertKind::Repeat, AlertStyle::Alarm)]
+        );
+    }
+
+    #[test]
+    fn high_alarms_at_once_and_repeats() {
+        let (mut c, mut e) = setup(Priority::High);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, false).unwrap()),
+            [(AlertKind::First, AlertStyle::Alarm)]
+        );
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + 10 * MINUTE, false).unwrap()),
+            [(AlertKind::Repeat, AlertStyle::Alarm)]
+        );
+    }
+
+    #[test]
+    fn closing_dismisses_the_notification_and_stops_alerts() {
+        let (mut c, mut e) = setup(Priority::Medium);
+        let id = e.poll(&mut c, T0, false).unwrap().alerts[0]
+            .occurrence_id
+            .clone();
+        c.complete(&id, T0 + 1).unwrap();
+        let p = e.poll(&mut c, T0 + 2 * HOUR, false).unwrap();
+        assert!(p.alerts.is_empty());
+        assert_eq!(p.dismissed, [id]);
+        assert!(e
+            .poll(&mut c, T0 + 3 * HOUR, false)
+            .unwrap()
+            .dismissed
+            .is_empty());
+    }
+
+    #[test]
+    fn do_not_disturb_downgrades_to_silent_and_catches_up_afterwards() {
+        let (mut c, mut e) = setup(Priority::Medium);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, true).unwrap()),
+            [(AlertKind::First, AlertStyle::Silent)]
+        );
+        // overdue and escalated while it was on: still silent, nothing repeats
+        assert!(e
+            .poll(&mut c, T0 + HOUR + 30 * MINUTE, true)
+            .unwrap()
+            .alerts
+            .is_empty());
+        // it ends: the alert arrives at its current level
+        assert_eq!(
+            styles(&e.poll(&mut c, T0 + HOUR + 40 * MINUTE, false).unwrap()),
+            [(AlertKind::StyleChange, AlertStyle::Insistent)]
+        );
+    }
+
+    #[test]
+    fn maximum_breaks_do_not_disturb() {
+        let (mut c, mut e) = setup(Priority::Maximum);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, true).unwrap()),
+            [(AlertKind::First, AlertStyle::Alarm)]
+        );
+        let (mut c, mut e) = setup(Priority::High);
+        assert_eq!(
+            styles(&e.poll(&mut c, T0, true).unwrap()),
+            [(AlertKind::First, AlertStyle::Silent)]
+        );
+    }
+
+    fn alert_history(c: &Core) -> Vec<(String, AlertStyle, String)> {
+        c.history()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::AlertChanged {
+                    occurrence_id,
+                    style,
+                    device,
+                    ..
+                } => Some((occurrence_id, style, device)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn history_records_the_first_alert_and_style_changes_with_the_device_but_not_repeats() {
+        let (mut c, mut e) = setup(Priority::Medium);
+        e.poll(&mut c, T0, false).unwrap(); // first: gentle
+        e.poll(&mut c, T0 + HOUR, false).unwrap(); // insistent
+        e.poll(&mut c, T0 + HOUR + 10 * MINUTE, false).unwrap(); // repeat
+        e.poll(&mut c, T0 + HOUR + 20 * MINUTE, false).unwrap(); // repeat
+        e.poll(&mut c, T0 + 2 * HOUR, false).unwrap(); // alarm
+        let h = alert_history(&c);
+        assert_eq!(
+            h.iter()
+                .map(|(_, s, d)| (*s, d.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (AlertStyle::Gentle, "laptop"),
+                (AlertStyle::Insistent, "laptop"),
+                (AlertStyle::Alarm, "laptop")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_do_not_disturb_downgrade_is_not_a_change_of_style_in_history() {
+        let (mut c, mut e) = setup(Priority::Low);
+        e.poll(&mut c, T0, true).unwrap();
+        e.poll(&mut c, T0 + MINUTE, false).unwrap();
+        assert_eq!(alert_history(&c).len(), 1);
+    }
+
+    #[test]
+    fn next_wake_finds_the_next_thing_to_do() {
+        let (mut c, mut e) = setup(Priority::Medium);
+        assert_eq!(e.next_wake(&c, T0), Some(T0), "the first alert is pending");
+        e.poll(&mut c, T0, false).unwrap();
+        assert_eq!(e.next_wake(&c, T0), Some(T0 + HOUR), "it goes overdue");
+        e.poll(&mut c, T0 + HOUR, false).unwrap();
+        assert_eq!(
+            e.next_wake(&c, T0 + HOUR),
+            Some(T0 + HOUR + 10 * MINUTE),
+            "the repeat"
+        );
+    }
+
+    #[test]
+    fn skipping_closes_without_doing_it() {
+        let (mut c, _) = setup(Priority::Medium);
+        let id = c.open_occurrences()[0].id.clone();
+        c.skip(&id, Some("away".into()), T0 + 5).unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!(o.status, OccurrenceStatus::Skipped);
+        assert!(matches!(
+            c.skip(&id, None, T0 + 6),
+            Err(Error::NoOpenOccurrence(_))
+        ));
+    }
+}

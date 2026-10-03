@@ -21,7 +21,7 @@ pub enum Priority {
 }
 
 /// How an alert gets attention. How each is delivered comes with the alert tickets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertStyle {
     Silent,

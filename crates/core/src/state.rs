@@ -68,6 +68,8 @@ pub enum OccurrenceStatus {
     Expected,
     Due,
     Completed,
+    /// Closed by someone's choice, without doing it.
+    Skipped,
     /// Closed by the app: a newer instance fired, or it expired. Nobody chose it.
     Missed,
 }
@@ -181,6 +183,20 @@ impl State {
                         completed_by: None,
                         closed_at: None,
                     },
+                );
+            }
+            Event::AlertChanged { .. } => {} // history only; no effect on the state
+            Event::OccurrenceSkipped {
+                occurrence_id,
+                by,
+                at,
+                ..
+            } => {
+                self.close(
+                    occurrence_id,
+                    OccurrenceStatus::Skipped,
+                    *at,
+                    Some(by.clone()),
                 );
             }
             Event::PriorityChanged {
