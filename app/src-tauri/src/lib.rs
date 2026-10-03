@@ -1,11 +1,19 @@
 //! The Tauri shell: commands for the UI, a clock thread that fires reminders, and the tray.
 
+#[cfg(target_os = "android")]
+mod android;
+
 use hab_core::{Core, InboxItem, Millis};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem};
+#[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+#[cfg(desktop)]
+use tauri::WindowEvent;
+use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// The personal user's name in the skeleton, until accounts exist.
@@ -16,27 +24,81 @@ struct App {
 }
 
 fn now() -> Millis {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as Millis).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as Millis)
+        .unwrap_or(0)
+}
+
+/// The alarm path on Android writes to the same database from a second core, so the
+/// commands reload the stream first.
+fn fresh(app: &App) -> std::sync::MutexGuard<'_, Core> {
+    let mut core = app.core.lock().unwrap();
+    let _ = core.refresh();
+    core
 }
 
 #[tauri::command]
 fn inbox(app: tauri::State<App>) -> Vec<InboxItem> {
-    app.core.lock().unwrap().inbox()
+    fresh(&app).inbox()
 }
 
 #[tauri::command]
 fn create_one_off(app: tauri::State<App>, title: String, due_at: Millis) -> Result<(), String> {
-    let mut core = app.core.lock().unwrap();
-    core.create_one_off(&title, due_at, now()).map(|_| ()).map_err(|e| e.to_string())
+    let mut core = fresh(&app);
+    core.create_one_off(&title, due_at, now())
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
+    android::schedule_alarm(core.next_due());
+    Ok(())
+}
+
+/// The permissions still missing on Android; the UI explains each before asking.
+#[tauri::command]
+fn missing_permissions() -> Vec<String> {
+    #[cfg(target_os = "android")]
+    return android::missing_permissions();
+    #[cfg(not(target_os = "android"))]
+    Vec::new()
+}
+
+#[tauri::command]
+fn request_permissions() {
+    #[cfg(target_os = "android")]
+    android::request_permissions();
 }
 
 #[tauri::command]
 fn complete(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
-    app.core.lock().unwrap().complete(&occurrence_id, now()).map_err(|e| e.to_string())
+    fresh(&app)
+        .complete(&occurrence_id, now())
+        .map_err(|e| e.to_string())
+}
+
+/// On Android, firing belongs to the exact alarm (Kotlin, through `android.rs`), which
+/// works with the app closed. Here we only tell the UI when the stream changed.
+#[cfg(target_os = "android")]
+fn spawn_clock(handle: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last = Vec::new();
+        loop {
+            let ids: Vec<String> = {
+                let state = handle.state::<App>();
+                let core = fresh(&state);
+                core.inbox().into_iter().map(|i| i.occurrence.id).collect()
+            };
+            if ids != last {
+                last = ids;
+                let _ = handle.emit("changed", ());
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 /// Fires whatever is due, once now (which catches up on time that passed while the app
 /// was closed) and then on every tick, whether or not the window is open.
+#[cfg(not(target_os = "android"))]
 fn spawn_clock(handle: AppHandle) {
     std::thread::spawn(move || loop {
         let opened = {
@@ -45,7 +107,12 @@ fn spawn_clock(handle: AppHandle) {
             core.fire_due(now()).unwrap_or_default()
         };
         for occurrence in &opened {
-            let _ = handle.notification().builder().title(&occurrence.title).body("Due now").show();
+            let _ = handle
+                .notification()
+                .builder()
+                .title(&occurrence.title)
+                .body("Due now")
+                .show();
         }
         if !opened.is_empty() {
             let _ = handle.emit("changed", ());
@@ -54,6 +121,7 @@ fn spawn_clock(handle: AppHandle) {
     });
 }
 
+#[cfg(desktop)]
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -84,13 +152,27 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![inbox, create_one_off, complete])
+        .invoke_handler(tauri::generate_handler![
+            inbox,
+            create_one_off,
+            complete,
+            missing_permissions,
+            request_permissions
+        ])
         .setup(|app| {
+            // Kotlin opens the same file by `filesDir`, so Android names it itself.
+            #[cfg(target_os = "android")]
+            let dir = std::path::PathBuf::from(android::files_dir().ok_or("no files dir")?);
+            #[cfg(not(target_os = "android"))]
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let path = dir.join("reminders.db");
             let core = Core::open(path.to_str().expect("utf-8 data path"), USER)?;
-            app.manage(App { core: Mutex::new(core) });
+            #[cfg(target_os = "android")]
+            android::schedule_alarm(core.next_due());
+            app.manage(App {
+                core: Mutex::new(core),
+            });
             #[cfg(desktop)]
             setup_tray(app.handle())?;
             spawn_clock(app.handle().clone());

@@ -16,6 +16,8 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Store> {
+        // The Android alarm path opens its own connection while the app may be open.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 seq     INTEGER PRIMARY KEY AUTOINCREMENT,

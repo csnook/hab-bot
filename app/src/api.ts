@@ -20,3 +20,6 @@ export const createOneOff = (title: string, dueAt: number) =>
 export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
 /** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */
 export const onChanged = (f: () => void) => listen("changed", f);
+/** Android only; empty elsewhere. Names: "notifications", "alarms". */
+export const missingPermissions = () => invoke<string[]>("missing_permissions");
+export const requestPermissions = () => invoke<void>("request_permissions");

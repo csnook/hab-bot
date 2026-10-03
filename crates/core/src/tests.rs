@@ -105,3 +105,25 @@ fn restarting_rebuilds_the_same_state_and_fires_what_passed_while_closed() {
     assert_eq!(c.inbox().len(), 1);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn refresh_sees_events_appended_by_another_core() {
+    let path = std::env::temp_dir().join(format!("hab-core-{}.db", uuid::Uuid::new_v4()));
+    let p = path.to_str().unwrap();
+    let mut app = Core::open(p, "me").unwrap();
+    let mut alarm = Core::open(p, "me").unwrap();
+    app.create_one_off("x", T0, T0).unwrap();
+    // the alarm path fires it with the app open
+    alarm.refresh().unwrap();
+    assert_eq!(alarm.fire_due(T0).unwrap().len(), 1);
+    assert!(app.inbox().is_empty());
+    app.refresh().unwrap();
+    assert_eq!(app.inbox().len(), 1);
+    // and completes it; the app's own firing afterwards is a no-op
+    let id = app.inbox()[0].occurrence.id.clone();
+    alarm.complete(&id, T0 + 1).unwrap();
+    app.refresh().unwrap();
+    assert!(app.inbox().is_empty());
+    assert!(app.fire_due(T0 + 2).unwrap().is_empty());
+    let _ = std::fs::remove_file(path);
+}

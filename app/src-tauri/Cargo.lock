@@ -1424,6 +1424,8 @@ name = "hab-bot"
 version = "0.1.0"
 dependencies = [
  "hab-core",
+ "jni",
+ "ndk-context",
  "serde",
  "serde_json",
  "tauri",

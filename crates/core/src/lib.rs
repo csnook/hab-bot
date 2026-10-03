@@ -91,6 +91,13 @@ impl Core {
         })
     }
 
+    /// Rebuilds the state from the stream. Another connection to the same database (the
+    /// Android alarm path runs a second core in this process) may have appended events.
+    pub fn refresh(&mut self) -> Result<()> {
+        self.state = State::from_events(self.store.events(PERSONAL_LIST)?);
+        Ok(())
+    }
+
     fn record(&mut self, event: Event) -> Result<()> {
         self.store.append(PERSONAL_LIST, &event)?;
         self.state.apply(&event);

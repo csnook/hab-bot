@@ -98,7 +98,40 @@ fn tauri(args: &[&str]) -> Result<(), String> {
     run(&ui_dir(), "npx", &full)
 }
 
+/// Generates the Android project if it's missing, then copies our Kotlin and manifest
+/// entries into it. Safe to repeat.
+fn android_project() -> Result<(), String> {
+    let gen = ui_dir().join("src-tauri/gen/android");
+    if !gen.exists() {
+        tauri(&["android", "init"])?;
+    }
+    let glue = ui_dir().join("android");
+    let java = gen.join("app/src/main/java/dev/habbot/reminders");
+    std::fs::create_dir_all(&java).map_err(|e| e.to_string())?;
+    let kotlin = std::fs::read_dir(glue.join("kotlin")).map_err(|e| e.to_string())?;
+    for file in kotlin {
+        let file = file.map_err(|e| e.to_string())?.path();
+        std::fs::copy(&file, java.join(file.file_name().unwrap())).map_err(|e| e.to_string())?;
+    }
+    let manifest_path = gen.join("app/src/main/AndroidManifest.xml");
+    let mut manifest = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+    if !manifest.contains("<!-- hab-bot -->") {
+        let read = |name: &str| std::fs::read_to_string(glue.join(name)).map_err(|e| e.to_string());
+        let application = manifest
+            .find("<application")
+            .ok_or("no <application> in the manifest")?;
+        manifest.insert_str(application, &read("manifest-permissions.xml")?);
+        let end = manifest
+            .find("</application>")
+            .ok_or("no </application> in the manifest")?;
+        manifest.insert_str(end, &read("manifest-application.xml")?);
+        std::fs::write(&manifest_path, manifest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn android() -> Result<(), String> {
+    android_project()?;
     tauri(&["android", "build", "--debug", "--apk"])?;
     let apk = ui_dir().join(
         "src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk",
