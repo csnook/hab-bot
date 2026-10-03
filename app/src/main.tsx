@@ -462,4 +462,46 @@ function Inbox() {
   );
 }
 
-render(<Inbox />, document.getElementById("app")!);
+/** The alarm window: "Ringing · list · priority", the title, when it was due, and the buttons. */
+function AlarmScreen({ id }: { id: string }) {
+  const [o, setO] = useState<api.Occurrence | null | undefined>(undefined);
+  const [skipping, setSkipping] = useState(false);
+  const [note, setNote] = useState("");
+  const [options, setOptions] = useState(false);
+  const [custom, setCustom] = useState("");
+  useEffect(() => void api.getOccurrence(id).then(setO), []);
+  // after an action the alarm is over: take down the window and sound
+  const act = (f: () => Promise<unknown>) => f().then(() => api.closeAlarm());
+  if (o === undefined) return null;
+  if (o === null) return <main class="alarm"><p>This alarm is over.</p><button onClick={() => api.closeAlarm()}>Close</button></main>;
+  const minutes = (m: number) => api.snoozeUntil(id, Date.now() + m * 60_000);
+  return (
+    <main class="alarm">
+      <p class="ringing">Ringing · Personal · {o.priority}</p>
+      <h1>{o.title}</h1>
+      <p>Due {new Date(o.scheduled_at).toLocaleString()}</p>
+      <button class="big" onClick={() => act(() => api.complete(id))}>Done</button>
+      <p>
+        <button onClick={() => setOptions(!options)}>Snooze ▾</button>
+        <button onClick={() => act(() => api.acknowledge(id))}>Acknowledge</button>
+        <button onClick={() => setSkipping(!skipping)}>Skip…</button>
+      </p>
+      {options && (
+        <p>
+          {[5, 10, 30].map((m) => <button onClick={() => act(() => minutes(m))}>{m} minutes</button>)}
+          <input type="datetime-local" value={custom} onInput={(e) => setCustom(e.currentTarget.value)} />
+          <button disabled={!custom} onClick={() => act(() => api.snoozeUntil(id, new Date(custom).getTime()))}>Until…</button>
+        </p>
+      )}
+      {skipping && (
+        <p>
+          <input placeholder="Note (optional)" value={note} onInput={(e) => setNote(e.currentTarget.value)} />
+          <button onClick={() => act(() => api.skip(id, note.trim() || null))}>Skip</button>
+        </p>
+      )}
+    </main>
+  );
+}
+
+const alarmId = new URLSearchParams(window.location.search).get("alarm");
+render(alarmId ? <AlarmScreen id={alarmId} /> : <Inbox />, document.getElementById("app")!);

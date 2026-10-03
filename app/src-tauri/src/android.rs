@@ -64,7 +64,7 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_tick<'l>(
 }
 
 /// `Native.act(db, action, occurrenceId, now)`: what a notification button or swipe does.
-/// `action` is `done`, `skip`, `snooze` (the button) or `swipe` (swiped away, which snoozes
+/// `action` is `done`, `skip`, `acknowledge`, `snooze` (the button) or `swipe` (swiped away, which snoozes
 /// for the priority's interval, recorded as made by swiping).
 #[no_mangle]
 pub extern "system" fn Java_dev_habbot_reminders_Native_act<'l>(
@@ -81,6 +81,7 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_act<'l>(
     with_core(&db, |core| match action.as_str() {
         "done" => core.complete(&id, now),
         "skip" => core.skip(&id, None, now),
+        "acknowledge" => core.acknowledge(&id, now).map(|_| ()),
         "snooze" => core.snooze_default(&id, SnoozeVia::Button, now).map(|_| ()),
         "swipe" => core.snooze_default(&id, SnoozeVia::Swipe, now).map(|_| ()),
         _ => Ok(()),

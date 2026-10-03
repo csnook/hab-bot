@@ -120,7 +120,12 @@ object Notifier {
             )
             .addAction(Notification.Action.Builder(null, "Done", action("done", 0)).build())
             .addAction(Notification.Action.Builder(null, "Snooze", action("snooze", 1)).build())
-            .addAction(Notification.Action.Builder(null, "Skip", action("skip", 2)).build())
+        // Alarms carry Done · Snooze · Acknowledge; the others Done · Snooze · Skip.
+        if (style == "alarm") {
+            builder.addAction(Notification.Action.Builder(null, "Acknowledge", action("acknowledge", 2)).build())
+        } else {
+            builder.addAction(Notification.Action.Builder(null, "Skip", action("skip", 2)).build())
+        }
         // Maximum gets through Do Not Disturb with the alarm category.
         if (priority == "maximum") builder.setCategory(Notification.CATEGORY_ALARM)
         if (style == "silent") builder.setSilent(true)

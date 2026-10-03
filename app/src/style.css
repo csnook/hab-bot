@@ -37,3 +37,6 @@ td, th { padding: .2rem .5rem; text-align: left; border-bottom: 1px solid #8884;
 .swiping-right { background: #2a9d4a33; }
 .swiping-left { background: #d9a40033; }
 dialog.sheet { position: fixed; inset: auto 0 0 0; max-width: none; width: auto; margin: 0; border-radius: 1rem 1rem 0 0; padding-bottom: max(1rem, env(safe-area-inset-bottom)); z-index: 4; }
+.alarm { text-align: center; }
+.alarm .ringing { color: #c33; font-weight: bold; }
+.alarm .big { font-size: 1.6rem; padding: 1rem 3rem; margin: 1rem; }

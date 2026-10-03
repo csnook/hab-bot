@@ -88,6 +88,8 @@ pub struct Occurrence {
     pub overdue_at: Millis,
     /// Alerts are quiet until then. The occurrence stays open and still goes overdue.
     pub snoozed_until: Option<Millis>,
+    /// Alerts are silenced until then by an acknowledgement.
+    pub acknowledged_until: Option<Millis>,
     /// When it expires, if the reminder has an expiry at a known time: its duration after
     /// the scheduled time. Reaching it closes the occurrence as missed.
     pub expires_at: Option<Millis>,
@@ -206,6 +208,7 @@ impl State {
                         priority,
                         overdue_at: priority.overdue_at(*scheduled_at),
                         snoozed_until: self.snoozes.get(occurrence_id).copied(),
+                        acknowledged_until: None,
                         expires_at: expiry.map(|e| scheduled_at + e),
                         status: OccurrenceStatus::Due,
                         completed_by: None,
@@ -230,6 +233,17 @@ impl State {
                 self.snoozes.remove(occurrence_id);
                 if let Some(o) = self.occurrences.get_mut(occurrence_id) {
                     o.snoozed_until = None;
+                }
+            }
+            Event::Acknowledged {
+                occurrence_id,
+                until,
+                ..
+            } => {
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    if o.status == OccurrenceStatus::Due {
+                        o.acknowledged_until = Some(*until);
+                    }
                 }
             }
             Event::AlertChanged { .. } => {} // history only; no effect on the state

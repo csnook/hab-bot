@@ -81,6 +81,32 @@ fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     Ok(())
 }
 
+/// Acknowledge: silences the current alert without closing anything.
+#[tauri::command]
+fn acknowledge(app: tauri::State<App>, occurrence_id: String) -> Result<Millis, String> {
+    fresh(&app)
+        .acknowledge(&occurrence_id, now())
+        .map_err(|e| e.to_string())
+}
+
+/// An open occurrence, for the alarm window.
+#[tauri::command]
+fn get_occurrence(app: tauri::State<App>, occurrence_id: String) -> Option<hab_core::Occurrence> {
+    fresh(&app)
+        .open_occurrences()
+        .into_iter()
+        .find(|o| o.id == occurrence_id)
+}
+
+/// Closes the alarm window and silences its sound, after an action taken in it.
+#[tauri::command]
+fn close_alarm(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    linux::alarm_window_closed(&app);
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
+
 /// One tap on Snooze: the priority's current interval.
 #[tauri::command]
 fn snooze(app: tauri::State<App>, occurrence_id: String) -> Result<Millis, String> {
@@ -255,8 +281,6 @@ fn spawn_clock(handle: AppHandle) {
 fn spawn_clock(handle: AppHandle) {
     std::thread::spawn(move || {
         let mut engine = hab_core::AlertEngine::new(&device_name());
-        #[cfg(target_os = "linux")]
-        let mut shown = linux::Shown::default();
         loop {
             // asked before taking the lock: it's a D-Bus call
             #[cfg(target_os = "linux")]
@@ -276,10 +300,10 @@ fn spawn_clock(handle: AppHandle) {
             #[cfg(target_os = "linux")]
             {
                 for id in &poll.dismissed {
-                    linux::dismiss(&mut shown, id);
+                    linux::dismiss(&handle, id);
                 }
                 for alert in &poll.alerts {
-                    linux::show(&handle, &mut shown, alert);
+                    linux::show(&handle, alert);
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -351,6 +375,9 @@ pub fn run() {
             correct,
             recent_skip_notes,
             snooze,
+            acknowledge,
+            get_occurrence,
+            close_alarm,
             snooze_until,
             snooze_picker,
             unsnooze,
@@ -381,6 +408,15 @@ pub fn run() {
         })
         // Closing the window leaves the app running in the tray; Quit in the tray exits.
         .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            if window.label() == "alarm" {
+                // Closing the alarm window silences the notification and sound too.
+                if let WindowEvent::Destroyed = event {
+                    #[cfg(target_os = "linux")]
+                    linux::alarm_window_closed(window.app_handle());
+                }
+                return;
+            }
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();

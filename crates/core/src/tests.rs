@@ -1747,3 +1747,76 @@ fn next_wake_combines_instances_and_alerts() {
     let e = AlertEngine::new("phone");
     assert_eq!(c.next_wake(&e, T0), Some(T0 + 5000));
 }
+
+mod acknowledge_tests {
+    use super::*;
+
+    const MINUTE: Millis = 60_000;
+    const HOUR: Millis = 60 * MINUTE;
+
+    fn setup(priority: Priority) -> (Core, AlertEngine, String) {
+        let mut c = core();
+        c.create(
+            NewReminder {
+                title: "Alarm".into(),
+                triggers: vec![Trigger::OneOff { at: T0 }],
+                tz: None,
+                priority,
+                expiry: None,
+            },
+            T0,
+        )
+        .unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        (c, AlertEngine::new("laptop"), id)
+    }
+
+    #[test]
+    fn acknowledging_while_due_quiets_it_until_it_goes_overdue_then_escalation_resumes() {
+        let (mut c, mut e, id) = setup(Priority::Medium);
+        e.poll(&mut c, T0, false).unwrap(); // gentle, due
+        let until = c.acknowledge(&id, T0 + 5 * MINUTE).unwrap();
+        assert_eq!(until, T0 + HOUR, "until it goes overdue");
+        let p = e.poll(&mut c, T0 + 5 * MINUTE, false).unwrap();
+        assert!(p.alerts.iter().all(|a| a.style == AlertStyle::Silent));
+        assert!(c.state().is_open(&id), "nothing closed");
+        // overdue: escalation resumes
+        let p = e.poll(&mut c, T0 + HOUR, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Insistent);
+    }
+
+    #[test]
+    fn acknowledging_while_overdue_quiets_for_one_overdue_interval() {
+        let (mut c, mut e, id) = setup(Priority::High);
+        e.poll(&mut c, T0, false).unwrap(); // alarm
+        let now = T0 + 25 * MINUTE;
+        let until = c.acknowledge(&id, now).unwrap();
+        assert_eq!(until, now + 10 * MINUTE);
+        let p = e.poll(&mut c, now, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Silent);
+        assert!(
+            e.poll(&mut c, now + 9 * MINUTE, false)
+                .unwrap()
+                .alerts
+                .is_empty(),
+            "no repeat while acknowledged"
+        );
+        // the interval ends and it alarms again
+        let p = e.poll(&mut c, until, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Alarm);
+    }
+
+    #[test]
+    fn acknowledgements_are_recorded_in_the_history() {
+        let (mut c, _, id) = setup(Priority::High);
+        c.acknowledge(&id, T0 + MINUTE).unwrap();
+        assert!(c.history().iter().any(
+            |e| matches!(e, Event::Acknowledged { occurrence_id, .. } if *occurrence_id == id)
+        ));
+        c.complete(&id, T0 + 2 * MINUTE).unwrap();
+        assert!(
+            c.acknowledge(&id, T0 + 3 * MINUTE).is_err(),
+            "only open occurrences"
+        );
+    }
+}

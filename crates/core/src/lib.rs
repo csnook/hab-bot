@@ -135,6 +135,13 @@ pub enum Event {
         at: Millis,
         how: SnoozeEnd,
     },
+    /// Silences the current alert without closing anything, on all of the user's devices.
+    Acknowledged {
+        occurrence_id: String,
+        by: String,
+        at: Millis,
+        until: Millis,
+    },
     PriorityChanged {
         reminder_id: String,
         priority: Priority,
@@ -612,6 +619,7 @@ impl Core {
                     priority: r.priority,
                     overdue_at: r.priority.overdue_at(i.scheduled_at),
                     snoozed_until,
+                    acknowledged_until: None,
                     expires_at: r.expiry.map(|e| i.scheduled_at + e),
                     status: OccurrenceStatus::Expected,
                     completed_by: None,
@@ -739,6 +747,29 @@ impl Core {
             at: now,
             via,
         })
+    }
+
+    /// Acknowledge: silences the current alert without closing anything. While due it quiets
+    /// the occurrence until it goes overdue. While overdue it quiets it for one overdue
+    /// interval, after which escalation resumes. Recorded in the history.
+    pub fn acknowledge(&mut self, occurrence_id: &str, now: Millis) -> Result<Millis> {
+        let o = self
+            .open_occurrences()
+            .into_iter()
+            .find(|o| o.id == occurrence_id)
+            .ok_or_else(|| Error::NoOpenOccurrence(occurrence_id.to_string()))?;
+        let until = if now < o.overdue_at {
+            o.overdue_at
+        } else {
+            now + o.priority.settings().overdue_interval
+        };
+        self.record(Event::Acknowledged {
+            occurrence_id: occurrence_id.into(),
+            by: self.user.clone(),
+            at: now,
+            until,
+        })?;
+        Ok(until)
     }
 
     /// Ends a snooze early, as Undo does after a swipe.

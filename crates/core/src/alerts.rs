@@ -128,9 +128,10 @@ impl AlertEngine {
         for o in open {
             let settings = o.priority.settings();
             let nominal = nominal_style(&o, now);
+            let acknowledged = o.acknowledged_until.is_some_and(|until| now < until);
             let snoozed = o.snoozed_until.is_some_and(|until| now < until);
             let dnd_here = dnd && !settings.breaks_do_not_disturb;
-            let effective = if snoozed || dnd_here {
+            let effective = if snoozed || acknowledged || dnd_here {
                 AlertStyle::Silent
             } else {
                 nominal
@@ -213,6 +214,9 @@ impl AlertEngine {
             }
             if now < o.overdue_at {
                 consider(o.overdue_at);
+            }
+            if let Some(until) = o.acknowledged_until.filter(|u| *u > now) {
+                consider(until);
             }
             if let Some(until) = o.snoozed_until.filter(|u| *u > now) {
                 consider(until);

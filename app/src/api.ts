@@ -84,3 +84,7 @@ export const snoozeUntil = (occurrenceId: string, until: number) => invoke<void>
 export const snoozePicker = (occurrenceId: string) => invoke<SnoozePicker | null>("snooze_picker", { occurrenceId });
 export const skipOlderQuiet = () => invoke<number>("skip_older_quiet");
 export const unsnooze = (occurrenceId: string) => invoke<void>("unsnooze", { occurrenceId });
+export const acknowledge = (occurrenceId: string) => invoke<number>("acknowledge", { occurrenceId });
+export const getOccurrence = (occurrenceId: string) => invoke<Occurrence | null>("get_occurrence", { occurrenceId });
+/** Closes the alarm window and silences the alarm's sound. */
+export const closeAlarm = () => invoke<void>("close_alarm");
