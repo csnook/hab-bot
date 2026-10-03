@@ -136,6 +136,14 @@ fn skip_ahead(
     Ok(())
 }
 
+/// "Skip all…" on the folded row of older quiet reminders. Returns how many were skipped.
+#[tauri::command]
+fn skip_older_quiet(app: tauri::State<App>) -> Result<usize, String> {
+    fresh(&app)
+        .skip_older_quiet(now())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn undo(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
     fresh(&app)
@@ -329,6 +337,7 @@ pub fn run() {
             skip_ahead,
             complete_at,
             undo,
+            skip_older_quiet,
             correct,
             recent_skip_notes,
             snooze,

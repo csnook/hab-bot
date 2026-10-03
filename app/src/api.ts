@@ -49,7 +49,7 @@ export interface NewReminder {
 }
 
 export interface InboxItem {
-  section: "overdue" | "due" | "later_today" | "earlier_today";
+  section: "overdue" | "overdue_folded" | "due" | "later_today" | "earlier_today";
   occurrence: Occurrence;
 }
 
@@ -82,3 +82,4 @@ export interface SnoozePicker {
 export const snooze = (occurrenceId: string) => invoke<number>("snooze", { occurrenceId });
 export const snoozeUntil = (occurrenceId: string, until: number) => invoke<void>("snooze_until", { occurrenceId, until });
 export const snoozePicker = (occurrenceId: string) => invoke<SnoozePicker | null>("snooze_picker", { occurrenceId });
+export const skipOlderQuiet = () => invoke<number>("skip_older_quiet");

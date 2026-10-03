@@ -1610,3 +1610,92 @@ mod action_tests {
         assert!(c.undo(&id, T0).is_err());
     }
 }
+
+mod tidy_tests {
+    use super::*;
+
+    const DAY: Millis = 24 * 3_600_000;
+
+    fn make(c: &mut Core, title: &str, priority: Priority, at: Millis) {
+        c.create(
+            NewReminder {
+                title: title.into(),
+                triggers: vec![Trigger::OneOff { at }],
+                tz: None,
+                priority,
+                expiry: None,
+            },
+            T0 - 100 * DAY,
+        )
+        .unwrap();
+    }
+
+    fn rows(c: &Core, section: InboxSection) -> Vec<String> {
+        c.inbox(T0)
+            .into_iter()
+            .filter(|i| i.section == section)
+            .map(|i| i.occurrence.title)
+            .collect()
+    }
+
+    #[test]
+    fn quiet_occurrences_overdue_over_a_week_fold_and_others_never_do() {
+        let mut c = core();
+        // Low and Minimum are overdue a day after their time, so "overdue for more than 7 days" is 8+ days
+        make(&mut c, "low, old", Priority::Low, T0 - 9 * DAY);
+        make(&mut c, "minimum, old", Priority::Minimum, T0 - 20 * DAY);
+        make(&mut c, "low, recent", Priority::Low, T0 - 5 * DAY);
+        make(&mut c, "medium, ancient", Priority::Medium, T0 - 90 * DAY);
+        make(&mut c, "high, ancient", Priority::High, T0 - 90 * DAY);
+        c.fire_due(T0).unwrap();
+        let mut folded = rows(&c, InboxSection::OverdueFolded);
+        folded.sort();
+        assert_eq!(folded, ["low, old", "minimum, old"]);
+        let overdue = rows(&c, InboxSection::Overdue);
+        assert!(overdue.contains(&"medium, ancient".to_string()));
+        assert!(overdue.contains(&"high, ancient".to_string()));
+        assert!(overdue.contains(&"low, recent".to_string()));
+        assert_eq!(overdue.len(), 3);
+        // the folded row comes at the end of the Overdue section, before Due
+        let sections: Vec<_> = c.inbox(T0).into_iter().map(|i| i.section).collect();
+        let last_overdue = sections
+            .iter()
+            .rposition(|s| *s == InboxSection::Overdue)
+            .unwrap();
+        let first_folded = sections
+            .iter()
+            .position(|s| *s == InboxSection::OverdueFolded)
+            .unwrap();
+        assert!(last_overdue < first_folded);
+    }
+
+    #[test]
+    fn the_threshold_is_more_than_seven_days_overdue() {
+        let mut c = core();
+        // Low goes overdue 1 day after its time; exactly 7 days overdue is T0 - 8 days
+        make(&mut c, "exactly seven", Priority::Low, T0 - 8 * DAY);
+        make(&mut c, "just over", Priority::Low, T0 - 8 * DAY - 1);
+        c.fire_due(T0).unwrap();
+        assert_eq!(rows(&c, InboxSection::OverdueFolded), ["just over"]);
+        assert_eq!(rows(&c, InboxSection::Overdue), ["exactly seven"]);
+    }
+
+    #[test]
+    fn skip_all_skips_the_folded_ones_and_says_how_many() {
+        let mut c = core();
+        make(&mut c, "a", Priority::Low, T0 - 30 * DAY);
+        make(&mut c, "b", Priority::Minimum, T0 - 30 * DAY);
+        make(&mut c, "keep", Priority::Medium, T0 - 30 * DAY);
+        c.fire_due(T0).unwrap();
+        assert_eq!(c.older_quiet_count(T0), 2);
+        assert_eq!(c.skip_older_quiet(T0).unwrap(), 2);
+        assert!(rows(&c, InboxSection::OverdueFolded).is_empty());
+        assert_eq!(rows(&c, InboxSection::Overdue), ["keep"]);
+        let skipped = c
+            .state()
+            .occurrences()
+            .filter(|o| o.status == OccurrenceStatus::Skipped)
+            .count();
+        assert_eq!(skipped, 2);
+    }
+}

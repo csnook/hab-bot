@@ -114,6 +114,9 @@ impl Occurrence {
 #[serde(rename_all = "snake_case")]
 pub enum InboxSection {
     Overdue,
+    /// Minimum and Low occurrences overdue for over a week, folded into one row at the end
+    /// of the Overdue section.
+    OverdueFolded,
     Due,
     LaterToday,
     EarlierToday,

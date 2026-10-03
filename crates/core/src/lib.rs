@@ -206,6 +206,14 @@ pub fn occurrence_id(reminder_id: &str, key: &str) -> String {
     format!("{reminder_id}@{key}")
 }
 
+/// Minimum and Low occurrences overdue for more than 7 days fold into one row. Medium and
+/// above never fold.
+const FOLD_AFTER: Millis = 7 * 24 * 3600 * 1000;
+
+fn is_old_quiet(o: &Occurrence, now: Millis) -> bool {
+    o.priority <= Priority::Low && now >= o.overdue_at && now - o.overdue_at > FOLD_AFTER
+}
+
 /// How far ahead expected occurrences are predicted when looking for the next wake-up.
 const HORIZON: Millis = 400 * 24 * 3600 * 1000;
 
@@ -776,6 +784,29 @@ impl Core {
         Ok(())
     }
 
+    /// "Skip all…" on the folded row: skips every older quiet occurrence. Returns how many,
+    /// which the dialog says first.
+    pub fn skip_older_quiet(&mut self, now: Millis) -> Result<usize> {
+        let ids: Vec<String> = self
+            .open_occurrences()
+            .into_iter()
+            .filter(|o| is_old_quiet(o, now))
+            .map(|o| o.id)
+            .collect();
+        for id in &ids {
+            self.skip(id, None, now)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// How many occurrences are folded, for the dialog.
+    pub fn older_quiet_count(&self, now: Millis) -> usize {
+        self.open_occurrences()
+            .iter()
+            .filter(|o| is_old_quiet(o, now))
+            .count()
+    }
+
     /// Skips an open occurrence: closed without doing it, by choice.
     pub fn skip(&mut self, occurrence_id: &str, note: Option<String>, now: Millis) -> Result<()> {
         if !self.state.is_open(occurrence_id) {
@@ -811,6 +842,9 @@ impl Core {
             .partition(|o| now >= o.overdue_at);
         // Overdue: highest priority first, then longest overdue.
         overdue.sort_by_key(|o| (std::cmp::Reverse(o.priority), o.overdue_at));
+        // Old quiet occurrences fold away; nothing expires them by default.
+        let (folded, overdue): (Vec<_>, Vec<_>) =
+            overdue.into_iter().partition(|o| is_old_quiet(o, now));
         due.sort_by_key(|o| o.scheduled_at);
         let mut earlier: Vec<_> = self
             .state
@@ -831,6 +865,11 @@ impl Core {
         overdue
             .into_iter()
             .map(|o| item(InboxSection::Overdue, o))
+            .chain(
+                folded
+                    .into_iter()
+                    .map(|o| item(InboxSection::OverdueFolded, o)),
+            )
             .chain(due.into_iter().map(|o| item(InboxSection::Due, o)))
             .chain(
                 self.expected(now, end - 1)

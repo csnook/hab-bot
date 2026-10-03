@@ -303,6 +303,41 @@ function Settings({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** "4 older quiet reminders ▸": Minimum and Low occurrences overdue for over a week. */
+function FoldedRow({ items, refresh, select }: { items: api.Occurrence[]; refresh: () => void; select: (o: api.Occurrence) => void }) {
+  const [open, setOpen] = useState(false);
+  const skipAll = () => {
+    if (window.confirm(`Skip ${items.length} older quiet reminder${items.length === 1 ? "" : "s"}?`)) {
+      api.skipOlderQuiet().then(refresh);
+    }
+  };
+  return (
+    <section class="folded">
+      <p>
+        <button class="link" onClick={() => setOpen(!open)}>
+          {items.length} older quiet reminder{items.length === 1 ? "" : "s"} {open ? "▾" : "▸"}
+        </button>
+        <button onClick={skipAll}>Skip all…</button>
+      </p>
+      {open && (
+        <ul>
+          {items.map((o) => (
+            <li key={o.id} class="overdue">
+              <span class="title" onClick={() => select(o)}>
+                {o.title} <small>{o.priority}</small>
+              </span>
+              <time>since {new Date(o.overdue_at).toLocaleDateString()}</time>
+              <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+              <SnoozeButton id={o.id} onDone={refresh} />
+              <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function Inbox() {
   const [items, setItems] = useState<api.InboxItem[]>([]);
   const [settings, setSettings] = useState(false);
@@ -347,6 +382,9 @@ function Inbox() {
             ))}
           </ul>
         </section>
+      )}
+      {by("overdue_folded").length > 0 && (
+        <FoldedRow items={by("overdue_folded").map((i) => i.occurrence)} refresh={refresh} select={setSelected} />
       )}
       <section>
         <h2>Due</h2>
