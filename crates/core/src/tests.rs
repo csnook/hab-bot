@@ -232,6 +232,7 @@ mod schedules {
                     start: start.into(),
                 }],
                 tz: tz.map(String::from),
+                priority: Priority::Medium,
             },
             created,
         )
@@ -353,6 +354,7 @@ mod schedules {
                 title: "Pills".into(),
                 triggers: vec![rule("2026-10-05T08:00"), rule("2026-10-05T20:00")],
                 tz: None,
+                priority: Priority::Medium,
             },
             at("UTC", 2026, 10, 5, 0, 0),
         )
@@ -444,6 +446,7 @@ mod schedules {
                 title: "Pills".into(),
                 triggers: vec![rule("2026-10-05T08:00"), rule("2026-10-05T20:00")],
                 tz: None,
+                priority: Priority::Medium,
             },
             at("UTC", 2026, 10, 5, 0, 0),
         )
@@ -483,6 +486,7 @@ mod schedules {
                 start: "2026-10-05T07:00".into(),
             }],
             tz: tz.map(String::from),
+            priority: Priority::Medium,
         };
         assert!(c.create(make("FREQ=NEVER", None), 0).is_err());
         assert!(c.create(make("FREQ=DAILY", Some("Mars/Base")), 0).is_err());
@@ -491,7 +495,8 @@ mod schedules {
                 NewReminder {
                     title: "x".into(),
                     triggers: vec![],
-                    tz: None
+                    tz: None,
+                    priority: Priority::Medium,
                 },
                 0
             )
@@ -537,6 +542,7 @@ mod countdowns {
                     last_done: last,
                 }],
                 tz: None,
+                priority: Priority::Medium,
             },
             now,
         )
@@ -675,6 +681,7 @@ mod countdowns {
                 last_done: None,
             }],
             tz: None,
+            priority: Priority::Medium,
         };
         assert!(c.create(make(CountdownUnit::Days, 0, None), T0).is_err());
         assert!(c
@@ -683,5 +690,166 @@ mod countdowns {
         assert!(c
             .create(make(CountdownUnit::Days, 2, Some("25:99")), T0)
             .is_err());
+    }
+}
+
+mod priorities {
+    use super::*;
+
+    const MINUTE: Millis = 60_000;
+    const HOUR: Millis = 60 * MINUTE;
+    const DAY: Millis = 24 * HOUR;
+
+    fn one_off(c: &mut Core, title: &str, priority: Priority) -> String {
+        c.create(
+            NewReminder {
+                title: title.into(),
+                triggers: vec![Trigger::OneOff { at: T0 }],
+                tz: None,
+                priority,
+            },
+            T0,
+        )
+        .unwrap()
+    }
+
+    fn sections(c: &Core, now: Millis) -> Vec<(InboxSection, String)> {
+        c.inbox(now)
+            .into_iter()
+            .filter(|i| matches!(i.section, InboxSection::Overdue | InboxSection::Due))
+            .map(|i| (i.section, i.occurrence.title))
+            .collect()
+    }
+
+    #[test]
+    fn the_five_built_ins_carry_the_specs_table() {
+        let all = all_settings();
+        assert_eq!(
+            all.iter().map(|s| s.name).collect::<Vec<_>>(),
+            ["Minimum", "Low", "Medium", "High", "Maximum"]
+        );
+        let due: Vec<_> = all.iter().map(|s| s.due_interval).collect();
+        assert_eq!(due, [DAY, DAY, HOUR, 0, 0]);
+        let overdue: Vec<_> = all.iter().map(|s| s.overdue_interval).collect();
+        assert_eq!(overdue, [DAY, DAY, 10 * MINUTE, 10 * MINUTE, 10 * MINUTE]);
+        let med = Priority::Medium.settings();
+        assert_eq!(med.due_style, AlertStyle::Gentle);
+        assert_eq!(
+            med.overdue,
+            vec![
+                Escalation {
+                    after: 0,
+                    style: AlertStyle::Insistent
+                },
+                Escalation {
+                    after: HOUR,
+                    style: AlertStyle::Alarm
+                }
+            ]
+        );
+        assert_eq!(
+            all.iter().map(|s| s.swipeable).collect::<Vec<_>>(),
+            [true, true, true, false, false]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|s| s.breaks_do_not_disturb)
+                .collect::<Vec<_>>(),
+            [false, false, false, false, true]
+        );
+        assert_eq!(
+            all.iter().map(|s| s.server_wait).collect::<Vec<_>>(),
+            [Some(60_000), Some(60_000), Some(60_000), Some(60_000), None]
+        );
+        assert_eq!(Priority::Minimum.settings().due_style, AlertStyle::Silent);
+        assert_eq!(Priority::Maximum.settings().due_style, AlertStyle::Alarm);
+    }
+
+    #[test]
+    fn an_occurrence_goes_overdue_after_its_priority_s_due_interval() {
+        for (priority, after) in [
+            (Priority::Minimum, DAY),
+            (Priority::Low, DAY),
+            (Priority::Medium, HOUR),
+            (Priority::High, 0),
+            (Priority::Maximum, 0),
+        ] {
+            let mut c = core();
+            one_off(&mut c, "x", priority);
+            c.fire_due(T0).unwrap();
+            let expect =
+                |now, section| assert_eq!(sections(&c, now)[0].0, section, "{priority:?} at {now}");
+            if after > 0 {
+                expect(T0 + after - 1, InboxSection::Due);
+            }
+            expect(T0 + after, InboxSection::Overdue);
+        }
+    }
+
+    #[test]
+    fn overdue_time_counts_from_the_scheduled_time_not_the_late_firing() {
+        let mut c = core();
+        one_off(&mut c, "x", Priority::Medium);
+        // the device woke 90 minutes late
+        c.fire_due(T0 + 90 * MINUTE).unwrap();
+        assert_eq!(sections(&c, T0 + 90 * MINUTE)[0].0, InboxSection::Overdue);
+    }
+
+    #[test]
+    fn overdue_sorts_by_highest_priority_then_longest_overdue() {
+        let mut c = core();
+        let make = |c: &mut Core, title: &str, at: Millis, priority| {
+            c.create(
+                NewReminder {
+                    title: title.into(),
+                    triggers: vec![Trigger::OneOff { at }],
+                    tz: None,
+                    priority,
+                },
+                T0,
+            )
+            .unwrap();
+        };
+        make(&mut c, "low, long overdue", T0 - 5 * DAY, Priority::Low);
+        make(&mut c, "medium, recent", T0 - 2 * HOUR, Priority::Medium);
+        make(&mut c, "medium, older", T0 - 4 * HOUR, Priority::Medium);
+        make(&mut c, "high", T0 - HOUR, Priority::High);
+        make(
+            &mut c,
+            "not yet overdue",
+            T0 - 10 * MINUTE,
+            Priority::Medium,
+        );
+        c.fire_due(T0).unwrap();
+        let titles: Vec<_> = sections(&c, T0).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(
+            titles,
+            [
+                "high",
+                "medium, older",
+                "medium, recent",
+                "low, long overdue",
+                "not yet overdue"
+            ]
+        );
+        assert_eq!(sections(&c, T0)[4].0, InboxSection::Due);
+    }
+
+    #[test]
+    fn changing_priority_moves_the_overdue_time() {
+        let mut c = core();
+        let id = one_off(&mut c, "x", Priority::Low);
+        c.fire_due(T0).unwrap();
+        assert_eq!(sections(&c, T0 + 2 * HOUR)[0].0, InboxSection::Due);
+        c.set_priority(&id, Priority::Medium).unwrap();
+        assert_eq!(sections(&c, T0 + 2 * HOUR)[0].0, InboxSection::Overdue);
+    }
+
+    #[test]
+    fn a_skeleton_era_event_gets_the_default_priority() {
+        let old = r#"{"type":"reminder_created","reminder_id":"r","title":"t","due_at":5,"created_at":1}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        let s = State::from_events([e]);
+        assert_eq!(s.reminder("r").unwrap().priority, Priority::Medium);
     }
 }

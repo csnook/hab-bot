@@ -22,6 +22,8 @@ async function askForPermissions() {
   if (ok) await api.requestPermissions();
 }
 
+const PRIORITIES: api.Priority[] = ["minimum", "low", "medium", "high", "maximum"];
+
 const dayLabel = (i: number) => DAY_NAMES[i];
 
 function NewReminder({ onCreated }: { onCreated: () => void }) {
@@ -30,6 +32,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
   // further times of day, for "several times a day": each is its own schedule trigger
   const [extra, setExtra] = useState<string[]>([]);
   const [choice, setChoice] = useState<Choice>({ pattern: "once", days: [0], ordinal: 0, weekday: 0, custom: "", amount: 3, unit: "days", timeOfDay: "", lastDone: localInputValue(Date.now()) });
+  const [priority, setPriority] = useState<api.Priority>("medium");
   const [pin, setPin] = useState(false);
   const [error, setError] = useState("");
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -54,7 +57,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
           : r === null
           ? [{ kind: "one_off", at: first.getTime() }]
           : [when, ...extra].map((w) => ({ kind: "schedule", rule: r, start: wall(new Date(w)) }));
-      await api.createReminder({ title, triggers, tz: pin && (r !== null || choice.pattern === "countdown") ? zone : null });
+      await api.createReminder({ title, triggers, priority, tz: pin && (r !== null || choice.pattern === "countdown") ? zone : null });
       setTitle("");
       setExtra([]);
       setError("");
@@ -69,6 +72,9 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
   return (
     <form onSubmit={submit}>
       <input placeholder="Remind me to…" value={title} onInput={(e) => setTitle(e.currentTarget.value)} />
+      <select value={priority} onChange={(e) => setPriority(e.currentTarget.value as api.Priority)} title="Priority">
+        {PRIORITIES.map((p) => <option value={p}>{p[0].toUpperCase() + p.slice(1)}</option>)}
+      </select>
       <select value={choice.pattern} onChange={(e) => set({ pattern: e.currentTarget.value as Pattern })}>
         <option value="once">Once</option>
         <option value="daily">Every day</option>
@@ -165,8 +171,49 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
   );
 }
 
+const span = (ms: number) =>
+  ms === 0 ? "at once" : ms % 86_400_000 === 0 ? `${ms / 86_400_000} day` : ms % 3_600_000 === 0 ? `${ms / 3_600_000} h` : `${ms / 60_000} min`;
+
+/** Settings opens as one dialog. Priorities are the built-ins, read-only; About shows the version. */
+function Settings({ onClose }: { onClose: () => void }) {
+  const [list, setList] = useState<api.PrioritySettings[]>([]);
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    api.priorities().then(setList);
+    api.about().then(setVersion);
+  }, []);
+  return (
+    <dialog open>
+      <h2>Settings</h2>
+      <h3>Priorities</h3>
+      <table>
+        <thead>
+          <tr><th></th><th>Due style</th><th>Due interval</th><th>Once overdue</th><th>Overdue interval</th><th>Swipe</th><th>Breaks DND</th></tr>
+        </thead>
+        <tbody>
+          {list.map((p) => (
+            <tr key={p.priority}>
+              <th>{p.name}</th>
+              <td>{p.due_style}</td>
+              <td>{span(p.due_interval)}</td>
+              <td>{p.overdue.map((s) => (s.after ? `${s.style} after ${span(s.after)}` : s.style)).join(", then ")}</td>
+              <td>{span(p.overdue_interval)}</td>
+              <td>{p.swipeable ? "yes" : "no"}</td>
+              <td>{p.breaks_do_not_disturb ? "yes" : "no"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <h3>About</h3>
+      <p>Version {version}</p>
+      <button onClick={onClose}>Close</button>
+    </dialog>
+  );
+}
+
 function Inbox() {
   const [items, setItems] = useState<api.InboxItem[]>([]);
+  const [settings, setSettings] = useState(false);
   const refresh = () => api.inbox().then(setItems);
 
   useEffect(() => {
@@ -179,8 +226,27 @@ function Inbox() {
   const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <main>
-      <h1>Inbox</h1>
+      <h1>
+        Inbox <button class="link" onClick={() => setSettings(true)}>Settings</button>
+      </h1>
+      {settings && <Settings onClose={() => setSettings(false)} />}
       <NewReminder onCreated={refresh} />
+      {by("overdue").length > 0 && (
+        <section>
+          <h2>Overdue</h2>
+          <ul>
+            {by("overdue").map(({ occurrence: o }) => (
+              <li key={o.id} class="overdue">
+                <span>
+                  {o.title} <small>{o.priority}</small>
+                </span>
+                <time>since {new Date(o.overdue_at).toLocaleString()}</time>
+                <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <section>
         <h2>Due</h2>
         {by("due").length === 0 && <p class="empty">Nothing due.</p>}

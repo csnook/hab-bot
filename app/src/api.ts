@@ -1,12 +1,29 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+export type Priority = "minimum" | "low" | "medium" | "high" | "maximum";
+
+export interface PrioritySettings {
+  priority: Priority;
+  name: string;
+  due_style: string;
+  overdue: { after: number; style: string }[];
+  due_interval: number;
+  overdue_interval: number;
+  ring_duration: number | null;
+  server_wait: number | null;
+  swipeable: boolean;
+  breaks_do_not_disturb: boolean;
+}
+
 export interface Occurrence {
   id: string;
   reminder_id: string;
   title: string;
   scheduled_at: number;
   fired_at: number;
+  priority: Priority;
+  overdue_at: number;
   status: "expected" | "due" | "completed" | "missed";
   closed_at: number | null;
 }
@@ -21,10 +38,11 @@ export interface NewReminder {
   triggers: Trigger[];
   /** A named time zone, or null for floating: the clock wherever the device is. */
   tz: string | null;
+  priority: Priority;
 }
 
 export interface InboxItem {
-  section: "due" | "later_today" | "earlier_today";
+  section: "overdue" | "due" | "later_today" | "earlier_today";
   occurrence: Occurrence;
 }
 
@@ -39,3 +57,5 @@ export const onChanged = (f: () => void) => listen("changed", f);
 /** Android only; empty elsewhere. Names: "notifications", "alarms". */
 export const missingPermissions = () => invoke<string[]>("missing_permissions");
 export const requestPermissions = () => invoke<void>("request_permissions");
+export const priorities = () => invoke<PrioritySettings[]>("priorities");
+export const about = () => invoke<string>("about");

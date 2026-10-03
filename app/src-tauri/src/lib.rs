@@ -59,6 +59,7 @@ fn create_one_off(app: tauri::State<App>, title: String, due_at: Millis) -> Resu
             title,
             triggers: vec![Trigger::OneOff { at: due_at }],
             tz: None,
+            priority: Default::default(),
         },
     )
 }
@@ -86,6 +87,17 @@ fn complete_early(app: tauri::State<App>, reminder_id: String) -> Result<(), Str
     #[cfg(target_os = "android")]
     android::schedule_alarm(core.next_due(now()));
     Ok(())
+}
+
+/// The built-in priorities with every setting, for Settings → Priorities (read-only).
+#[tauri::command]
+fn priorities() -> Vec<hab_core::PrioritySettings> {
+    hab_core::all_settings()
+}
+
+#[tauri::command]
+fn about(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 /// The permissions still missing on Android; the UI explains each before asking.
@@ -196,6 +208,8 @@ pub fn run() {
             create_one_off,
             create_reminder,
             complete,
+            priorities,
+            about,
             complete_early,
             missing_permissions,
             request_permissions

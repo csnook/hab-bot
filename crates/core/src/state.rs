@@ -1,4 +1,4 @@
-use crate::{Event, Millis};
+use crate::{Event, Millis, Priority};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -39,6 +39,7 @@ pub struct Reminder {
     pub triggers: Vec<Trigger>,
     /// A named time zone, or `None` for floating: the clock wherever the device is.
     pub tz: Option<String>,
+    pub priority: Priority,
     pub created_at: Millis,
     /// A one-off is finished once its occurrence is closed.
     pub finished: bool,
@@ -78,6 +79,9 @@ pub struct Occurrence {
     pub title: String,
     pub scheduled_at: Millis,
     pub fired_at: Millis,
+    pub priority: Priority,
+    /// When it goes (or went) overdue: the priority's due interval after the scheduled time.
+    pub overdue_at: Millis,
     pub status: OccurrenceStatus,
     pub completed_by: Option<String>,
     /// When it was closed: the recorded time for a completion, the time it was
@@ -88,6 +92,7 @@ pub struct Occurrence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboxSection {
+    Overdue,
     Due,
     LaterToday,
     EarlierToday,
@@ -123,6 +128,7 @@ impl State {
                 title,
                 triggers,
                 tz,
+                priority,
                 due_at,
                 created_at,
             } => {
@@ -138,6 +144,7 @@ impl State {
                         title: title.clone(),
                         triggers,
                         tz: tz.clone(),
+                        priority: *priority,
                         created_at: *created_at,
                         finished: false,
                     },
@@ -153,10 +160,10 @@ impl State {
                 if self.occurrences.contains_key(occurrence_id) {
                     return;
                 }
-                let title = self
+                let (title, priority) = self
                     .reminders
                     .get(reminder_id)
-                    .map(|r| r.title.clone())
+                    .map(|r| (r.title.clone(), r.priority))
                     .unwrap_or_default();
                 self.fired
                     .insert((reminder_id.clone(), occurrence_id.clone()));
@@ -168,11 +175,21 @@ impl State {
                         title,
                         scheduled_at: *scheduled_at,
                         fired_at: *fired_at,
+                        priority,
+                        overdue_at: priority.overdue_at(*scheduled_at),
                         status: OccurrenceStatus::Due,
                         completed_by: None,
                         closed_at: None,
                     },
                 );
+            }
+            Event::PriorityChanged {
+                reminder_id,
+                priority,
+            } => {
+                if let Some(r) = self.reminders.get_mut(reminder_id) {
+                    r.priority = *priority;
+                }
             }
             Event::OccurrenceCompleted {
                 occurrence_id,

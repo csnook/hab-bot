@@ -11,3 +11,9 @@ time, .empty { opacity: .7; font-size: .9em; }
 .expected, .completed, .missed { opacity: .7; }
 .missed span { text-decoration: line-through; }
 .days label { margin-right: .4rem; }
+.overdue { color: #c33; }
+small { opacity: .7; margin-left: .3rem; }
+.link { background: none; border: none; text-decoration: underline; cursor: pointer; font-size: .5em; }
+dialog { max-width: 95vw; overflow: auto; z-index: 1; }
+table { border-collapse: collapse; font-size: .85em; }
+td, th { padding: .2rem .5rem; text-align: left; border-bottom: 1px solid #8884; }

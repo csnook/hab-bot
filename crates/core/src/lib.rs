@@ -4,11 +4,13 @@
 //! [`State`] is never stored; it is rebuilt by applying the stream (ADR 0005), so
 //! sync can later merge streams from several devices.
 
+mod priority;
 mod schedule;
 mod state;
 mod store;
 pub mod time;
 
+pub use priority::{all_settings, AlertStyle, Escalation, Priority, PrioritySettings};
 pub use state::{
     CountdownUnit, InboxItem, InboxSection, Occurrence, OccurrenceStatus, Reminder, State, Trigger,
 };
@@ -51,6 +53,8 @@ pub enum Event {
         /// A named time zone, or none for floating.
         #[serde(default)]
         tz: Option<String>,
+        #[serde(default)]
+        priority: Priority,
         /// Only in events from the walking skeleton, before triggers existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         due_at: Option<Millis>,
@@ -71,6 +75,10 @@ pub enum Event {
         /// The recorded time of doing it.
         at: Millis,
     },
+    PriorityChanged {
+        reminder_id: String,
+        priority: Priority,
+    },
     /// The app closed an occurrence nobody dealt with, because a newer instance fired.
     OccurrenceMissed { occurrence_id: String, at: Millis },
 }
@@ -82,6 +90,8 @@ pub struct NewReminder {
     pub triggers: Vec<Trigger>,
     #[serde(default)]
     pub tz: Option<String>,
+    #[serde(default)]
+    pub priority: Priority,
 }
 
 /// The identity of an occurrence: the reminder plus its instance's key.
@@ -129,6 +139,17 @@ impl Core {
         }
     }
 
+    /// Changes a reminder's priority. Its overdue time follows, as it isn't overridden.
+    pub fn set_priority(&mut self, reminder_id: &str, priority: Priority) -> Result<()> {
+        if self.state.reminder(reminder_id).is_none() {
+            return Err(Error::NoOpenOccurrence(reminder_id.to_string()));
+        }
+        self.record(Event::PriorityChanged {
+            reminder_id: reminder_id.to_string(),
+            priority,
+        })
+    }
+
     /// Rebuilds the state from the stream. Another connection to the same database (the
     /// Android alarm path runs a second core in this process) may have appended events.
     pub fn refresh(&mut self) -> Result<()> {
@@ -149,6 +170,7 @@ impl Core {
                 title: title.into(),
                 triggers: vec![Trigger::OneOff { at: due_at }],
                 tz: None,
+                priority: Priority::Medium,
             },
             now,
         )
@@ -199,6 +221,7 @@ impl Core {
             title: title.to_string(),
             triggers: new.triggers,
             tz: new.tz,
+            priority: new.priority,
             due_at: None,
             created_at: now,
         })?;
@@ -326,6 +349,8 @@ impl Core {
                     title: r.title.clone(),
                     scheduled_at: i.scheduled_at,
                     fired_at: i.scheduled_at,
+                    priority: r.priority,
+                    overdue_at: r.priority.overdue_at(i.scheduled_at),
                     status: OccurrenceStatus::Expected,
                     completed_by: None,
                     closed_at: None,
@@ -352,12 +377,23 @@ impl Core {
             occurrence,
         };
 
-        let mut due: Vec<_> = self
+        // A reminder's priority can change, which moves its overdue time unless overridden.
+        let current = |o: &Occurrence| {
+            let mut o = o.clone();
+            if let Some(r) = self.state.reminder(&o.reminder_id) {
+                o.priority = r.priority;
+                o.overdue_at = r.priority.overdue_at(o.scheduled_at);
+            }
+            o
+        };
+        let (mut overdue, mut due): (Vec<_>, Vec<_>) = self
             .state
             .occurrences()
             .filter(|o| o.status == OccurrenceStatus::Due)
-            .cloned()
-            .collect();
+            .map(current)
+            .partition(|o| now >= o.overdue_at);
+        // Overdue: highest priority first, then longest overdue.
+        overdue.sort_by_key(|o| (std::cmp::Reverse(o.priority), o.overdue_at));
         due.sort_by_key(|o| o.scheduled_at);
         let mut earlier: Vec<_> = self
             .state
@@ -373,8 +409,10 @@ impl Core {
             .collect();
         earlier.sort_by_key(|o| o.closed_at);
 
-        due.into_iter()
-            .map(|o| item(InboxSection::Due, o))
+        overdue
+            .into_iter()
+            .map(|o| item(InboxSection::Overdue, o))
+            .chain(due.into_iter().map(|o| item(InboxSection::Due, o)))
             .chain(
                 self.expected(now, end - 1)
                     .into_iter()
