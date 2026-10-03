@@ -13,11 +13,12 @@ function localInputValue(ms: number): string {
 const WHY: Record<string, string> = {
   notifications: "Notifications: so a reminder can alert you when it's due.",
   alarms: "Alarms & reminders: so a reminder fires exactly on time, even when the phone is idle.",
+  fullscreen: "Full-screen alarms: so a High or Maximum reminder can ring over the lock screen like an alarm clock.",
 };
 
 /** Says why before Android asks. Refusing doesn't block anything. */
-async function askForPermissions() {
-  const missing = await api.missingPermissions();
+async function askForPermissions(priority: api.Priority) {
+  const missing = await api.missingPermissions(priority);
   if (missing.length === 0) return;
   const ok = window.confirm(`Reminders need your permission:\n\n${missing.map((m) => WHY[m] ?? m).join("\n")}`);
   if (ok) await api.requestPermissions();
@@ -155,7 +156,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
       setExtra([]);
       setError("");
       onCreated();
-      await askForPermissions();
+      await askForPermissions(priority);
     } catch (err) {
       setError(String(err));
     }

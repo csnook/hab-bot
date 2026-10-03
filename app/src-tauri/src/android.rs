@@ -56,10 +56,17 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_tick<'l>(
         let mut engine = AlertEngine::load(core, &device);
         let poll = engine.poll(core, now, dnd != 0)?;
         engine.save(core)?;
-        let next_wake = core.next_wake(&engine, now).unwrap_or(-1);
-        Ok(serde_json::json!({ "alerts": poll.alerts, "dismissed": poll.dismissed, "next_wake": next_wake }))
+        let next = core.next_wake(&engine, now);
+        // Alarms are registered with `setAlarmClock`, as the stock alarm clock does.
+        let alarm = next.is_some_and(|at| engine.wake_is_alarm(core, at));
+        Ok(serde_json::json!({
+            "alerts": poll.alerts,
+            "dismissed": poll.dismissed,
+            "next_wake": next.unwrap_or(-1),
+            "next_wake_alarm": alarm,
+        }))
     })
-    .unwrap_or_else(|| serde_json::json!({ "alerts": [], "dismissed": [], "next_wake": -1 }));
+    .unwrap_or_else(|| serde_json::json!({ "alerts": [], "dismissed": [], "next_wake": -1, "next_wake_alarm": false }));
     to_jstring(&mut env, json.to_string())
 }
 
@@ -81,6 +88,15 @@ pub extern "system" fn Java_dev_habbot_reminders_Native_act<'l>(
     with_core(&db, |core| match action.as_str() {
         "done" => core.complete(&id, now),
         "skip" => core.skip(&id, None, now),
+        // `skip:<note>` and `snooze_until:<epoch millis>`, from the alarm screen
+        a if a.starts_with("skip:") => {
+            let note = a["skip:".len()..].trim();
+            core.skip(&id, (!note.is_empty()).then(|| note.to_string()), now)
+        }
+        a if a.starts_with("snooze_until:") => {
+            let until = a["snooze_until:".len()..].parse().unwrap_or(0);
+            core.snooze(&id, until, SnoozeVia::Button, now)
+        }
         "acknowledge" => core.acknowledge(&id, now).map(|_| ()),
         "snooze" => core.snooze_default(&id, SnoozeVia::Button, now).map(|_| ()),
         "swipe" => core.snooze_default(&id, SnoozeVia::Swipe, now).map(|_| ()),
@@ -177,15 +193,15 @@ pub fn refresh() {
 }
 
 /// The permissions the app still needs, as names (`notifications`, `alarms`).
-pub fn missing_permissions() -> Vec<String> {
+pub fn missing_permissions(full_screen: bool) -> Vec<String> {
     with_context(|env, context| {
         let v = call_static(
             env,
             context,
             "Permissions",
             "missing",
-            "(Landroid/content/Context;)Ljava/lang/String;",
-            &[JValue::Object(context)],
+            "(Landroid/content/Context;Z)Ljava/lang/String;",
+            &[JValue::Object(context), JValue::Bool(full_screen as u8)],
         )?
         .l()?;
         let s: String = env.get_string(&JString::from(v))?.into();

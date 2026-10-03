@@ -1820,3 +1820,45 @@ mod acknowledge_tests {
         );
     }
 }
+
+mod alarm_wake_tests {
+    use super::*;
+
+    const HOUR: Millis = 3_600_000;
+
+    #[test]
+    fn a_wake_is_an_alarm_for_high_and_maximum_and_for_medium_once_escalated() {
+        for (priority, due_alarm) in [
+            (Priority::Low, false),
+            (Priority::Medium, false),
+            (Priority::High, true),
+            (Priority::Maximum, true),
+        ] {
+            let mut c = core();
+            c.create(
+                NewReminder {
+                    title: "x".into(),
+                    triggers: vec![Trigger::OneOff { at: T0 }],
+                    tz: None,
+                    priority,
+                    expiry: None,
+                },
+                T0 - 1000,
+            )
+            .unwrap();
+            let e = AlertEngine::new("phone");
+            assert_eq!(
+                e.wake_is_alarm(&c, T0),
+                due_alarm,
+                "{priority:?} coming due"
+            );
+        }
+        // Medium: gentle while due, the alarm after an hour overdue
+        let mut c = core();
+        c.create_one_off("x", T0, T0 - 1000).unwrap();
+        c.fire_due(T0).unwrap();
+        let e = AlertEngine::new("phone");
+        assert!(!e.wake_is_alarm(&c, T0 + HOUR - 1));
+        assert!(e.wake_is_alarm(&c, T0 + 2 * HOUR));
+    }
+}

@@ -16,9 +16,9 @@ import android.provider.Settings
 object Permissions {
     private const val NOTIFICATIONS_REQUEST = 100
 
-    /** Comma-separated names of what's still missing: `notifications`, `alarms`. Called from Rust. */
+    /** Comma-separated names of what's still missing: `notifications`, `alarms`, `fullscreen`. Called from Rust. */
     @JvmStatic
-    fun missing(context: Context): String {
+    fun missing(context: Context, wantFullScreen: Boolean): String {
         val missing = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -26,6 +26,8 @@ object Permissions {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             !(context.getSystemService(Context.ALARM_SERVICE) as AlarmManager).canScheduleExactAlarms()
         ) missing += "alarms"
+        // Full-screen alarms are asked for with the first High or Maximum reminder.
+        if (wantFullScreen && !Notifier.canUseFullScreen(context)) missing += "fullscreen"
         return missing.joinToString(",")
     }
 
@@ -34,9 +36,14 @@ object Permissions {
     fun request() {
         val activity = MainActivity.current ?: return
         activity.runOnUiThread {
-            val missing = missing(activity).split(",")
+            val missing = missing(activity, true).split(",")
             if ("notifications" in missing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATIONS_REQUEST)
+            }
+            if ("fullscreen" in missing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                activity.startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${activity.packageName}")),
+                )
             }
             if ("alarms" in missing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 activity.startActivity(

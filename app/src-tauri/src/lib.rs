@@ -228,11 +228,15 @@ fn about(app: AppHandle) -> String {
 
 /// The permissions still missing on Android; the UI explains each before asking.
 #[tauri::command]
-fn missing_permissions() -> Vec<String> {
+fn missing_permissions(priority: Option<hab_core::Priority>) -> Vec<String> {
+    // Full-screen alarms are asked for with the first High or Maximum reminder.
     #[cfg(target_os = "android")]
-    return android::missing_permissions();
+    return android::missing_permissions(priority.is_some_and(|p| p >= hab_core::Priority::High));
     #[cfg(not(target_os = "android"))]
-    Vec::new()
+    {
+        let _ = priority;
+        Vec::new()
+    }
 }
 
 #[tauri::command]

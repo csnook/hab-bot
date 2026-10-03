@@ -35,6 +35,8 @@ pub struct Alert {
     pub style: AlertStyle,
     pub overdue: bool,
     pub priority: Priority,
+    /// When it was due.
+    pub scheduled_at: Millis,
     /// For a last-chance alert: when the occurrence expires.
     pub expires_at: Option<Millis>,
 }
@@ -156,6 +158,7 @@ impl AlertEngine {
                         style,
                         overdue: now >= o.overdue_at,
                         priority: o.priority,
+                        scheduled_at: o.scheduled_at,
                         expires_at: Some(expires),
                     });
                 }
@@ -192,6 +195,7 @@ impl AlertEngine {
                 style: effective,
                 overdue,
                 priority: o.priority,
+                scheduled_at: o.scheduled_at,
                 expires_at: None,
             });
         }
@@ -234,6 +238,25 @@ impl AlertEngine {
             }
         }
         soonest
+    }
+}
+
+impl AlertEngine {
+    /// Whether what happens at `wake` is an alarm, so Android registers it with
+    /// `setAlarmClock`, as the stock alarm clock does: an open occurrence that is (or has
+    /// escalated to) the alarm style at that moment, or an instance of a High or Maximum
+    /// reminder coming due.
+    pub fn wake_is_alarm(&self, core: &Core, wake: Millis) -> bool {
+        let open_alarm = core.open_occurrences().iter().any(|o| {
+            o.acknowledged_until.is_none_or(|u| u <= wake)
+                && o.snoozed_until.is_none_or(|u| u <= wake)
+                && nominal_style(o, wake) == AlertStyle::Alarm
+        });
+        open_alarm
+            || core
+                .expected(wake - 1, wake)
+                .iter()
+                .any(|o| o.priority.settings().due_style == AlertStyle::Alarm)
     }
 }
 

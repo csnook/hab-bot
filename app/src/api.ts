@@ -68,8 +68,8 @@ export const completeEarly = (reminderId: string) => invoke<void>("complete_earl
 export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
 /** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */
 export const onChanged = (f: () => void) => listen("changed", f);
-/** Android only; empty elsewhere. Names: "notifications", "alarms". */
-export const missingPermissions = () => invoke<string[]>("missing_permissions");
+/** Android only; empty elsewhere. Names: "notifications", "alarms", "fullscreen". */
+export const missingPermissions = (priority: Priority | null = null) => invoke<string[]>("missing_permissions", { priority });
 export const requestPermissions = () => invoke<void>("request_permissions");
 export const priorities = () => invoke<PrioritySettings[]>("priorities");
 export const about = () => invoke<string>("about");

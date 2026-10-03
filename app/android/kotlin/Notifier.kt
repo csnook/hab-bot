@@ -18,6 +18,9 @@ import org.json.JSONObject
 object Notifier {
     const val EXTRA_OCCURRENCE = "occurrence"
     const val EXTRA_ACTION = "action"
+    const val EXTRA_TITLE = "title"
+    const val EXTRA_PRIORITY = "priority"
+    const val EXTRA_DUE = "due"
 
     private const val CH_SILENT = "silent"
     private const val CH_GENTLE = "gentle"
@@ -36,11 +39,15 @@ object Notifier {
             Native.tick(Native.dbPath(context), System.currentTimeMillis(), dnd, Native.deviceName()),
         )
         val dismissed = result.getJSONArray("dismissed")
-        for (i in 0 until dismissed.length()) manager.cancel(id(dismissed.getString(i)))
+        for (i in 0 until dismissed.length()) {
+            manager.cancel(id(dismissed.getString(i)))
+            AlarmService.stop(context, dismissed.getString(i))
+            AlarmService.ringingIds.remove(dismissed.getString(i))
+        }
         val alerts = result.getJSONArray("alerts")
         for (i in 0 until alerts.length()) post(context, manager, alerts.getJSONObject(i))
         updateQuietSummary(context, manager)
-        Alarms.scheduleAt(context, result.getLong("next_wake"))
+        Alarms.scheduleAt(context, result.getLong("next_wake"), result.getBoolean("next_wake_alarm"))
     }
 
     /** A notification button or swipe: Rust acts, then the notifications catch up. */
@@ -49,7 +56,8 @@ object Notifier {
         run(context)
     }
 
-    private fun id(occurrenceId: String): Int = occurrenceId.hashCode().coerceAtLeast(2)
+    fun notificationId(occurrenceId: String): Int = occurrenceId.hashCode().coerceAtLeast(2)
+    private fun id(occurrenceId: String): Int = notificationId(occurrenceId)
 
     private fun createChannels(manager: NotificationManager) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -75,6 +83,11 @@ object Notifier {
 
     private fun post(context: Context, manager: NotificationManager, alert: JSONObject) {
         val occurrenceId = alert.getString("occurrence_id")
+        // An occurrence that was ringing and is now quieter (acknowledged, snoozed) stops ringing.
+        if (alert.getString("style") != "alarm") {
+            AlarmService.stop(context, occurrenceId)
+            AlarmService.ringingIds.remove(occurrenceId)
+        }
         val title = alert.getString("title")
         val style = alert.getString("style")
         val priority = alert.getString("priority")
@@ -140,7 +153,67 @@ object Notifier {
         }
         // Minimum and Low gather into one collapsed group; Medium and above stand alone.
         if (quiet) builder.setGroup(GROUP_QUIET)
+        if (style == "alarm") {
+            ring(context, manager, occurrenceId, title, priority, alert.getLong("scheduled_at"))
+            return
+        }
         manager.notify(nid, builder.build())
+    }
+
+    /**
+     * The alarm style: a foreground service plays the looping sound and vibration, and the
+     * notification it shows carries a full-screen intent for the alarm screen. Without the
+     * full-screen permission it is a large pop-up notification with the same buttons.
+     */
+    private fun ring(context: Context, manager: NotificationManager, id: String, title: String, priority: String, dueAt: Long) {
+        AlarmService.ringingIds.add(id)
+        AlarmService.ring(context, id, title, priority, dueAt)
+    }
+
+    /** The alarm's notification, also the service's foreground notification. */
+    fun alarmNotification(context: Context, occurrenceId: String, title: String, priority: String, dueAt: Long): Notification {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val nid = notificationId(occurrenceId)
+        fun action(name: String, offset: Int): PendingIntent = PendingIntent.getBroadcast(
+            context,
+            nid * 8 + offset,
+            Intent(context, ActionReceiver::class.java)
+                .putExtra(EXTRA_OCCURRENCE, occurrenceId)
+                .putExtra(EXTRA_ACTION, name),
+            flags,
+        )
+        val screen = PendingIntent.getActivity(
+            context,
+            nid * 8 + 4,
+            Intent(context, AlarmActivity::class.java)
+                .putExtra(EXTRA_OCCURRENCE, occurrenceId)
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_PRIORITY, priority)
+                .putExtra(EXTRA_DUE, dueAt)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION),
+            flags,
+        )
+        val builder =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CH_ALARM)
+            else @Suppress("DEPRECATION") Notification.Builder(context)
+        builder
+            .setSmallIcon(context.applicationInfo.icon)
+            .setContentTitle(title)
+            .setContentText("Ringing")
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setOngoing(true)
+            .setContentIntent(screen)
+            .addAction(Notification.Action.Builder(null, "Done", action("done", 0)).build())
+            .addAction(Notification.Action.Builder(null, "Snooze", action("snooze", 1)).build())
+            .addAction(Notification.Action.Builder(null, "Acknowledge", action("acknowledge", 2)).build())
+        // Without the permission this stays a large pop-up (heads-up) notification.
+        if (canUseFullScreen(context)) builder.setFullScreenIntent(screen, true)
+        return builder.build()
+    }
+
+    fun canUseFullScreen(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        return (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).canUseFullScreenIntent()
     }
 
     /** The "quiet reminders" group's summary line, shown while the group has members. */
