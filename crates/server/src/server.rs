@@ -1,10 +1,12 @@
 //! The HTTPS listener and the routes behind it.
 
+use crate::backup::{self, BackupError};
 use crate::cert::{self, CertError};
 use crate::config::{Config, DEFAULT_NAME};
 use crate::db::{Db, DbError, NewAccount, NewDevice, SyncError};
 use crate::peers::Peers;
 use crate::setup::SetupCode;
+use crate::trusted::{self, TrustedError};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State as AxumState};
@@ -64,6 +66,10 @@ pub enum StartError {
     Cert(#[from] CertError),
     #[error("cannot listen on {0}: {1}")]
     Bind(SocketAddr, std::io::Error),
+    #[error(transparent)]
+    Trusted(#[from] TrustedError),
+    #[error(transparent)]
+    Backup(Box<BackupError>),
     #[error("tls setup failed: {0}")]
     Tls(#[from] rustls::Error),
 }
@@ -104,8 +110,12 @@ pub struct Server {
     cert_created: bool,
     name: String,
     state: Arc<State>,
+    resolver: Arc<trusted::Resolver>,
+    backup: Option<backup::BackupConfig>,
+    db_path: std::path::PathBuf,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
+    background: Vec<JoinHandle<()>>,
 }
 
 impl Server {
@@ -120,13 +130,21 @@ impl Server {
         let name = db.get(NAME_KEY)?.unwrap_or_else(|| DEFAULT_NAME.into());
         let opaque = load_or_create_opaque(&db)?;
 
-        let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())?;
-        let mut tls = tls;
+        let provider = rustls::crypto::ring::default_provider();
+        let self_signed = rustls::sign::CertifiedKey::from_der(
+            vec![identity.cert.clone()],
+            identity.key.clone_key(),
+            &provider,
+        )?;
+        let resolver = Arc::new(trusted::Resolver::new(Arc::new(self_signed)));
+        let mut trusted_files = match (&config.tls_cert, &config.tls_key) {
+            (Some(cert), Some(key)) => Some(trusted::Files::load(cert, key, &resolver)?),
+            _ => None,
+        };
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_cert_resolver(resolver.clone());
         tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let acceptor = TlsAcceptor::from(Arc::new(tls));
 
@@ -181,7 +199,54 @@ impl Server {
             state.peers.clone(),
             stop,
         ));
+        let mut background = Vec::new();
+        if let Some(mut files) = trusted_files.take() {
+            let (poll, mut stop) = (config.tls_poll, shutdown.subscribe());
+            let resolver = resolver.clone();
+            background.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(poll) => {}
+                        _ = stop.changed() => break,
+                    }
+                    files.reload_if_changed(&resolver);
+                }
+            }));
+        }
+        let db_path = config.data_dir.join(crate::db::FILE_NAME);
+        if let Some(cfg) = config.backup.clone() {
+            // Fail now, not at 03:00, if the folder cannot be used.
+            std::fs::create_dir_all(&cfg.dir).map_err(|e| {
+                StartError::Backup(Box::new(BackupError::Folder(cfg.dir.clone(), e)))
+            })?;
+            let (path, mut stop) = (db_path.clone(), shutdown.subscribe());
+            background.push(tokio::spawn(async move {
+                loop {
+                    let wait = backup::delay_until(now(), cfg.at);
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = stop.changed() => break,
+                    }
+                    let (path, dir, keep) = (path.clone(), cfg.dir.clone(), cfg.keep);
+                    match tokio::task::spawn_blocking(move || {
+                        backup::run_once(&path, &dir, keep, now())
+                    })
+                    .await
+                    {
+                        Ok(Ok(file)) => {
+                            tracing::info!("backed up the database to {}", file.display())
+                        }
+                        Ok(Err(e)) => tracing::error!("nightly backup failed: {e}"),
+                        Err(e) => tracing::error!("nightly backup failed: {e}"),
+                    }
+                }
+            }));
+        }
         Ok(Server {
+            resolver,
+            backup: config.backup.clone(),
+            db_path,
+            background,
             local_addr,
             fingerprint: identity.fingerprint,
             cert_created: identity.created,
@@ -198,6 +263,26 @@ impl Server {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Fingerprint of the trusted certificate in use, if one is loaded.
+    pub fn trusted_fingerprint(&self) -> Option<String> {
+        self.resolver.trusted_fingerprint()
+    }
+
+    /// Take the configured backup now instead of at the night time. The server
+    /// keeps serving meanwhile. Returns the file written.
+    pub async fn backup_now(&self) -> Result<std::path::PathBuf, BackupError> {
+        let cfg = self.backup.clone().ok_or_else(|| {
+            BackupError::Folder(
+                std::path::PathBuf::new(),
+                std::io::Error::other("no backup folder is configured"),
+            )
+        })?;
+        let path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || backup::run_once(&path, &cfg.dir, cfg.keep, now()))
+            .await
+            .map_err(|e| BackupError::Io(std::io::Error::other(e)))?
     }
 
     pub fn cert_created(&self) -> bool {
@@ -232,6 +317,9 @@ impl Server {
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         let _ = self.task.await;
+        for task in self.background {
+            let _ = task.await;
+        }
     }
 
     /// Run until the process is told to stop (ctrl-c or SIGTERM).

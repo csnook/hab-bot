@@ -1,0 +1,46 @@
+[Unit]
+Description=hab-bot sync server
+Documentation=https://github.com/csnook/hab-bot/blob/main/docs/running-the-server.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hab-server
+Group=hab-server
+# Settings: HAB_SERVER_* variables, one per line (see `hab-server --help`).
+EnvironmentFile=-/etc/hab-server/hab-server.env
+Environment=HAB_SERVER_DATA_DIR=/var/lib/hab-server
+ExecStart=/usr/local/bin/hab-server
+Restart=on-failure
+RestartSec=5
+
+# /var/lib/hab-server, owned by the service user, holds the SQLite file.
+StateDirectory=hab-server
+StateDirectoryMode=0700
+# Where the nightly backup may write (set HAB_SERVER_BACKUP_DIR to it).
+ReadWritePaths=-/var/backups/hab-server
+
+# Port 443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# The setup code is printed to the console, which here is the journal.
+# Read it with: journalctl -u hab-server | grep "Setup code"
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

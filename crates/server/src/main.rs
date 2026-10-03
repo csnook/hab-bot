@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() {
     let config = match config::parse(std::env::args().skip(1), |k| std::env::var(k).ok()) {
-        Ok(Parsed::Run(c)) => c,
+        Ok(Parsed::Run(c)) => *c,
         Ok(Parsed::Help) => {
             println!("{}", config::HELP);
             return;
@@ -47,6 +47,19 @@ async fn main() {
     println!("Server name:         {}", server.name());
     println!("Listening on:        https://{}", server.local_addr());
     println!("Certificate (SHA-256): {}", server.fingerprint());
+    if let Some(fp) = server.trusted_fingerprint() {
+        println!("Trusted certificate (SHA-256): {fp}");
+        println!("It is served to connections that use one of its names; the one above otherwise.");
+    }
+    if let Some(b) = &config.backup {
+        println!(
+            "Nightly backup:      {} at {:02}:{:02} UTC, newest {} kept",
+            b.dir.display(),
+            b.at.hour,
+            b.at.minute,
+            b.keep
+        );
+    }
     println!("Setup code:          {}", server.setup_code());
     println!("The setup code creates the first account. It stops working in 24 hours,");
     println!("or once the first account exists. Restarting makes a new one.");

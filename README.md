@@ -61,4 +61,5 @@ cargo xtask server --data-dir /tmp/hab-server --listen 127.0.0.1:8443
 - **The certificate** is self-signed, made on first start and kept. Its SHA-256 fingerprint is printed at every start, for invites to carry.
 - **The setup code** is printed in the console only. It stops working after 24 hours or once the first account exists, and a restart makes a new one.
 - **IP addresses** are held in memory for open connections and appear in the log only with `--debug`.
+- **Operations:** a trusted certificate from files (served for its names, beside the self-signed one), a nightly SQLite backup, a systemd unit in `packaging/` and a `Containerfile`. See [Running the server](docs/running-the-server.md).
 - `GET /api/v1/info` returns `{"name": ..., "version": ...}`, for an app to confirm before joining.

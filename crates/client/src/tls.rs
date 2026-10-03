@@ -4,6 +4,11 @@
 //! fingerprint (`AA:BB:..`). The name in it is not checked, because the same
 //! server is reached by IP address, LAN name or VPN name. Signatures in the
 //! handshake are still verified, so only the holder of the key can use it.
+//!
+//! A server may also present a trusted certificate (one a public authority
+//! issued, such as Let's Encrypt or Tailscale's) when the app reaches it by a
+//! name that certificate covers. That is accepted too, when it chains to a
+//! public root and is valid for the name used.
 
 use hab_proto::{auth, DeviceKeys};
 use http_body_util::{BodyExt, Full, Limited};
@@ -11,6 +16,7 @@ use hyper::body::Bytes;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::{ring, CryptoProvider};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -64,6 +70,9 @@ pub fn same_fingerprint(a: &str, b: &str) -> bool {
 struct PinVerifier {
     /// None accepts any certificate and only records it.
     expected: Option<String>,
+    /// Accepts a certificate from a trusted authority for the name used, when
+    /// it is not the pinned one.
+    trusted: Arc<WebPkiServerVerifier>,
     seen: Mutex<Option<String>>,
     provider: Arc<CryptoProvider>,
 }
@@ -72,19 +81,22 @@ impl ServerCertVerifier for PinVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp: &[u8],
-        _now: UnixTime,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let fp = fingerprint(end_entity);
         *self.seen.lock().unwrap() = Some(fp.clone());
         match &self.expected {
-            Some(expected) if !same_fingerprint(expected, &fp) => {
-                Err(rustls::Error::InvalidCertificate(
-                    rustls::CertificateError::ApplicationVerificationFailure,
-                ))
-            }
+            Some(expected) if !same_fingerprint(expected, &fp) => self
+                .trusted
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+                .map_err(|_| {
+                    rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    )
+                }),
             _ => Ok(ServerCertVerified::assertion()),
         }
     }
@@ -160,14 +172,33 @@ pub fn parse_address(address: &str) -> Result<(String, u16), TlsError> {
     Ok((host.to_string(), port))
 }
 
+/// The public authorities a trusted server certificate may chain to.
+fn public_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    }
+}
+
 pub(crate) async fn connect(
     address: &str,
     expected: Option<&str>,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Option<String>), TlsError> {
+    connect_with_roots(address, expected, public_roots()).await
+}
+
+pub(crate) async fn connect_with_roots(
+    address: &str,
+    expected: Option<&str>,
+    roots: rustls::RootCertStore,
+) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Option<String>), TlsError> {
     let (host, port) = parse_address(address)?;
     let provider = Arc::new(ring::default_provider());
+    let trusted = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+        .build()
+        .map_err(|e| TlsError::Connect(e.to_string()))?;
     let verifier = Arc::new(PinVerifier {
         expected: expected.map(str::to_string),
+        trusted,
         seen: Mutex::new(None),
         provider: provider.clone(),
     });
@@ -374,5 +405,80 @@ mod tests {
         assert!(same_fingerprint("AA:bb:01", "aabb01"));
         assert!(!same_fingerprint("AA:BB", "AA:BC"));
         assert!(!same_fingerprint("", ""));
+    }
+
+    /// A CA, and a server that serves a certificate it issued for `localhost`
+    /// beside its own self-signed one.
+    async fn server_with_trusted_cert(
+        dir: &std::path::Path,
+    ) -> (hab_server::Server, rustls::RootCertStore) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let mut ca_params = CertificateParams::new(vec![]).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let leaf = CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .signed_by(&key, &ca, &ca_key)
+            .unwrap();
+        std::fs::write(dir.join("c.pem"), leaf.pem()).unwrap();
+        std::fs::write(dir.join("k.pem"), key.serialize_pem()).unwrap();
+        let server = hab_server::Server::start(&hab_server::Config {
+            data_dir: dir.join("data"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tls_cert: Some(dir.join("c.pem")),
+            tls_key: Some(dir.join("k.pem")),
+            ..hab_server::Config::default()
+        })
+        .await
+        .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        (server, roots)
+    }
+
+    #[tokio::test]
+    async fn accepts_the_pinned_certificate_and_a_trusted_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, roots) = server_with_trusted_cert(dir.path()).await;
+        let port = server.local_addr().port();
+        let pinned = server.fingerprint().to_string();
+        let trusted = server.trusted_fingerprint().unwrap();
+        assert_ne!(pinned, trusted);
+
+        // By a name the trusted certificate covers, the server presents it,
+        // and the app accepts it though it isn't the pinned one.
+        let by_name = format!("localhost:{port}");
+        let (_, seen) = connect_with_roots(&by_name, Some(&pinned), roots.clone())
+            .await
+            .unwrap();
+        assert_eq!(seen.as_deref(), Some(trusted.as_str()));
+
+        // By IP address, the server presents the self-signed one: pinned.
+        let by_ip = format!("127.0.0.1:{port}");
+        let (_, seen) = connect_with_roots(&by_ip, Some(&pinned), roots.clone())
+            .await
+            .unwrap();
+        assert_eq!(seen.as_deref(), Some(pinned.as_str()));
+
+        // Neither pinned nor chaining to a root the app trusts: refused.
+        let mut other = rcgen::CertificateParams::new(vec![]).unwrap();
+        other.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let other = other
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let mut nothing = rustls::RootCertStore::empty();
+        nothing.add(other.der().clone()).unwrap();
+        let err = connect_with_roots(&by_name, Some("00:11"), nothing)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TlsError::WrongCertificate), "{err}");
+        // A self-signed certificate that isn't the pinned one is refused too.
+        let err = connect_with_roots(&by_ip, Some("00:11"), roots)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TlsError::WrongCertificate), "{err}");
+        server.shutdown().await;
     }
 }
