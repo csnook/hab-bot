@@ -2,6 +2,7 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import * as api from "./api";
 import { DAYS, DAY_NAMES, ORDINAL_NAMES, rule, wall, type Choice, type Pattern } from "./schedule";
+import { BottomNav, rememberedView, rememberView, Swipeable, TopBar, UndoToast, usePhone, VIEWS, type UndoAction, type View } from "./phone";
 import "./style.css";
 
 function localInputValue(ms: number): string {
@@ -51,7 +52,7 @@ function SnoozeButton({ id, onDone, ahead }: { id: string; onDone: () => void; a
 }
 
 /** The details panel, with the buttons that fit what the occurrence is: open, expected or closed. */
-function Details({ o, onClose, refresh }: { o: api.Occurrence; onClose: () => void; refresh: () => void }) {
+function Details({ o, sheet, onClose, refresh }: { o: api.Occurrence; sheet?: boolean; onClose: () => void; refresh: () => void }) {
   const [more, setMore] = useState(false);
   const [when, setWhen] = useState(localInputValue(Date.now()));
   const [note, setNote] = useState("");
@@ -65,7 +66,7 @@ function Details({ o, onClose, refresh }: { o: api.Occurrence; onClose: () => vo
   const time = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "");
 
   return (
-    <dialog open class="details">
+    <dialog open class={sheet ? "details sheet" : "details"}>
       <h2>{o.title}</h2>
       <p>
         {o.priority} · scheduled {time(o.scheduled_at)}
@@ -339,10 +340,14 @@ function FoldedRow({ items, refresh, select }: { items: api.Occurrence[]; refres
 }
 
 function Inbox() {
+  const phone = usePhone();
   const [items, setItems] = useState<api.InboxItem[]>([]);
   const [settings, setSettings] = useState(false);
   const [opened, setOpened] = useState("");
   const [selected, setSelected] = useState<api.Occurrence | null>(null);
+  const [adding, setAdding] = useState(!phone);
+  const [undo, setUndo] = useState<UndoAction | null>(null);
+  const [view, setView] = useState<View>(() => rememberedView(VIEWS, "inbox"));
   const refresh = () => api.inbox().then(setItems);
 
   useEffect(() => {
@@ -354,33 +359,45 @@ function Inbox() {
       void unlistenOpen.then((f) => f());
     };
   }, []);
+  useEffect(() => rememberView(view), [view]);
 
   const by = (section: api.InboxItem["section"]) => items.filter((i) => i.section === section);
   const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return (
-    <main>
-      <h1>
-        Inbox <button class="link" onClick={() => setSettings(true)}>Settings</button>
-      </h1>
+
+  // Swipe right for Done and left to snooze for the priority's interval, then 5 seconds of Undo.
+  const swipeDone = (o: api.Occurrence) =>
+    api.complete(o.id).then(() => { refresh(); setUndo({ label: `Done: ${o.title}`, undo: () => api.undo(o.id).then(refresh) }); });
+  const swipeSnooze = (o: api.Occurrence) =>
+    api.snooze(o.id).then(() => { refresh(); setUndo({ label: `Snoozed: ${o.title}`, undo: () => api.unsnooze(o.id).then(refresh) }); });
+
+  /** An open occurrence. On a phone it swipes, and has just Done (the sheet has the rest). */
+  const openRow = (o: api.Occurrence, overdue: boolean) => (
+    <Swipeable
+      key={o.id}
+      enabled={phone}
+      class={`${overdue ? "overdue" : ""} ${o.id === opened ? "opened" : ""}`}
+      onRight={() => swipeDone(o)}
+      onLeft={() => swipeSnooze(o)}
+    >
+      <span class="title" onClick={() => setSelected(o)}>
+        {o.title} {overdue && <small>{o.priority}</small>}
+      </span>
+      <time>{overdue ? `since ${new Date(o.overdue_at).toLocaleString()}` : new Date(o.scheduled_at).toLocaleString()}</time>
+      <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+      {!phone && <SnoozeButton id={o.id} onDone={refresh} />}
+      {!phone && <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>}
+    </Swipeable>
+  );
+
+  const body = (
+    <>
       {settings && <Settings onClose={() => setSettings(false)} />}
-      {selected && <Details o={selected} onClose={() => setSelected(null)} refresh={refresh} />}
-      <NewReminder onCreated={refresh} />
+      {selected && <Details o={selected} sheet={phone} onClose={() => setSelected(null)} refresh={refresh} />}
+      {adding && <NewReminder onCreated={() => { refresh(); if (phone) setAdding(false); }} />}
       {by("overdue").length > 0 && (
         <section>
           <h2>Overdue</h2>
-          <ul>
-            {by("overdue").map(({ occurrence: o }) => (
-              <li key={o.id} class={`overdue ${o.id === opened ? "opened" : ""}`}>
-                <span class="title" onClick={() => setSelected(o)}>
-                  {o.title} <small>{o.priority}</small>
-                </span>
-                <time>since {new Date(o.overdue_at).toLocaleString()}</time>
-                <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
-                <SnoozeButton id={o.id} onDone={refresh} />
-              <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
-              </li>
-            ))}
-          </ul>
+          <ul>{by("overdue").map(({ occurrence: o }) => openRow(o, true))}</ul>
         </section>
       )}
       {by("overdue_folded").length > 0 && (
@@ -389,17 +406,7 @@ function Inbox() {
       <section>
         <h2>Due</h2>
         {by("due").length === 0 && <p class="empty">Nothing due.</p>}
-        <ul>
-          {by("due").map(({ occurrence: o }) => (
-            <li key={o.id} class={o.id === opened ? "opened" : ""}>
-              <span class="title" onClick={() => setSelected(o)}>{o.title}</span>
-              <time>{new Date(o.scheduled_at).toLocaleString()}</time>
-              <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
-              <SnoozeButton id={o.id} onDone={refresh} />
-              <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
-            </li>
-          ))}
-        </ul>
+        <ul>{by("due").map(({ occurrence: o }) => openRow(o, false))}</ul>
       </section>
       {by("later_today").length > 0 && (
         <section>
@@ -409,8 +416,8 @@ function Inbox() {
               <li key={o.id} class="expected">
                 <span class="title" onClick={() => setSelected(o)}>{o.title}</span>
                 <time>{hhmm(o.scheduled_at)}</time>
-                <button onClick={() => api.completeEarly(o.reminder_id).then(refresh)}>Done early</button>
-                <SnoozeButton id={o.id} onDone={refresh} />
+                {!phone && <button onClick={() => api.completeEarly(o.reminder_id).then(refresh)}>Done early</button>}
+                {!phone && <SnoozeButton id={o.id} onDone={refresh} />}
               </li>
             ))}
           </ul>
@@ -431,7 +438,27 @@ function Inbox() {
           </ul>
         </section>
       )}
-    </main>
+    </>
+  );
+
+  if (!phone) {
+    return (
+      <main>
+        <h1>
+          Inbox <button class="link" onClick={() => setSettings(true)}>Settings</button>
+        </h1>
+        {body}
+      </main>
+    );
+  }
+  return (
+    <div class="phone">
+      <TopBar title="Inbox" onFilter={() => { /* the filter sheet comes with Agenda and Board */ }} onSettings={() => setSettings(true)} />
+      <main>{body}</main>
+      {!selected && <UndoToast action={undo} onGone={() => setUndo(null)} />}
+      <button class="fab" aria-label="New reminder" onClick={() => setAdding(!adding)}>+</button>
+      <BottomNav view={view} onView={setView} />
+    </div>
   );
 }
 

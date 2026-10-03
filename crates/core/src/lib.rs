@@ -170,6 +170,8 @@ pub enum SnoozeEnd {
     Replaced,
     /// The occurrence closed.
     Closed,
+    /// Undone, such as the Undo after a swipe.
+    Cancelled,
 }
 
 /// A way to snooze, as the picker lists it.
@@ -736,6 +738,18 @@ impl Core {
             by: self.user.clone(),
             at: now,
             via,
+        })
+    }
+
+    /// Ends a snooze early, as Undo does after a swipe.
+    pub fn unsnooze(&mut self, occurrence_id: &str, now: Millis) -> Result<()> {
+        if self.state.snoozed_until(occurrence_id).is_none() {
+            return Err(Error::NoOpenOccurrence(occurrence_id.to_string()));
+        }
+        self.record(Event::SnoozeEnded {
+            occurrence_id: occurrence_id.into(),
+            at: now,
+            how: SnoozeEnd::Cancelled,
         })
     }
 

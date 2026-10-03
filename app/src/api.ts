@@ -83,3 +83,4 @@ export const snooze = (occurrenceId: string) => invoke<number>("snooze", { occur
 export const snoozeUntil = (occurrenceId: string, until: number) => invoke<void>("snooze_until", { occurrenceId, until });
 export const snoozePicker = (occurrenceId: string) => invoke<SnoozePicker | null>("snooze_picker", { occurrenceId });
 export const skipOlderQuiet = () => invoke<number>("skip_older_quiet");
+export const unsnooze = (occurrenceId: string) => invoke<void>("unsnooze", { occurrenceId });

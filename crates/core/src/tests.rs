@@ -1699,3 +1699,21 @@ mod tidy_tests {
         assert_eq!(skipped, 2);
     }
 }
+
+#[test]
+fn unsnoozing_cancels_a_snooze_and_records_how_it_ended() {
+    let mut c = core();
+    c.create_one_off("x", T0, T0).unwrap();
+    let id = c.fire_due(T0).unwrap().remove(0).id;
+    c.snooze_default(&id, SnoozeVia::Swipe, T0).unwrap();
+    c.unsnooze(&id, T0 + 1000).unwrap();
+    assert_eq!(c.state().occurrence(&id).unwrap().snoozed_until, None);
+    assert!(c.history().iter().any(|e| matches!(
+        e,
+        Event::SnoozeEnded {
+            how: SnoozeEnd::Cancelled,
+            ..
+        }
+    )));
+    assert!(c.unsnooze(&id, T0 + 2000).is_err());
+}

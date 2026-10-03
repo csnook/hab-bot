@@ -101,6 +101,14 @@ fn snooze_until(
         .map_err(|e| e.to_string())
 }
 
+/// Cancels a snooze, for Undo after a swipe.
+#[tauri::command]
+fn unsnooze(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
+    fresh(&app)
+        .unsnooze(&occurrence_id, now())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn snooze_picker(app: tauri::State<App>, occurrence_id: String) -> Option<hab_core::SnoozePicker> {
     fresh(&app).snooze_picker(&occurrence_id, now())
@@ -343,6 +351,7 @@ pub fn run() {
             snooze,
             snooze_until,
             snooze_picker,
+            unsnooze,
             priorities,
             about,
             complete_early,
