@@ -7,8 +7,40 @@ import {
   type Snapshot,
 } from "./api";
 import { formatTime, toUnixSeconds } from "./time";
+import { setupState, type Setup } from "./api";
+import { Account } from "./Account";
+import { FirstStart } from "./FirstStart";
 
+/** The first start asks how to use this device, then the app opens. */
 export function App() {
+  const [setup, setSetup] = useState<Setup | null | undefined>(undefined);
+  const [page, setPage] = useState<"inbox" | "settings">("inbox");
+
+  useEffect(() => {
+    setupState().then(setSetup).catch(() => setSetup({ mode: "standalone" }));
+  }, []);
+
+  if (setup === undefined) return <main />;
+  if (setup === null) return <FirstStart onDone={setSetup} />;
+  return (
+    <>
+      <nav class="tabs" aria-label="Views">
+        <button aria-pressed={page === "inbox"} onClick={() => setPage("inbox")}>Inbox</button>
+        <button aria-pressed={page === "settings"} onClick={() => setPage("settings")}>Settings</button>
+      </nav>
+      {page === "inbox" ? (
+        <Inbox />
+      ) : (
+        <main>
+          <h1>Settings</h1>
+          <Account setup={setup} />
+        </main>
+      )}
+    </>
+  );
+}
+
+function Inbox() {
   const [snap, setSnap] = useState<Snapshot>({ due: [], upcoming: [] });
   const [error, setError] = useState("");
 

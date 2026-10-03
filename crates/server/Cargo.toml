@@ -7,9 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+hab-proto = { path = "../proto" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "http1"] }
+base64 = "0.22"
 rand = "0.9"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

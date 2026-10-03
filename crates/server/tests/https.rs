@@ -53,6 +53,37 @@ async fn get(
     Ok((cert::fingerprint(&presented), body))
 }
 
+/// POST a JSON body and return the status line and the response body.
+async fn post(
+    addr: SocketAddr,
+    trusted: &CertificateDer<'static>,
+    path: &str,
+    json: &str,
+) -> io::Result<(String, String)> {
+    let tcp = tokio::net::TcpStream::connect(addr).await?;
+    let mut tls = connector(trusted)
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await?;
+    tls.write_all(
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+            json.len()
+        )
+        .as_bytes(),
+    )
+    .await?;
+    let mut response = String::new();
+    let _ = tls.read_to_string(&mut response).await;
+    let status = response.lines().next().unwrap_or_default().to_string();
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok((status, body))
+}
+
 fn stored_cert(dir: &Path) -> CertificateDer<'static> {
     let db = db::Db::open(dir).unwrap();
     cert::load_or_create(&db, &[]).unwrap().cert
@@ -217,4 +248,48 @@ fn logs_hold_no_ip_addresses_unless_debug_logging_is_on() {
 
     let loud = logs_for_a_request(true);
     assert!(loud.contains("127.0.0.1"), "{loud}");
+}
+
+#[tokio::test]
+async fn joining_needs_the_setup_code_before_anything_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(&config(dir.path(), false)).await.unwrap();
+    let trusted = stored_cert(dir.path());
+    let start = |code: &str, user: &str| {
+        format!(r#"{{"setup_code":"{code}","username":"{user}","registration_request":"AAAA"}}"#)
+    };
+
+    // A wrong code gets nothing, whatever else is wrong with the request.
+    let (status, body) = post(
+        server.local_addr(),
+        &trusted,
+        "/api/v1/join/start",
+        &start("nope", "chris"),
+    )
+    .await
+    .unwrap();
+    assert!(status.contains("403"), "{status}");
+    assert!(body.contains("setup code"), "{body}");
+
+    // The right code with a bad username or a garbled OPAQUE message is a 400.
+    let code = server.setup_code();
+    for (user, expected) in [("Not Allowed", "400"), ("chris", "400")] {
+        let (status, _) = post(
+            server.local_addr(),
+            &trusted,
+            "/api/v1/join/start",
+            &start(&code, user),
+        )
+        .await
+        .unwrap();
+        assert!(status.contains(expected), "{user}: {status}");
+    }
+
+    // Finishing without a valid code or body creates no account.
+    let (status, _) = post(server.local_addr(), &trusted, "/api/v1/join/finish", "{}")
+        .await
+        .unwrap();
+    assert!(status.contains("422") || status.contains("400"), "{status}");
+    assert!(server.check_setup_code(&code).unwrap());
+    server.shutdown().await;
 }

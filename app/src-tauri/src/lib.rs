@@ -8,7 +8,12 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use hab_client::{
+    check_password, join, suggest_passphrase, tls, JoinRequest, KeyStore, PasswordCheck, Pinned,
+    Profile, Setup, SetupFile,
+};
 use hab_core::{Core, Snapshot};
+use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -22,6 +27,10 @@ const STATE_CHANGED: &str = "state-changed";
 struct App {
     core: Arc<Mutex<Core>>,
     wake: Sender<()>,
+    /// Where `setup.json` and the key file live.
+    data_dir: PathBuf,
+    /// How this device is set up; None until the first-start choice is made.
+    setup: Mutex<Option<Setup>>,
 }
 
 fn now() -> i64 {
@@ -85,6 +94,119 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(dir.join("hab-bot.db"))
 }
 
+fn data_dir_of(db: &std::path::Path) -> PathBuf {
+    match db.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+fn device_name() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "This computer".into())
+}
+
+/// What the window shows at start: the first-start choice, or the app.
+#[tauri::command]
+fn setup_state(app: tauri::State<'_, App>) -> Option<Setup> {
+    app.setup.lock().unwrap().clone()
+}
+
+/// "This device only": everything keeps working with no server.
+#[tauri::command]
+fn choose_standalone(app: tauri::State<'_, App>) -> Result<(), String> {
+    SetupFile::in_dir(&app.data_dir)
+        .save(&Setup::Standalone)
+        .map_err(|e| e.to_string())?;
+    *app.setup.lock().unwrap() = Some(Setup::Standalone);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct Found {
+    fingerprint: String,
+    name: String,
+    version: String,
+}
+
+/// Look at the server: its certificate, then (over a connection pinned to
+/// that certificate) its name and version. Nothing is stored and the setup
+/// code is not sent. The user confirms what this returns.
+#[tauri::command]
+async fn probe_server(address: String) -> Result<Found, String> {
+    let fingerprint = tls::probe(&address).await.map_err(|e| e.to_string())?;
+    let info = Pinned::new(&address, &fingerprint)
+        .info()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Found {
+        fingerprint,
+        name: info.name,
+        version: info.version,
+    })
+}
+
+#[tauri::command]
+fn password_check(password: String, username: String, display_name: String) -> PasswordCheck {
+    check_password(&password, &[&username, &display_name])
+}
+
+#[tauri::command]
+fn passphrase_suggestion() -> String {
+    suggest_passphrase()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinArgs {
+    address: String,
+    fingerprint: String,
+    server_name: String,
+    setup_code: String,
+    username: String,
+    display_name: String,
+    password: String,
+    portable: bool,
+}
+
+/// Create the first account. On success the pin and profile are remembered.
+#[tauri::command]
+async fn join_server(app: tauri::State<'_, App>, args: JoinArgs) -> Result<Profile, String> {
+    let store = KeyStore::open(&app.data_dir).await;
+    let joined = join(
+        JoinRequest {
+            address: args.address,
+            fingerprint: args.fingerprint,
+            server_name: args.server_name,
+            setup_code: args.setup_code,
+            username: args.username,
+            display_name: args.display_name,
+            password: args.password,
+            device_name: device_name(),
+            portable: args.portable,
+        },
+        &store,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let setup = Setup::Joined(joined.profile.clone());
+    SetupFile::in_dir(&app.data_dir)
+        .save(&setup)
+        .map_err(|e| e.to_string())?;
+    *app.setup.lock().unwrap() = Some(setup);
+    Ok(joined.profile)
+}
+
+/// For Settings → Account and This device: where the keys are kept.
+#[tauri::command]
+async fn key_store_name(app: tauri::State<'_, App>) -> Result<String, String> {
+    Ok(KeyStore::open(&app.data_dir).await.backend().to_string())
+}
+
 /// Fires what is due, shows a plain notification for each, and sleeps until
 /// the next reminder. The first pass fires reminders whose time passed while
 /// the app was closed.
@@ -131,15 +253,27 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             create_reminder,
-            complete_occurrence
+            complete_occurrence,
+            setup_state,
+            choose_standalone,
+            probe_server,
+            password_check,
+            passphrase_suggestion,
+            join_server,
+            key_store_name
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            let core = Arc::new(Mutex::new(Core::open(&db_path(&handle)?)?));
+            let db = db_path(&handle)?;
+            let core = Arc::new(Mutex::new(Core::open(&db)?));
+            let data_dir = data_dir_of(&db);
+            let setup = SetupFile::in_dir(&data_dir).load()?;
             let (wake, woken) = mpsc::channel();
             app.manage(App {
                 core: core.clone(),
                 wake,
+                data_dir,
+                setup: Mutex::new(setup),
             });
 
             let open = MenuItem::with_id(app, "open", "Open Reminders", true, None::<&str>)?;
