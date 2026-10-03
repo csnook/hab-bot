@@ -17,6 +17,8 @@ import { FirstStart } from "./FirstStart";
 export function App() {
   const [setup, setSetup] = useState<Setup | null | undefined>(undefined);
   const [page, setPage] = useState<"inbox" | "settings">("inbox");
+  // The device a "Not you? Remove it" notice was about, until it is dealt with.
+  const [removing, setRemoving] = useState<string | null>(null);
 
   useEffect(() => {
     setupState().then(setSetup).catch(() => setSetup({ mode: "standalone" }));
@@ -30,14 +32,19 @@ export function App() {
         <button aria-pressed={page === "inbox"} onClick={() => setPage("inbox")}>Inbox</button>
         <button aria-pressed={page === "settings"} onClick={() => setPage("settings")}>Settings</button>
       </nav>
-      {setup.mode === "joined" && <SignInNotices onRemove={() => setPage("settings")} />}
+      {setup.mode === "joined" && <SignInNotices
+          onRemove={(deviceId) => {
+            setRemoving(deviceId);
+            setPage("settings");
+          }}
+        />}
       {setup.mode === "joined" && <ReconciliationBanners />}
       {page === "inbox" ? (
         <Inbox />
       ) : (
         <main>
           <h1>Settings</h1>
-          <Account setup={setup} />
+          <Account setup={setup} removing={removing} />
         </main>
       )}
     </>
@@ -45,7 +52,7 @@ export function App() {
 }
 
 /** "New device signed in: <name>, just now. Not you? Remove it", on every other device. */
-function SignInNotices({ onRemove }: { onRemove: () => void }) {
+function SignInNotices({ onRemove }: { onRemove: (deviceId: string) => void }) {
   const [notices, setNotices] = useState<Snapshot["sign_in_notices"]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -68,7 +75,7 @@ function SignInNotices({ onRemove }: { onRemove: () => void }) {
       {notices.map((n) => (
         <p class="notice banner" role="status" key={n.id}>
           {signInNoticeText(n.device_name, n.at, now)} Not you?{" "}
-          <button type="button" onClick={onRemove}>Remove it</button>
+          <button type="button" onClick={() => onRemove(n.device_id)}>Remove it</button>
           <button type="button" onClick={() => dismissNotice(n.id).catch(() => {})}>Dismiss</button>
         </p>
       ))}

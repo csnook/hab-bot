@@ -52,7 +52,12 @@
   - **Password checks are rate-limited.** After 5 failures for an account, each attempt waits twice as long as the last, from 1 minute up to 1 hour. The user's devices get a notice, "5 failed sign-ins to your account". Each IP address is also limited to 20 attempts a minute, counted in memory only.
 - **Signing in on a new device** takes the server address, username and password, and the device is vouched for straight away. Approving it from an existing device by QR code is an alternative that needs no typing.
 - **Every new sign-in is announced** on the user's other devices: "New device signed in: Pixel 9, just now. Not you? Remove it".
-- **Removing a device** from any other device of the same user rotates the keys of every list it held.
+- **The device list:** Settings → Account lists the user's devices with their names and when each last synced. The names come from the user's encrypted settings, and the time from the server, which sees when a device last connected but nothing else about it.
+- **Removing a device** from any other device of the same user takes it off the account and rotates the keys of every list it held:
+  - the new key is sealed to every device that remains, together with the older keys, so they can still read the whole history
+  - the server deletes the device's row and its sealed keys in the same step, so the device can no longer fetch or send anything, and its open connection is closed
+  - "Not you? Remove it" in the new-device notice opens Settings → Account at that device, to confirm
+  - the personal list's first key is derived from the personal key, which the removed device holds, so the new key is random instead ([ADR 0008](../adr/0008-personal-list-key-rotates-to-a-random-key-on-device-removal.md))
 - **Changing the password** from any signed-in device re-encrypts the bundle. Nothing else changes.
 - **A forgotten password:**
   - **With a device still signed in:** set a new password there. On Android this asks for the screen lock first. On Linux an unlocked session is enough.

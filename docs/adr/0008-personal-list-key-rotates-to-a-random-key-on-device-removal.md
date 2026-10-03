@@ -1,0 +1,17 @@
+# The personal list's key becomes a random key, sealed to devices, when a device is removed
+
+The personal list's first key is derived from the personal key (HKDF of the personal key and the list's id), so every device that signs in with the password already has it and nobody has to seal it. A removed device still holds the personal key, so a key derived from it cannot be rotated: it would be one the removed device can compute. Removing a device therefore adds a new version of the list key that is 32 random bytes, chosen by the device doing the removal and sealed (ADR 0002) to each device that remains. Versions after the first are never derived from anything a device keeps on its own, so they reach a device only as a copy sealed to it by a device the identity key vouches for. Each remaining device is sealed every version, the old ones along with the new one, so any of them can still read the whole history and a device added later can too. The server applies the removal in one transaction: it deletes the device's row, its copies, and every copy it sealed, and refuses the change unless each remaining device ends up holding every version of every list.
+
+## Considered Options
+
+- **Derive the new key from a new personal key**: the personal key lives in the password-encrypted bundle, which a device can't re-encrypt without the password's export key, and the removed device could be given the new bundle by a dishonest server.
+- **Keep the derived key and only block the device at the server**: the removed device could still decrypt anything it got hold of, such as a copy of the database or traffic it recorded earlier, so removal would revoke access without protecting new events.
+- **Seal only the new version, leaving the old copies in place**: a copy sealed by the removed device would have to be trusted afterwards, and a device added later would not be able to read old events. Sealing every version fixes both, at the cost of devices × versions sealed copies.
+
+## Consequences
+
+- A removed device keeps what it has already seen, including the first version's key, so it can read any event made before the removal if it can get the ciphertext. It can no longer fetch it from the server, and cannot open anything made with the new key.
+- The first version of the key stays derived. Restoring the personal keys from escrow (when a password is forgotten and no device is left) gives back the first version only. Events made after a rotation then cannot be read until a remaining device is found, so recovery after a removal needs a design of its own.
+- A device signed in after a rotation can't read the events made after it until another device seals the newer versions to it. It announces itself first, then waits and retries, and its stream stays unread until the key arrives.
+- A removed device's earlier events must still verify, so the server keeps its identity-signed record as a retired device. Nothing is ever sealed to a retired device, and the server accepts nothing it signs. A dishonest server that also holds a removed device could still append events signed by it and encrypted with the first version's key. Closing that is part of the signed-membership work in ADR 0004.
+- Lists shared with other users will rotate the same way, per list, with the removed device's holdings only. Today the account has one list, and the server refuses a removal that does not rotate every list the account has.

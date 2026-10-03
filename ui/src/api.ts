@@ -135,3 +135,18 @@ export interface SignInCode {
   svg: string;
 }
 export const signInCode = () => invoke<SignInCode>("sign_in_code");
+
+/** One of the user's devices, for Settings → Account. */
+export interface DeviceInfo {
+  /** The server's id for it. */
+  id: number;
+  /** What it calls itself; null until its name has reached this device. */
+  name: string | null;
+  portable: boolean;
+  /** When the server last heard from it, in Unix seconds. */
+  last_synced: number | null;
+  this_device: boolean;
+}
+export const listDevices = () => invoke<DeviceInfo[]>("list_devices");
+/** Take another device off the account and rotate the keys of every list it held. */
+export const removeDevice = (deviceId: number) => invoke<void>("remove_device", { deviceId });

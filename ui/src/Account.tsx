@@ -1,10 +1,11 @@
 import { useEffect, useState } from "preact/hooks";
 import { keyStoreName, type Setup } from "./api";
+import { Devices } from "./Devices";
 import { ServerSees } from "./ServerSees";
 import { SignInCodeBox } from "./SignInCode";
 
 /** Settings → Account. */
-export function Account({ setup }: { setup: Setup }) {
+export function Account({ setup, removing }: { setup: Setup; removing?: string | null }) {
   const [keys, setKeys] = useState("");
   useEffect(() => {
     keyStoreName().then(setKeys).catch(() => setKeys(""));
@@ -46,6 +47,7 @@ export function Account({ setup }: { setup: Setup }) {
           </>
         )}
       </dl>
+      <Devices removing={removing ?? null} />
       <SignInCodeBox />
       <ServerSees />
     </section>

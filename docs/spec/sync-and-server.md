@@ -63,7 +63,7 @@
 - **List keys** ([ADR 0002](../adr/0002-per-list-keys-sealed-to-devices.md)):
   - **Sealing:** each list has one symmetric key, sealed separately to the public key of every device with access. The server stores the sealed copies and orders changes to them.
   - **Adding a user:** a device of someone with manage access seals the current key to that user's devices.
-  - **Removing a user or a device** rotates the key and seals the new one to everyone who remains.
+  - **Removing a user or a device** rotates the key and seals the new one to everyone who remains. The server takes the device off the account and stores the new copies in one step, and refuses it unless every remaining device ends up with every version. The personal list's first key is derived from the personal key, so its new keys are random ([ADR 0008](../adr/0008-personal-list-key-rotates-to-a-random-key-on-device-removal.md)).
   - **History:** the new key is sealed together with the old keys, so anyone with current access can read the whole history. There's no forward secrecy, and a removed user keeps what they've already seen.
   - **Group key protocols were rejected:** MLS, Keyhive/BeeKEM, p2panda and Megolm all solve leaderless groups, which a single ordering server doesn't need.
 - **The identity key** signs each of a user's devices, and devices seal keys only to devices signed that way ([ADR 0004](../adr/0004-password-unlocked-accounts-and-device-vouching.md)).

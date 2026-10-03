@@ -3,7 +3,7 @@
 use crate::backup::{self, BackupError};
 use crate::cert::{self, CertError};
 use crate::config::{Config, DEFAULT_NAME};
-use crate::db::{Db, DbError, LoginAccount, NewAccount, NewDevice, SyncError};
+use crate::db::{Db, DbError, LoginAccount, NewAccount, NewDevice, RemoveError, SyncError};
 use crate::peers::Peers;
 use crate::setup::SetupCode;
 use crate::trusted::{self, TrustedError};
@@ -25,7 +25,7 @@ use hab_proto::wire::{
     valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ClientMessage,
     DeviceList, Envelope, ErrorBody, EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted,
     Joined, Kdf, KeyBundle, ListRef, ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart,
-    LoginStarted, Numbered, RegisterList, Rejected, SealedKeys, ServerMessage,
+    LoginStarted, Numbered, RegisterList, Rejected, RemoveDevice, SealedKeys, ServerMessage,
     MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
 };
 use hab_proto::{verify_device, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
@@ -93,6 +93,13 @@ struct Pushed {
     envelope: Envelope,
 }
 
+/// A device was taken off an account, and the account's keys rotated.
+#[derive(Clone, Copy)]
+struct Removal {
+    account_id: i64,
+    device_id: i64,
+}
+
 /// The most events one download returns.
 const MAX_PAGE: u32 = 100;
 /// The most events one upload may hold.
@@ -121,6 +128,7 @@ enum Login {
 struct State {
     logins: Mutex<HashMap<String, (Instant, Login)>>,
     push: broadcast::Sender<Arc<Pushed>>,
+    removals: broadcast::Sender<Removal>,
     db: Mutex<Db>,
     opaque: ServerSetup<Suite>,
     setup: SetupCode,
@@ -185,6 +193,7 @@ impl Server {
             setup: SetupCode::generate(Instant::now()),
             peers: Arc::new(Peers::default()),
             push: broadcast::channel(256).0,
+            removals: broadcast::channel(64).0,
         });
         let info = Arc::new(Info {
             name: name.clone(),
@@ -209,6 +218,7 @@ impl Server {
             .route("/api/v1/login/finish", post(login_finish))
             .route("/api/v1/login/device", post(login_device))
             .route("/api/v1/devices", post(devices))
+            .route("/api/v1/devices/remove", post(remove_device))
             .route("/api/v1/lists", post(lists))
             .route("/api/v1/lists/register", post(register_list))
             .route("/api/v1/lists/keys", post(list_keys))
@@ -466,6 +476,8 @@ fn authenticate(
         signature,
     )
     .map_err(|_| ApiError::Unauthorized)?;
+    // Only timing is kept, and a failure to keep it must not fail the request.
+    let _ = state.db.lock().unwrap().touch_device(device_id, now());
     Ok(Authed {
         device_id,
         account_id: device.account_id,
@@ -483,8 +495,69 @@ async fn devices(
     body: Bytes,
 ) -> Result<Json<DeviceList>, ApiError> {
     let who = authenticate(&state, &headers, "POST", "/api/v1/devices", &body)?;
-    let devices = state.db.lock().unwrap().devices_of(who.account_id)?;
-    Ok(Json(DeviceList { devices }))
+    let db = state.db.lock().unwrap();
+    let devices = db.devices_of(who.account_id)?;
+    let retired = db.retired_of(who.account_id)?;
+    Ok(Json(DeviceList { devices, retired }))
+}
+
+/// Take another device of the caller's account off it, and store the rotated
+/// keys of the account's lists, in one step. The removed device can no longer
+/// sign a request, so it can't fetch or send anything, and its open
+/// connection is closed.
+async fn remove_device(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/devices/remove", &body)?;
+    let req: RemoveDevice = parse(&body)?;
+    let sealed = req.lists.iter().map(|l| l.keys.len()).sum::<usize>();
+    if req.lists.len() > 64 || sealed > 4096 {
+        return Err(ApiError::Bad("the request is too big"));
+    }
+    if req
+        .lists
+        .iter()
+        .flat_map(|l| &l.keys)
+        .any(|k| k.alg.len() > 80 || k.encapped.len() > 256 || k.ciphertext.len() > 256)
+    {
+        return Err(ApiError::Bad("a sealed key is not valid"));
+    }
+    state
+        .db
+        .lock()
+        .unwrap()
+        .remove_device(
+            who.account_id,
+            who.device_id,
+            req.device_id,
+            &req.lists,
+            now(),
+        )
+        .map_err(|e| match e {
+            RemoveError::Db(e) => {
+                tracing::error!("database error: {e}");
+                ApiError::Internal
+            }
+            RemoveError::OwnDevice => {
+                ApiError::Bad("a device can only be removed from another device")
+            }
+            RemoveError::UnknownDevice => ApiError::NotFound,
+            RemoveError::Incomplete => {
+                ApiError::Bad("the new keys do not cover every list and every remaining device")
+            }
+            RemoveError::Conflict => {
+                ApiError::Conflict("the account's devices or keys changed; try again")
+            }
+        })?;
+    tracing::info!("a device was removed");
+    // Nobody listening is fine.
+    let _ = state.removals.send(Removal {
+        account_id: who.account_id,
+        device_id: req.device_id,
+    });
+    Ok(Json(serde_json::json!({})))
 }
 
 /// The caller's lists, so a device that has just joined can find the personal one.
@@ -508,7 +581,7 @@ async fn register_list(
 ) -> Result<Json<ListRef>, ApiError> {
     let who = authenticate(&state, &headers, "POST", "/api/v1/lists/register", &body)?;
     let req: RegisterList = parse(&body)?;
-    if !valid_id(&req.list_id) || req.keys.len() > 64 {
+    if !valid_id(&req.list_id) || req.keys.len() > 4096 {
         return Err(ApiError::Bad("the list is not valid"));
     }
     if req
@@ -651,9 +724,10 @@ async fn sync_ws(
     let who = authenticate(&state, &headers, "GET", "/api/v1/sync/ws", b"")?;
     // Subscribe before the upgrade finishes, so nothing is missed after it.
     let pushes = state.push.subscribe();
+    let removals = state.removals.subscribe();
     Ok(ws
         .max_message_size(MAX_EVENT_BYTES * 2)
-        .on_upgrade(move |socket| ws_session(state, who, pushes, socket)))
+        .on_upgrade(move |socket| ws_session(state, who, pushes, removals, socket)))
 }
 
 async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> bool {
@@ -667,6 +741,7 @@ async fn ws_session(
     state: Arc<State>,
     who: Authed,
     mut pushes: broadcast::Receiver<Arc<Pushed>>,
+    mut removals: broadcast::Receiver<Removal>,
     mut socket: WebSocket,
 ) {
     loop {
@@ -687,13 +762,41 @@ async fn ws_session(
                         Err(_) => return,
                     },
                     Message::Close(_) => return,
+                    Message::Ping(_) => {
+                        // A connected device is syncing.
+                        let _ = state.db.lock().unwrap().touch_device(who.device_id, now());
+                        continue;
+                    }
                     _ => continue,
                 };
                 if !send(&mut socket, &reply).await {
                     return;
                 }
             }
+            removed = removals.recv() => match removed {
+                Ok(r) if r.account_id != who.account_id => continue,
+                Ok(r) if r.device_id == who.device_id => return,
+                Ok(_) => {
+                    if !send(&mut socket, &ServerMessage::KeysChanged).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if !still_on_account(&state, who) {
+                        return;
+                    }
+                    if !send(&mut socket, &ServerMessage::KeysChanged).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
             pushed = pushes.recv() => {
+                // Once a device is off the account it hears nothing more, even
+                // before its connection is closed.
+                if !still_on_account(&state, who) {
+                    return;
+                }
                 let reply = match pushed {
                     Ok(p) if p.account_id == who.account_id && p.origin != who.device_id => {
                         ServerMessage::Event {
@@ -712,6 +815,14 @@ async fn ws_session(
             }
         }
     }
+}
+
+/// Whether the device is still one of its account's.
+fn still_on_account(state: &State, who: Authed) -> bool {
+    matches!(
+        state.db.lock().unwrap().device(who.device_id),
+        Ok(Some(d)) if d.account_id == who.account_id
+    )
 }
 
 fn check_names(username: &str) -> Result<(), ApiError> {

@@ -62,6 +62,9 @@ pub enum Event {
     /// The device that made this event has just signed in to the account,
     /// and is called `name`. The user's other devices show it as a notice.
     DeviceSignedIn { name: String },
+    /// The device that made this event removed `device_id` from the account.
+    /// The device's name stays, for the history; its sign-in notice goes.
+    DeviceRemoved { device_id: String },
 }
 
 /// A reminder's settings, each of which is changed (and merged) on its own.

@@ -484,6 +484,18 @@ impl Core {
         Ok(())
     }
 
+    /// Records that this device removed `device_id` from the account, so the
+    /// user's other devices stop offering to remove it.
+    pub fn record_device_removed(&mut self, device_id: &str, now: i64) -> Result<()> {
+        self.record(
+            now,
+            Event::DeviceRemoved {
+                device_id: device_id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
     /// What a device of this account calls itself, if it has said.
     pub fn device_name(&self, device_id: &str) -> Option<&str> {
         self.state.device_names.get(device_id).map(String::as_str)
@@ -499,6 +511,7 @@ impl Core {
         sign_ins[after..]
             .iter()
             .filter(|s| s.device_id != self.device_id)
+            .filter(|s| !self.state.removed_devices.contains(&s.device_id))
             .filter(|s| {
                 !matches!(
                     self.store.meta(&format!("dismissed:{}", s.event_id)),
@@ -628,6 +641,41 @@ mod tests {
         assert_eq!((notice.device_id.as_str(), notice.at), ("2", T0 + 10));
         one.dismiss_notice(&notice.id).unwrap();
         assert_eq!(names(&one), vec!["Tablet"]);
+    }
+
+    #[test]
+    fn removing_a_device_takes_its_sign_in_notice_off_every_device() {
+        let mut one = core();
+        one.join("u1", "1").unwrap();
+        let list = one.personal_list_id().to_string();
+        let mut two = core();
+        two.join("u1", "2").unwrap();
+        two.use_personal_list(&list).unwrap();
+        let mut three = core();
+        three.join("u1", "3").unwrap();
+        three.use_personal_list(&list).unwrap();
+        two.announce_sign_in("Laptop", T0 + 10).unwrap();
+        deliver(&mut two, &mut [&mut one, &mut three], "2", 1);
+        three.announce_sign_in("Phone", T0 + 20).unwrap();
+        deliver(&mut three, &mut [&mut one, &mut two], "3", 2);
+        assert_eq!(one.snapshot().sign_in_notices.len(), 2);
+        assert_eq!(two.snapshot().sign_in_notices.len(), 1);
+
+        // The first device removes the phone.
+        one.record_device_removed("3", T0 + 30).unwrap();
+        deliver(&mut one, &mut [&mut two, &mut three], "1", 3);
+        for c in [&one, &two] {
+            let left: Vec<_> = c
+                .snapshot()
+                .sign_in_notices
+                .into_iter()
+                .map(|n| n.device_name)
+                .collect();
+            assert!(!left.contains(&"Phone".to_string()), "{left:?}");
+        }
+        assert_eq!(one.snapshot().sign_in_notices.len(), 1);
+        // Its name is still known, for the history.
+        assert_eq!(one.device_name("3"), Some("Phone"));
     }
 
     #[test]

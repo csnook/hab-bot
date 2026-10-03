@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hab_client::{
-    check_password, join, parse_target, sign_in, suggest_passphrase, tls, JoinRequest, KeyStore,
-    PasswordCheck, Pinned, Profile, Setup, SetupFile, SignInCode, SignInRequest, SignInTarget,
-    Syncer,
+    check_password, join, parse_target, sign_in, suggest_passphrase, tls, DeviceInfo, JoinRequest,
+    KeyStore, PasswordCheck, Pinned, Profile, Setup, SetupFile, SignInCode, SignInRequest,
+    SignInTarget, Syncer,
 };
 use hab_core::{Core, Snapshot};
 use serde::Serialize;
@@ -37,6 +37,19 @@ struct App {
     data_dir: PathBuf,
     /// How this device is set up; None until the first-start choice is made.
     setup: Mutex<Option<Setup>>,
+    /// The running sync, once there is one: Settings → Account asks it for
+    /// the device list and has it remove a device.
+    syncer: SyncerSlot,
+}
+
+type SyncerSlot = Arc<Mutex<Option<Arc<Syncer>>>>;
+
+/// What the sync loop shares with the rest of the app.
+struct SyncShared {
+    core: Arc<Mutex<Core>>,
+    wake: Arc<Notify>,
+    stop: watch::Receiver<bool>,
+    slot: SyncerSlot,
 }
 
 fn now() -> i64 {
@@ -218,11 +231,15 @@ async fn start_sync(
     handle: AppHandle,
     profile: Profile,
     data_dir: PathBuf,
-    core: Arc<Mutex<Core>>,
-    wake: Arc<Notify>,
-    stop: watch::Receiver<bool>,
+    shared: SyncShared,
     start: Start,
 ) -> Result<(), String> {
+    let SyncShared {
+        core,
+        wake,
+        stop,
+        slot,
+    } = shared;
     {
         let mut core = core.lock().unwrap();
         // A sign-in always takes the id the server just gave this device, even
@@ -237,11 +254,13 @@ async fn start_sync(
     }
     let store = KeyStore::open(&data_dir).await;
     let notify = handle.clone();
-    let syncer = Syncer::new(&profile, &store, core.clone(), wake, move || {
-        let _ = notify.emit(STATE_CHANGED, ());
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let syncer = Arc::new(
+        Syncer::new(&profile, &store, core.clone(), wake, move || {
+            let _ = notify.emit(STATE_CHANGED, ());
+        })
+        .await
+        .map_err(|e| e.to_string())?,
+    );
     match start {
         Start::Resume => {}
         Start::FirstDevice => {
@@ -267,6 +286,7 @@ async fn start_sync(
         }
     }
     let _ = handle.emit(STATE_CHANGED, ());
+    *slot.lock().unwrap() = Some(syncer.clone());
     tauri::async_runtime::spawn(async move { syncer.run(stop).await });
     Ok(())
 }
@@ -304,9 +324,12 @@ async fn join_server(
         handle,
         joined.profile.clone(),
         app.data_dir.clone(),
-        app.core.clone(),
-        app.sync_wake.clone(),
-        app.sync_stop.subscribe(),
+        SyncShared {
+            core: app.core.clone(),
+            wake: app.sync_wake.clone(),
+            stop: app.sync_stop.subscribe(),
+            slot: app.syncer.clone(),
+        },
         Start::FirstDevice,
     )
     .await?;
@@ -408,9 +431,12 @@ async fn sign_in_server(
         handle,
         signed.profile.clone(),
         app.data_dir.clone(),
-        app.core.clone(),
-        app.sync_wake.clone(),
-        app.sync_stop.subscribe(),
+        SyncShared {
+            core: app.core.clone(),
+            wake: app.sync_wake.clone(),
+            stop: app.sync_stop.subscribe(),
+            slot: app.syncer.clone(),
+        },
         Start::SignedIn,
     )
     .await?;
@@ -453,6 +479,32 @@ fn dismiss_notice(app: tauri::State<'_, App>, handle: AppHandle, id: String) -> 
         .map_err(|e| e.to_string())?;
     let _ = handle.emit(STATE_CHANGED, ());
     Ok(())
+}
+
+/// The running sync, or why there is none.
+fn running_sync(app: &App) -> Result<Arc<Syncer>, String> {
+    app.syncer
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "This device is not syncing with a server.".to_string())
+}
+
+/// Settings → Account: the user's devices, with when each last synced.
+#[tauri::command]
+async fn list_devices(app: tauri::State<'_, App>) -> Result<Vec<DeviceInfo>, String> {
+    let syncer = running_sync(&app)?;
+    syncer.devices().await.map_err(|e| e.to_string())
+}
+
+/// Remove another of the user's devices and rotate the keys it held.
+#[tauri::command]
+async fn remove_device(app: tauri::State<'_, App>, device_id: i64) -> Result<(), String> {
+    let syncer = running_sync(&app)?;
+    syncer
+        .remove_device(device_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// For Settings → Account and This device: where the keys are kept.
@@ -525,6 +577,8 @@ pub fn run() {
             sign_in_server,
             sign_in_code,
             dismiss_notice,
+            list_devices,
+            remove_device,
             key_store_name
         ])
         .setup(|app| {
@@ -536,18 +590,22 @@ pub fn run() {
             let (wake, woken) = mpsc::channel();
             let sync_wake = Arc::new(Notify::new());
             let (sync_stop, stop) = watch::channel(false);
+            let syncer: SyncerSlot = Arc::new(Mutex::new(None));
             if let Some(Setup::Joined(profile)) = &setup {
                 let (handle, profile, data_dir) =
                     (handle.clone(), profile.clone(), data_dir.clone());
-                let (core, sync_wake) = (core.clone(), sync_wake.clone());
+                let (core, sync_wake, slot) = (core.clone(), sync_wake.clone(), syncer.clone());
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = start_sync(
                         handle,
                         profile,
                         data_dir,
-                        core,
-                        sync_wake,
-                        stop,
+                        SyncShared {
+                            core,
+                            wake: sync_wake,
+                            stop,
+                            slot,
+                        },
                         Start::Resume,
                     )
                     .await
@@ -563,6 +621,7 @@ pub fn run() {
                 sync_stop,
                 data_dir,
                 setup: Mutex::new(setup),
+                syncer,
             });
 
             let open = MenuItem::with_id(app, "open", "Open Reminders", true, None::<&str>)?;

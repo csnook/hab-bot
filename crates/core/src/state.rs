@@ -135,6 +135,8 @@ pub struct State {
     pub device_names: BTreeMap<String, String>,
     /// Devices that signed in, in stream order.
     pub sign_ins: Vec<SignIn>,
+    /// Devices (by id) that were removed from the account.
+    pub removed_devices: BTreeSet<String>,
     /// Closings that lost to a completion on another device, in stream order.
     pub reconciliations: Vec<Reconciliation>,
     /// Every value each reminder setting has had.
@@ -171,7 +173,9 @@ impl State {
                     let id = self.resolve(occurrence_id).to_string();
                     self.unsent_occurrences.insert(id);
                 }
-                Event::DeviceNamed { .. } | Event::DeviceSignedIn { .. } => {}
+                Event::DeviceNamed { .. }
+                | Event::DeviceSignedIn { .. }
+                | Event::DeviceRemoved { .. } => {}
             }
         }
         match &stored.event {
@@ -284,6 +288,9 @@ impl State {
             Event::DeviceNamed { name } => {
                 self.device_names
                     .insert(stored.device_id.clone(), name.clone());
+            }
+            Event::DeviceRemoved { device_id } => {
+                self.removed_devices.insert(device_id.clone());
             }
             Event::DeviceSignedIn { name } => {
                 self.device_names

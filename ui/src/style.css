@@ -39,3 +39,7 @@ dd { margin: 0; }
 .qr { width: 240px; max-width: 100%; background: #fff; padding: 4px; border-radius: 4px; }
 .qr svg { width: 100%; height: auto; display: block; }
 .notice button { margin-left: 8px; }
+
+.devices { list-style: none; padding: 0; }
+.devices li { margin: 8px 0; }
+.devices li > * { margin-right: 8px; }

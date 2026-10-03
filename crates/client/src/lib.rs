@@ -17,5 +17,5 @@ pub use keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};
 pub use profile::{Profile, Setup, SetupFile};
 pub use signin::{sign_in, SignInError, SignInRequest, SignedIn};
 pub use strength::{check_password, suggest_passphrase, PasswordCheck};
-pub use sync::{SyncError, SyncStatus, Syncer};
+pub use sync::{DeviceInfo, SyncError, SyncStatus, Syncer};
 pub use tls::{probe, Pinned, ServerInfo, TlsError};

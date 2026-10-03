@@ -258,11 +258,40 @@ pub struct SealedKeys {
 pub struct DeviceEntry {
     pub id: i64,
     pub record: DeviceRecord,
+    /// When the server last heard from the device (a request or a ping on its
+    /// WebSocket), in Unix seconds. The server sees timing, never content.
+    #[serde(default)]
+    pub last_synced: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DeviceList {
+    /// The devices that are on the account now.
     pub devices: Vec<DeviceEntry>,
+    /// Devices that were removed. Their records are kept so that the events
+    /// they made before removal still verify. Never seal a key to one.
+    #[serde(default)]
+    pub retired: Vec<DeviceEntry>,
+}
+
+/// The new keys of one list when a device is removed: every version of the
+/// list's key, sealed by the removing device to each device that remains. The
+/// newest version is the new one, and the older ones come along so that a
+/// device added later, or one whose copies were sealed by the removed device,
+/// can still read the whole history.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Rotation {
+    pub list_id: String,
+    pub keys: Vec<SealedKey>,
+}
+
+/// Remove a device from the caller's account and rotate every list's key in
+/// the same step, so there is no moment when the device is gone and the old
+/// key is still the newest.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RemoveDevice {
+    pub device_id: i64,
+    pub lists: Vec<Rotation>,
 }
 
 /// What the server did with an event it was sent.
@@ -335,6 +364,9 @@ pub enum ServerMessage {
     },
     /// The device missed pushes; it should download what it lacks.
     Resync,
+    /// Another device was removed and the lists' keys were rotated: fetch the
+    /// device list and the new keys.
+    KeysChanged,
 }
 
 #[cfg(test)]

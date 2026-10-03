@@ -14,10 +14,12 @@ use hab_core::{Core, Payload};
 use hab_proto::wire::SealedKeys;
 use hab_proto::wire::{
     AppendBatch, AppendResults, ClientMessage, DeviceList, DeviceRecord, Envelope, EventPage,
-    FetchEvents, ListRef, ListRefs, Numbered, NumberedEnvelope, RegisterList, ServerMessage,
+    FetchEvents, ListRef, ListRefs, Numbered, NumberedEnvelope, RegisterList, RemoveDevice,
+    Rotation, ServerMessage,
 };
 use hab_proto::{open_list_key, seal_list_key, verify_device, DeviceKeys, KeyError, Keys, ListKey};
-use std::collections::{HashMap, HashSet};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -53,6 +55,29 @@ pub enum SyncError {
     NoPersonalList,
     #[error("no list key sealed to this device by one of the account's devices")]
     NoSealedKey,
+    #[error("waiting for another of your devices to share the list's new key with this one")]
+    WaitingForKey,
+    #[error("a device can only be removed from another device")]
+    OwnDevice,
+    #[error("there is no such device on this account")]
+    UnknownDevice,
+    #[error("this account has a list whose key this device cannot rotate")]
+    CannotRotate,
+}
+
+/// One of the account's devices, as Settings → Account lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceInfo {
+    /// The server's id for the device.
+    pub id: i64,
+    /// What the device calls itself, from the user's encrypted settings. Not
+    /// known until its first event has arrived here.
+    pub name: Option<String>,
+    pub portable: bool,
+    /// When the server last heard from the device, in Unix seconds.
+    pub last_synced: Option<i64>,
+    /// This is the device asking.
+    pub this_device: bool,
 }
 
 /// How syncing is going, for Settings.
@@ -75,6 +100,13 @@ pub struct Syncer {
     on_change: Box<dyn Fn() + Send + Sync>,
     /// The account's devices that its identity key vouches for.
     directory: Mutex<HashMap<i64, DeviceRecord>>,
+    /// Devices that were removed. What they signed still verifies; nothing is
+    /// ever sealed to them.
+    retired: Mutex<HashMap<i64, DeviceRecord>>,
+    /// The personal list's keys after the first rotation, by version. Version
+    /// 1 is made from the personal key; later ones are random and arrive
+    /// sealed to this device by another of the account's devices.
+    rotated: Mutex<BTreeMap<u32, ListKey>>,
     status: Mutex<SyncStatus>,
     /// A device signed in since the personal list's key was last sealed to
     /// the account's devices.
@@ -117,6 +149,8 @@ impl Syncer {
             wake,
             on_change: Box::new(on_change),
             directory: Mutex::new(HashMap::new()),
+            retired: Mutex::new(HashMap::new()),
+            rotated: Mutex::new(BTreeMap::new()),
             status: Mutex::new(SyncStatus::default()),
             reseal: AtomicBool::new(false),
         })
@@ -137,10 +171,26 @@ impl Syncer {
         self.core.lock().unwrap()
     }
 
-    /// The key of a list. The personal list's is made from the personal key, so
-    /// every device of the account can have it.
+    /// The personal list's keys, newest first. Version 1 is made from the
+    /// personal key, so every device of the account has it; a removed device
+    /// has it too, which is why removing one adds a random version that is
+    /// only ever sealed to the devices that remain (ADR 0008).
+    fn keyring(&self, list_id: &str) -> Vec<(u32, ListKey)> {
+        let mut ring: Vec<(u32, ListKey)> = self
+            .rotated
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .map(|(v, k)| (*v, k.clone()))
+            .collect();
+        ring.push((1, ListKey::personal(&self.keys.personal, list_id)));
+        ring
+    }
+
+    /// The key new events are encrypted with: the newest.
     fn list_key(&self, list_id: &str) -> ListKey {
-        ListKey::personal(&self.keys.personal, list_id)
+        self.keyring(list_id).swap_remove(0).1
     }
 
     async fn post<B: serde::Serialize, R: serde::de::DeserializeOwned>(
@@ -154,18 +204,154 @@ impl Syncer {
             .await?)
     }
 
-    /// The account's devices, keeping only those the identity key signed.
-    async fn refresh_directory(&self) -> Result<HashMap<i64, DeviceRecord>, SyncError> {
+    /// The account's devices, keeping only those the identity key signed,
+    /// with when the server last heard from each.
+    async fn fetch_devices(&self) -> Result<Vec<hab_proto::wire::DeviceEntry>, SyncError> {
         let list: DeviceList = self.post("/api/v1/devices", &()).await?;
         let identity = self.keys.identity_public();
-        let verified: HashMap<i64, DeviceRecord> = list
-            .devices
+        let vouched =
+            |d: &hab_proto::wire::DeviceEntry| verify_device(&identity, &d.record).is_ok();
+        let devices: Vec<_> = list.devices.into_iter().filter(vouched).collect();
+        *self.directory.lock().unwrap() =
+            devices.iter().map(|d| (d.id, d.record.clone())).collect();
+        *self.retired.lock().unwrap() = list
+            .retired
             .into_iter()
-            .filter(|d| verify_device(&identity, &d.record).is_ok())
+            .filter(vouched)
             .map(|d| (d.id, d.record))
             .collect();
-        *self.directory.lock().unwrap() = verified.clone();
-        Ok(verified)
+        Ok(devices)
+    }
+
+    async fn refresh_directory(&self) -> Result<HashMap<i64, DeviceRecord>, SyncError> {
+        self.fetch_devices().await?;
+        Ok(self.directory.lock().unwrap().clone())
+    }
+
+    /// The account's devices for Settings → Account, oldest first.
+    pub async fn devices(&self) -> Result<Vec<DeviceInfo>, SyncError> {
+        let devices = self.fetch_devices().await?;
+        let core = self.core();
+        Ok(devices
+            .into_iter()
+            .map(|d| DeviceInfo {
+                id: d.id,
+                name: core.device_name(&d.id.to_string()).map(str::to_string),
+                portable: d.record.portable,
+                last_synced: d.last_synced,
+                this_device: d.id == self.device_id,
+            })
+            .collect())
+    }
+
+    /// Fetch the copies of the personal list's key sealed to this device and
+    /// keep every version sealed by a device the identity key vouches for.
+    /// Returns whether a version new to this device arrived.
+    async fn load_keys(&self) -> Result<bool, SyncError> {
+        let list_id = self.core().personal_list_id().to_string();
+        let directory = self.refresh_directory().await?;
+        let sealed: SealedKeys = match self
+            .post(
+                "/api/v1/lists/keys",
+                &ListRef {
+                    list_id: list_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(sealed) => sealed,
+            // The list isn't on the server yet: there is nothing to load.
+            Err(SyncError::Server(TlsError::Status { status: 404, .. })) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let mut changed = false;
+        for k in sealed.keys.iter().filter(|k| k.key_version > 1) {
+            let Some(sender) = directory.get(&k.sealed_by) else {
+                continue;
+            };
+            if self.rotated.lock().unwrap().contains_key(&k.key_version) {
+                continue;
+            }
+            if let Ok(key) = open_list_key(k, &list_id, &self.device, &sender.sealing_public) {
+                self.rotated.lock().unwrap().insert(k.key_version, key);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Remove another of the account's devices and rotate the personal list's
+    /// key, in one step on the server. The new key is sealed, together with
+    /// every older one, to each device that remains, so they can still read
+    /// the whole history. The removed device can't fetch or send anything
+    /// after this, and can't open anything made with the new key.
+    pub async fn remove_device(&self, device_id: i64) -> Result<(), SyncError> {
+        if device_id == self.device_id {
+            return Err(SyncError::OwnDevice);
+        }
+        let mut attempt = 0;
+        let (new_version, new_key) = loop {
+            attempt += 1;
+            // Start from what the server has now: another device may have
+            // rotated, or signed in, since this device last looked.
+            self.load_keys().await?;
+            let directory = self.directory.lock().unwrap().clone();
+            if !directory.contains_key(&device_id) {
+                return Err(SyncError::UnknownDevice);
+            }
+            let list_id = self.core().personal_list_id().to_string();
+            if self.account_lists().await? != [list_id.clone()] {
+                return Err(SyncError::CannotRotate);
+            }
+            let mut ring = self.keyring(&list_id);
+            let new_version = ring[0].0 + 1;
+            let new_key = ListKey::random();
+            ring.insert(0, (new_version, new_key.clone()));
+            let mut keys = Vec::new();
+            for (id, record) in directory.iter().filter(|(id, _)| **id != device_id) {
+                for (version, key) in &ring {
+                    keys.push(seal_list_key(
+                        key,
+                        &list_id,
+                        *version,
+                        &self.device,
+                        self.device_id,
+                        *id,
+                        &record.sealing_public,
+                    )?);
+                }
+            }
+            let sent: Result<serde_json::Value, SyncError> = self
+                .post(
+                    "/api/v1/devices/remove",
+                    &RemoveDevice {
+                        device_id,
+                        lists: vec![Rotation { list_id, keys }],
+                    },
+                )
+                .await;
+            match sent {
+                Ok(_) => break (new_version, new_key),
+                Err(SyncError::Server(TlsError::Status { status: 409, .. })) if attempt < 3 => {
+                    continue
+                }
+                Err(SyncError::Server(TlsError::Status { status: 404, .. })) => {
+                    return Err(SyncError::UnknownDevice)
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        self.rotated.lock().unwrap().insert(new_version, new_key);
+        self.refresh_directory().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.core()
+            .record_device_removed(&device_id.to_string(), now)?;
+        self.wake.notify_one();
+        (self.on_change)();
+        Ok(())
     }
 
     /// The ids of the account's lists on the server. A device added to an
@@ -219,20 +405,24 @@ impl Syncer {
     /// sealed to each of the account's devices.
     pub async fn register_personal_list(&self) -> Result<(), SyncError> {
         let list_id = self.core().personal_list_id().to_string();
-        let key = self.list_key(&list_id);
         self.reseal.store(false, Ordering::SeqCst);
-        let devices = self.refresh_directory().await?;
+        // Also refreshes the directory, and finds any key a rotation added.
+        self.load_keys().await?;
+        let devices = self.directory.lock().unwrap().clone();
+        let ring = self.keyring(&list_id);
         let mut sealed = Vec::new();
         for (id, record) in &devices {
-            sealed.push(seal_list_key(
-                &key,
-                &list_id,
-                1,
-                &self.device,
-                self.device_id,
-                *id,
-                &record.sealing_public,
-            )?);
+            for (version, key) in &ring {
+                sealed.push(seal_list_key(
+                    key,
+                    &list_id,
+                    *version,
+                    &self.device,
+                    self.device_id,
+                    *id,
+                    &record.sealing_public,
+                )?);
+            }
         }
         let _: ListRef = self
             .post(
@@ -319,8 +509,9 @@ impl Syncer {
                 )
                 .await?;
             self.ensure_known(&page.events).await?;
+            let mut reloaded = false;
             for n in &page.events {
-                if self.ingest(n) {
+                if self.ingest_reloading(n, &mut reloaded).await? {
                     new += 1;
                 }
             }
@@ -340,9 +531,11 @@ impl Syncer {
     async fn ensure_known(&self, events: &[NumberedEnvelope]) -> Result<(), SyncError> {
         let unknown = {
             let dir = self.directory.lock().unwrap();
-            events
-                .iter()
-                .any(|n| !dir.contains_key(&n.envelope.device_id))
+            let retired = self.retired.lock().unwrap();
+            events.iter().any(|n| {
+                let id = n.envelope.device_id;
+                !dir.contains_key(&id) && !retired.contains_key(&id)
+            })
         };
         if unknown {
             self.refresh_directory().await?;
@@ -350,27 +543,60 @@ impl Syncer {
         Ok(())
     }
 
+    /// [`Self::ingest`], and if no key this device has opens the event, once
+    /// per batch fetch the keys again first: the list's key may have been
+    /// rotated since this device looked.
+    async fn ingest_reloading(
+        &self,
+        n: &NumberedEnvelope,
+        reloaded: &mut bool,
+    ) -> Result<bool, SyncError> {
+        let mut result = self.ingest(n);
+        if result == Ingest::NoKey && !*reloaded {
+            *reloaded = true;
+            if self.load_keys().await? {
+                result = self.ingest(n);
+            }
+        }
+        match result {
+            Ingest::New => Ok(true),
+            Ingest::Known | Ingest::Dropped => Ok(false),
+            // The event stays unread and the cursor stays put: it is read once
+            // another device has sealed the key to this one.
+            Ingest::NoKey => Err(SyncError::WaitingForKey),
+        }
+    }
+
     /// Verify, decrypt and hand one numbered event to the core. Anything that
-    /// doesn't check out is dropped. Returns whether it was new to this device.
-    fn ingest(&self, n: &NumberedEnvelope) -> bool {
+    /// doesn't check out is dropped.
+    fn ingest(&self, n: &NumberedEnvelope) -> Ingest {
         let e = &n.envelope;
-        let signer = self
-            .directory
-            .lock()
-            .unwrap()
-            .get(&e.device_id)
-            .map(|r| r.signing_public.clone());
+        // A removed device's earlier events still count; they were signed
+        // while it was one of the account's.
+        let signer = {
+            let directory = self.directory.lock().unwrap();
+            let retired = self.retired.lock().unwrap();
+            directory
+                .get(&e.device_id)
+                .or_else(|| retired.get(&e.device_id))
+                .map(|r| r.signing_public.clone())
+        };
         let Some(signer) = signer else {
             tracing_skip("an event from a device the identity key didn't sign");
-            return false;
+            return Ingest::Dropped;
         };
         if e.verify(&signer).is_err() {
             tracing_skip("an event with a bad signature");
-            return false;
+            return Ingest::Dropped;
         }
-        let Ok(payload) = e.open(&self.list_key(&e.list_id)) else {
+        // Whichever version of the list's key it was made with, newest first.
+        let Some(payload) = self
+            .keyring(&e.list_id)
+            .iter()
+            .find_map(|(_, key)| e.open(key).ok())
+        else {
             tracing_skip("an event that could not be opened");
-            return false;
+            return Ingest::NoKey;
         };
         let signed_in = e.format <= hab_core::FORMAT_VERSION
             && e.device_id != self.device_id
@@ -390,11 +616,15 @@ impl Syncer {
                     // The new device needs the list key sealed to it.
                     self.reseal.store(true, Ordering::SeqCst);
                 }
-                new
+                if new {
+                    Ingest::New
+                } else {
+                    Ingest::Known
+                }
             }
             Err(_) => {
                 tracing_skip("an event that could not be read");
-                false
+                Ingest::Dropped
             }
         }
     }
@@ -455,7 +685,16 @@ impl Syncer {
         self.register_personal_list().await?;
         let mut socket = self.connect_ws().await?;
         // Connected before downloading, so an event can't fall between the two.
-        self.download().await?;
+        match self.download().await {
+            Ok(_) => {}
+            Err(SyncError::WaitingForKey) => {
+                // A device that signed in after a key was rotated has to tell
+                // the others it is there before they seal the key to it.
+                self.upload_unsent().await?;
+                return Err(SyncError::WaitingForKey);
+            }
+            Err(e) => return Err(e),
+        }
         self.reseal_if_needed().await?;
         self.set_status(true, None);
         let mut in_flight = HashSet::new();
@@ -521,6 +760,10 @@ impl Syncer {
             ServerMessage::Resync => {
                 self.download().await?;
             }
+            ServerMessage::KeysChanged => {
+                // A device was removed: the directory and the key changed.
+                self.load_keys().await?;
+            }
             ServerMessage::Event {
                 seq,
                 received_at,
@@ -537,7 +780,7 @@ impl Syncer {
                         envelope,
                     };
                     self.ensure_known(std::slice::from_ref(&n)).await?;
-                    self.ingest(&n);
+                    self.ingest_reloading(&n, &mut false).await?;
                     self.core().set_cursor(seq)?;
                     (self.on_change)();
                 } else {
@@ -575,6 +818,19 @@ impl Syncer {
             wait = (wait * 2).min(MAX_BACKOFF);
         }
     }
+}
+
+/// What became of one numbered event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ingest {
+    /// Applied; the device hadn't seen it.
+    New,
+    /// The device already had it.
+    Known,
+    /// Failed a check, and is left out.
+    Dropped,
+    /// No key this device has opens it.
+    NoKey,
 }
 
 /// An event that fails a check is dropped, and the others carry on.
