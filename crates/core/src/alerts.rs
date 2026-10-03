@@ -7,7 +7,10 @@
 
 use crate::{AlertStyle, Core, Millis, Result};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// How long before a known expiry the last-chance alert comes.
+pub const LAST_CHANCE: Millis = 10 * 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +21,8 @@ pub enum AlertKind {
     StyleChange,
     /// An insistent alert or alarm repeating at its interval.
     Repeat,
+    /// A known expiry falls inside the snooze, and is 10 minutes away.
+    LastChance,
 }
 
 /// Something for the platform to show.
@@ -29,6 +34,8 @@ pub struct Alert {
     /// The style to deliver now, after any Do Not Disturb downgrade.
     pub style: AlertStyle,
     pub overdue: bool,
+    /// For a last-chance alert: when the occurrence expires.
+    pub expires_at: Option<Millis>,
 }
 
 /// What a poll found: alerts to show, and notifications to take down because their
@@ -51,6 +58,7 @@ struct Shown {
 pub struct AlertEngine {
     device: String,
     shown: HashMap<String, Shown>,
+    last_chance_sent: HashSet<String>,
 }
 
 /// The style a priority calls for at `now`: its due style until the occurrence goes
@@ -74,6 +82,7 @@ impl AlertEngine {
         AlertEngine {
             device: device.to_string(),
             shown: HashMap::new(),
+            last_chance_sent: HashSet::new(),
         }
     }
 
@@ -93,17 +102,43 @@ impl AlertEngine {
             .collect();
         for id in gone {
             self.shown.remove(&id);
+            self.last_chance_sent.remove(&id);
             poll.dismissed.push(id);
         }
 
         for o in open {
             let settings = o.priority.settings();
             let nominal = nominal_style(&o, now);
-            let effective = if dnd && !settings.breaks_do_not_disturb {
+            let snoozed = o.snoozed_until.is_some_and(|until| now < until);
+            let dnd_here = dnd && !settings.breaks_do_not_disturb;
+            let effective = if snoozed || dnd_here {
                 AlertStyle::Silent
             } else {
                 nominal
             };
+
+            // A snooze can't silently turn into a miss: a known expiry inside it gets a
+            // last-chance alert, in the due style but never quieter than gentle.
+            if let (true, Some(expires), Some(until)) = (snoozed, o.expires_at, o.snoozed_until) {
+                if expires <= until
+                    && now >= expires.saturating_sub(LAST_CHANCE)
+                    && self.last_chance_sent.insert(o.id.clone())
+                {
+                    let style = if dnd_here {
+                        AlertStyle::Silent
+                    } else {
+                        settings.due_style.max(AlertStyle::Gentle)
+                    };
+                    poll.alerts.push(Alert {
+                        occurrence_id: o.id.clone(),
+                        title: o.title.clone(),
+                        kind: AlertKind::LastChance,
+                        style,
+                        overdue: now >= o.overdue_at,
+                        expires_at: Some(expires),
+                    });
+                }
+            }
             let overdue = now >= o.overdue_at;
             let kind = match self.shown.get(&o.id) {
                 None => Some(AlertKind::First),
@@ -135,6 +170,7 @@ impl AlertEngine {
                 kind,
                 style: effective,
                 overdue,
+                expires_at: None,
             });
         }
         Ok(poll)
@@ -156,6 +192,14 @@ impl AlertEngine {
             }
             if now < o.overdue_at {
                 consider(o.overdue_at);
+            }
+            if let Some(until) = o.snoozed_until.filter(|u| *u > now) {
+                consider(until);
+                if let Some(expires) = o.expires_at.filter(|e| *e <= until) {
+                    if !self.last_chance_sent.contains(&o.id) {
+                        consider(expires.saturating_sub(LAST_CHANCE).max(now));
+                    }
+                }
             }
             for step in &settings.overdue {
                 let at = o.overdue_at + step.after;

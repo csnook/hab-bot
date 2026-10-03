@@ -24,6 +24,8 @@ export interface Occurrence {
   fired_at: number;
   priority: Priority;
   overdue_at: number;
+  snoozed_until: number | null;
+  expires_at: number | null;
   status: "expected" | "due" | "completed" | "skipped" | "missed";
   closed_at: number | null;
 }
@@ -39,6 +41,8 @@ export interface NewReminder {
   /** A named time zone, or null for floating: the clock wherever the device is. */
   tz: string | null;
   priority: Priority;
+  /** How long after each scheduled time its occurrence expires, in milliseconds. */
+  expiry: number | null;
 }
 
 export interface InboxItem {
@@ -62,3 +66,10 @@ export const priorities = () => invoke<PrioritySettings[]>("priorities");
 export const about = () => invoke<string>("about");
 /** A notification was clicked: the occurrence to show. */
 export const onOpen = (f: (occurrenceId: string) => void) => listen<string>("open", (e) => f(e.payload));
+export interface SnoozePicker {
+  options: { label: string; until: number }[];
+  expires_at: number | null;
+}
+export const snooze = (occurrenceId: string) => invoke<number>("snooze", { occurrenceId });
+export const snoozeUntil = (occurrenceId: string, until: number) => invoke<void>("snooze_until", { occurrenceId, until });
+export const snoozePicker = (occurrenceId: string) => invoke<SnoozePicker | null>("snooze_picker", { occurrenceId });

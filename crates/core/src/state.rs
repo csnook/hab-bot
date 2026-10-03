@@ -40,6 +40,8 @@ pub struct Reminder {
     /// A named time zone, or `None` for floating: the clock wherever the device is.
     pub tz: Option<String>,
     pub priority: Priority,
+    /// How long after an instance's scheduled time its occurrence expires, if it does.
+    pub expiry: Option<Millis>,
     pub created_at: Millis,
     /// A one-off is finished once its occurrence is closed.
     pub finished: bool,
@@ -84,6 +86,11 @@ pub struct Occurrence {
     pub priority: Priority,
     /// When it goes (or went) overdue: the priority's due interval after the scheduled time.
     pub overdue_at: Millis,
+    /// Alerts are quiet until then. The occurrence stays open and still goes overdue.
+    pub snoozed_until: Option<Millis>,
+    /// When it expires, if the reminder has an expiry at a known time: its duration after
+    /// the scheduled time. Reaching it closes the occurrence as missed.
+    pub expires_at: Option<Millis>,
     pub status: OccurrenceStatus,
     pub completed_by: Option<String>,
     /// When it was closed: the recorded time for a completion, the time it was
@@ -112,6 +119,8 @@ pub struct State {
     reminders: BTreeMap<String, Reminder>,
     occurrences: BTreeMap<String, Occurrence>,
     fired: HashSet<(String, String)>,
+    /// Snoozes by occurrence, which may be set before it fires (snoozing ahead of time).
+    snoozes: BTreeMap<String, Millis>,
 }
 
 impl State {
@@ -131,6 +140,7 @@ impl State {
                 triggers,
                 tz,
                 priority,
+                expiry,
                 due_at,
                 created_at,
             } => {
@@ -147,6 +157,7 @@ impl State {
                         triggers,
                         tz: tz.clone(),
                         priority: *priority,
+                        expiry: *expiry,
                         created_at: *created_at,
                         finished: false,
                     },
@@ -162,10 +173,10 @@ impl State {
                 if self.occurrences.contains_key(occurrence_id) {
                     return;
                 }
-                let (title, priority) = self
+                let (title, priority, expiry) = self
                     .reminders
                     .get(reminder_id)
-                    .map(|r| (r.title.clone(), r.priority))
+                    .map(|r| (r.title.clone(), r.priority, r.expiry))
                     .unwrap_or_default();
                 self.fired
                     .insert((reminder_id.clone(), occurrence_id.clone()));
@@ -179,11 +190,29 @@ impl State {
                         fired_at: *fired_at,
                         priority,
                         overdue_at: priority.overdue_at(*scheduled_at),
+                        snoozed_until: self.snoozes.get(occurrence_id).copied(),
+                        expires_at: expiry.map(|e| scheduled_at + e),
                         status: OccurrenceStatus::Due,
                         completed_by: None,
                         closed_at: None,
                     },
                 );
+            }
+            Event::Snoozed {
+                occurrence_id,
+                until,
+                ..
+            } => {
+                self.snoozes.insert(occurrence_id.clone(), *until);
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    o.snoozed_until = Some(*until);
+                }
+            }
+            Event::SnoozeEnded { occurrence_id, .. } => {
+                self.snoozes.remove(occurrence_id);
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    o.snoozed_until = None;
+                }
             }
             Event::AlertChanged { .. } => {} // history only; no effect on the state
             Event::OccurrenceSkipped {
@@ -256,6 +285,14 @@ impl State {
 
     pub fn occurrences(&self) -> impl Iterator<Item = &Occurrence> {
         self.occurrences.values()
+    }
+
+    pub fn snoozes(&self) -> impl Iterator<Item = (&String, &Millis)> {
+        self.snoozes.iter()
+    }
+
+    pub fn snoozed_until(&self, occurrence_id: &str) -> Option<Millis> {
+        self.snoozes.get(occurrence_id).copied()
     }
 
     pub fn is_open(&self, id: &str) -> bool {

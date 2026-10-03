@@ -1435,6 +1435,7 @@ dependencies = [
 name = "hab-bot"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hab-core",
  "hostname",
  "iana-time-zone",

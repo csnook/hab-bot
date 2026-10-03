@@ -11,7 +11,7 @@ mod state;
 mod store;
 pub mod time;
 
-pub use alerts::{Alert, AlertEngine, AlertKind, Poll};
+pub use alerts::{Alert, AlertEngine, AlertKind, Poll, LAST_CHANCE};
 pub use priority::{all_settings, AlertStyle, Escalation, Priority, PrioritySettings};
 pub use state::{
     CountdownUnit, InboxItem, InboxSection, Occurrence, OccurrenceStatus, Reminder, State, Trigger,
@@ -57,6 +57,8 @@ pub enum Event {
         tz: Option<String>,
         #[serde(default)]
         priority: Priority,
+        #[serde(default)]
+        expiry: Option<Millis>,
         /// Only in events from the walking skeleton, before triggers existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         due_at: Option<Millis>,
@@ -92,12 +94,63 @@ pub enum Event {
         at: Millis,
         note: Option<String>,
     },
+    /// Alerts for an occurrence are quiet until `until`. It may be set ahead of time, on an
+    /// expected occurrence.
+    Snoozed {
+        occurrence_id: String,
+        until: Millis,
+        by: String,
+        at: Millis,
+        via: SnoozeVia,
+    },
+    /// A snooze ended: how it actually ended, next to what it was set to end on.
+    SnoozeEnded {
+        occurrence_id: String,
+        at: Millis,
+        how: SnoozeEnd,
+    },
     PriorityChanged {
         reminder_id: String,
         priority: Priority,
     },
     /// The app closed an occurrence nobody dealt with, because a newer instance fired.
     OccurrenceMissed { occurrence_id: String, at: Millis },
+}
+
+/// How a snooze was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnoozeVia {
+    Button,
+    /// Swiping a notification away (Android).
+    Swipe,
+}
+
+/// How a snooze actually ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnoozeEnd {
+    /// It ran out.
+    Elapsed,
+    /// Snoozed again, with no limit on repeats.
+    Replaced,
+    /// The occurrence closed.
+    Closed,
+}
+
+/// A way to snooze, as the picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnoozeOption {
+    pub label: String,
+    pub until: Millis,
+}
+
+/// What the snooze picker shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnoozePicker {
+    pub options: Vec<SnoozeOption>,
+    /// "expires at 23:59": a known expiry that falls inside the longest options.
+    pub expires_at: Option<Millis>,
 }
 
 /// What the UI sends to make a reminder.
@@ -109,6 +162,9 @@ pub struct NewReminder {
     pub tz: Option<String>,
     #[serde(default)]
     pub priority: Priority,
+    /// How long after each scheduled time its occurrence expires, if it does.
+    #[serde(default)]
+    pub expiry: Option<Millis>,
 }
 
 /// The identity of an occurrence: the reminder plus its instance's key.
@@ -175,6 +231,25 @@ impl Core {
     }
 
     pub(crate) fn record(&mut self, event: Event) -> Result<()> {
+        // Closing an occurrence ends its snooze.
+        if let Event::OccurrenceCompleted {
+            occurrence_id, at, ..
+        }
+        | Event::OccurrenceSkipped {
+            occurrence_id, at, ..
+        }
+        | Event::OccurrenceMissed { occurrence_id, at } = &event
+        {
+            if self.state.snoozed_until(occurrence_id).is_some() {
+                let ended = Event::SnoozeEnded {
+                    occurrence_id: occurrence_id.clone(),
+                    at: *at,
+                    how: SnoozeEnd::Closed,
+                };
+                self.store.append(PERSONAL_LIST, &ended)?;
+                self.state.apply(&ended);
+            }
+        }
         self.store.append(PERSONAL_LIST, &event)?;
         self.state.apply(&event);
         Ok(())
@@ -188,6 +263,7 @@ impl Core {
                 triggers: vec![Trigger::OneOff { at: due_at }],
                 tz: None,
                 priority: Priority::Medium,
+                expiry: None,
             },
             now,
         )
@@ -239,6 +315,7 @@ impl Core {
             triggers: new.triggers,
             tz: new.tz,
             priority: new.priority,
+            expiry: new.expiry,
             due_at: None,
             created_at: now,
         })?;
@@ -254,6 +331,8 @@ impl Core {
     ///   earlier ones are recorded as missed.
     /// - Overdue time and expiry count from the scheduled time, not from now.
     pub fn fire_due(&mut self, now: Millis) -> Result<Vec<Occurrence>> {
+        self.end_elapsed_snoozes(now)?;
+        self.expire_due(now)?;
         let mut opened = Vec::new();
         let ids: Vec<String> = self
             .state
@@ -360,6 +439,7 @@ impl Core {
                 if self.state.has_fired(&r.id, &id) {
                     continue;
                 }
+                let snoozed_until = self.state.snoozed_until(&id);
                 out.push(Occurrence {
                     id,
                     reminder_id: r.id.clone(),
@@ -368,6 +448,8 @@ impl Core {
                     fired_at: i.scheduled_at,
                     priority: r.priority,
                     overdue_at: r.priority.overdue_at(i.scheduled_at),
+                    snoozed_until,
+                    expires_at: r.expiry.map(|e| i.scheduled_at + e),
                     status: OccurrenceStatus::Expected,
                     completed_by: None,
                     closed_at: None,
@@ -409,6 +491,133 @@ impl Core {
             device: device.into(),
             at,
         })
+    }
+
+    /// The snooze one tap uses: the priority's current interval (1 day for Minimum and Low;
+    /// Medium 1 hour while due and 10 minutes once overdue; High and Maximum 10 minutes).
+    pub fn default_snooze_until(&self, occurrence_id: &str, now: Millis) -> Option<Millis> {
+        let o = self.open_or_expected(occurrence_id, now)?;
+        let s = o.priority.settings();
+        Some(
+            now + if now < o.overdue_at {
+                s.due_interval
+            } else {
+                s.overdue_interval
+            },
+        )
+    }
+
+    fn open_or_expected(&self, id: &str, now: Millis) -> Option<Occurrence> {
+        self.open_occurrences()
+            .into_iter()
+            .find(|o| o.id == id)
+            .or_else(|| {
+                self.expected(now, now.saturating_add(HORIZON))
+                    .into_iter()
+                    .find(|o| o.id == id)
+            })
+    }
+
+    /// What the snooze menu offers: the priority's interval, 1 hour and tomorrow morning
+    /// ("until a time" and "pick a time" are the UI's own pickers), and a known expiry.
+    pub fn snooze_picker(&self, occurrence_id: &str, now: Millis) -> Option<SnoozePicker> {
+        let o = self.open_or_expected(occurrence_id, now)?;
+        let interval = self.default_snooze_until(occurrence_id, now)?;
+        let tomorrow = time::wall_at(now, self.zone).date() + chrono::Duration::days(1);
+        let morning = time::resolve(tomorrow.and_hms_opt(8, 0, 0).expect("8:00"), self.zone);
+        let mut options = vec![SnoozeOption {
+            label: "Default".into(),
+            until: interval,
+        }];
+        for (label, until) in [("1 hour", now + 3_600_000), ("Tomorrow morning", morning)] {
+            if options.iter().all(|opt| opt.until != until) {
+                options.push(SnoozeOption {
+                    label: label.into(),
+                    until,
+                });
+            }
+        }
+        Some(SnoozePicker {
+            options,
+            expires_at: o.expires_at,
+        })
+    }
+
+    /// Snoozes an open or expected occurrence until `until`. An expected one still fires at
+    /// its time, quietly, and alerts when the snooze ends; its overdue time and expiry still
+    /// count from the scheduled time. There's no limit on repeated snoozes.
+    pub fn snooze(
+        &mut self,
+        occurrence_id: &str,
+        until: Millis,
+        via: SnoozeVia,
+        now: Millis,
+    ) -> Result<()> {
+        if self.open_or_expected(occurrence_id, now).is_none() {
+            return Err(Error::NoOpenOccurrence(occurrence_id.to_string()));
+        }
+        if until <= now {
+            return Err(Error::BadSchedule("a snooze must end in the future".into()));
+        }
+        if self.state.snoozed_until(occurrence_id).is_some() {
+            self.record(Event::SnoozeEnded {
+                occurrence_id: occurrence_id.into(),
+                at: now,
+                how: SnoozeEnd::Replaced,
+            })?;
+        }
+        self.record(Event::Snoozed {
+            occurrence_id: occurrence_id.into(),
+            until,
+            by: self.user.clone(),
+            at: now,
+            via,
+        })
+    }
+
+    /// One tap on Snooze. Returns when it ends.
+    pub fn snooze_default(
+        &mut self,
+        occurrence_id: &str,
+        via: SnoozeVia,
+        now: Millis,
+    ) -> Result<Millis> {
+        let until = self
+            .default_snooze_until(occurrence_id, now)
+            .ok_or_else(|| Error::NoOpenOccurrence(occurrence_id.to_string()))?;
+        self.snooze(occurrence_id, until, via, now)?;
+        Ok(until)
+    }
+
+    /// Records the end of snoozes that ran out.
+    fn end_elapsed_snoozes(&mut self, now: Millis) -> Result<()> {
+        let elapsed: Vec<(String, Millis)> = self
+            .state
+            .snoozes()
+            .filter(|(_, until)| **until <= now)
+            .map(|(id, until)| (id.clone(), *until))
+            .collect();
+        for (occurrence_id, until) in elapsed {
+            self.record(Event::SnoozeEnded {
+                occurrence_id,
+                at: until,
+                how: SnoozeEnd::Elapsed,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Closes occurrences whose expiry has passed as missed, at the expiry.
+    fn expire_due(&mut self, now: Millis) -> Result<()> {
+        let expired: Vec<(String, Millis)> = self
+            .open_occurrences()
+            .into_iter()
+            .filter_map(|o| o.expires_at.filter(|e| *e <= now).map(|e| (o.id, e)))
+            .collect();
+        for (occurrence_id, at) in expired {
+            self.record(Event::OccurrenceMissed { occurrence_id, at })?;
+        }
+        Ok(())
     }
 
     /// Skips an open occurrence: closed without doing it, by choice.

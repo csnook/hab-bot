@@ -3,7 +3,7 @@
 //! here. What to show and when is decided by the core's `AlertEngine`.
 
 use crate::App;
-use hab_core::{Alert, AlertStyle};
+use hab_core::{Alert, AlertKind, AlertStyle, SnoozeVia};
 use notify_rust::{Hint, Notification, Timeout, Urgency};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,11 +78,27 @@ pub fn dismiss(shown: &mut Shown, occurrence_id: &str) {
 /// - Insistent: gentle, repeated by the engine every interval.
 /// - Alarm: critical, never times out. The alarm window and looping sound come later.
 pub fn show(app: &AppHandle, shown: &mut Shown, alert: &Alert) {
+    let (summary, body) = match (alert.kind, alert.expires_at) {
+        (AlertKind::LastChance, Some(at)) => {
+            let at = chrono::DateTime::from_timestamp_millis(at)
+                .unwrap_or_default()
+                .with_timezone(&chrono::Local);
+            (
+                format!("Last chance: {}", alert.title),
+                format!("Expires at {}", at.format("%H:%M")),
+            )
+        }
+        _ => (
+            alert.title.clone(),
+            if alert.overdue { "Overdue" } else { "Due now" }.to_string(),
+        ),
+    };
     let mut n = Notification::new();
     n.appname("Reminders")
-        .summary(&alert.title)
-        .body(if alert.overdue { "Overdue" } else { "Due now" })
+        .summary(&summary)
+        .body(&body)
         .action("done", "Done")
+        .action("snooze", "Snooze")
         .action("skip", "Skip")
         .action("default", "Open");
     match alert.style {
@@ -131,6 +147,13 @@ pub fn show(app: &AppHandle, shown: &mut Shown, alert: &Alert) {
             match action {
                 "done" => {
                     let _ = crate::fresh(&state).complete(&occurrence_id, crate::now());
+                }
+                "snooze" => {
+                    let _ = crate::fresh(&state).snooze_default(
+                        &occurrence_id,
+                        SnoozeVia::Button,
+                        crate::now(),
+                    );
                 }
                 "skip" => {
                     let _ = crate::fresh(&state).skip(&occurrence_id, None, crate::now());

@@ -26,6 +26,30 @@ const PRIORITIES: api.Priority[] = ["minimum", "low", "medium", "high", "maximum
 
 const dayLabel = (i: number) => DAY_NAMES[i];
 
+/** Snooze: one tap uses the priority's interval; the menu lists the rest, and shows a known expiry. */
+function SnoozeButton({ id, onDone }: { id: string; onDone: () => void }) {
+  const [picker, setPicker] = useState<api.SnoozePicker | null>(null);
+  const [custom, setCustom] = useState("");
+  const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const until = (ms: number) => api.snoozeUntil(id, ms).then(() => { setPicker(null); onDone(); });
+  return (
+    <span class="snooze">
+      <button onClick={() => api.snooze(id).then(onDone)}>Snooze</button>
+      <button title="More snooze choices" onClick={() => (picker ? setPicker(null) : api.snoozePicker(id).then(setPicker))}>▾</button>
+      {picker && (
+        <span class="menu">
+          {picker.expires_at && <em>expires at {hhmm(picker.expires_at)}</em>}
+          {picker.options.map((o) => (
+            <button onClick={() => until(o.until)}>{o.label} ({hhmm(o.until)})</button>
+          ))}
+          <input type="datetime-local" value={custom} onInput={(e) => setCustom(e.currentTarget.value)} />
+          <button disabled={!custom} onClick={() => until(new Date(custom).getTime())}>Until…</button>
+        </span>
+      )}
+    </span>
+  );
+}
+
 function NewReminder({ onCreated }: { onCreated: () => void }) {
   const [title, setTitle] = useState("");
   const [when, setWhen] = useState(localInputValue(Date.now() + 60_000));
@@ -57,7 +81,7 @@ function NewReminder({ onCreated }: { onCreated: () => void }) {
           : r === null
           ? [{ kind: "one_off", at: first.getTime() }]
           : [when, ...extra].map((w) => ({ kind: "schedule", rule: r, start: wall(new Date(w)) }));
-      await api.createReminder({ title, triggers, priority, tz: pin && (r !== null || choice.pattern === "countdown") ? zone : null });
+      await api.createReminder({ title, triggers, priority, expiry: null, tz: pin && (r !== null || choice.pattern === "countdown") ? zone : null });
       setTitle("");
       setExtra([]);
       setError("");
@@ -247,7 +271,8 @@ function Inbox() {
                 </span>
                 <time>since {new Date(o.overdue_at).toLocaleString()}</time>
                 <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
-                <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
+                <SnoozeButton id={o.id} onDone={refresh} />
+              <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
               </li>
             ))}
           </ul>
@@ -262,6 +287,7 @@ function Inbox() {
               <span>{o.title}</span>
               <time>{new Date(o.scheduled_at).toLocaleString()}</time>
               <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
+              <SnoozeButton id={o.id} onDone={refresh} />
               <button onClick={() => api.skip(o.id).then(refresh)}>Skip</button>
             </li>
           ))}
@@ -276,6 +302,7 @@ function Inbox() {
                 <span>{o.title}</span>
                 <time>{hhmm(o.scheduled_at)}</time>
                 <button onClick={() => api.completeEarly(o.reminder_id).then(refresh)}>Done early</button>
+                <SnoozeButton id={o.id} onDone={refresh} />
               </li>
             ))}
           </ul>

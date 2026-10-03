@@ -62,6 +62,7 @@ fn create_one_off(app: tauri::State<App>, title: String, due_at: Millis) -> Resu
             triggers: vec![Trigger::OneOff { at: due_at }],
             tz: None,
             priority: Default::default(),
+            expiry: None,
         },
     )
 }
@@ -78,6 +79,31 @@ fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     #[cfg(target_os = "android")]
     android::schedule_alarm(core.next_due(now()));
     Ok(())
+}
+
+/// One tap on Snooze: the priority's current interval.
+#[tauri::command]
+fn snooze(app: tauri::State<App>, occurrence_id: String) -> Result<Millis, String> {
+    fresh(&app)
+        .snooze_default(&occurrence_id, hab_core::SnoozeVia::Button, now())
+        .map_err(|e| e.to_string())
+}
+
+/// Snoozes until a chosen time, for the menu's other choices and "pick a time".
+#[tauri::command]
+fn snooze_until(
+    app: tauri::State<App>,
+    occurrence_id: String,
+    until: Millis,
+) -> Result<(), String> {
+    fresh(&app)
+        .snooze(&occurrence_id, until, hab_core::SnoozeVia::Button, now())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn snooze_picker(app: tauri::State<App>, occurrence_id: String) -> Option<hab_core::SnoozePicker> {
+    fresh(&app).snooze_picker(&occurrence_id, now())
 }
 
 #[tauri::command]
@@ -251,6 +277,9 @@ pub fn run() {
             create_reminder,
             complete,
             skip,
+            snooze,
+            snooze_until,
+            snooze_picker,
             priorities,
             about,
             complete_early,

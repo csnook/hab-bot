@@ -233,6 +233,7 @@ mod schedules {
                 }],
                 tz: tz.map(String::from),
                 priority: Priority::Medium,
+                expiry: None,
             },
             created,
         )
@@ -355,6 +356,7 @@ mod schedules {
                 triggers: vec![rule("2026-10-05T08:00"), rule("2026-10-05T20:00")],
                 tz: None,
                 priority: Priority::Medium,
+                expiry: None,
             },
             at("UTC", 2026, 10, 5, 0, 0),
         )
@@ -447,6 +449,7 @@ mod schedules {
                 triggers: vec![rule("2026-10-05T08:00"), rule("2026-10-05T20:00")],
                 tz: None,
                 priority: Priority::Medium,
+                expiry: None,
             },
             at("UTC", 2026, 10, 5, 0, 0),
         )
@@ -487,6 +490,7 @@ mod schedules {
             }],
             tz: tz.map(String::from),
             priority: Priority::Medium,
+            expiry: None,
         };
         assert!(c.create(make("FREQ=NEVER", None), 0).is_err());
         assert!(c.create(make("FREQ=DAILY", Some("Mars/Base")), 0).is_err());
@@ -497,6 +501,7 @@ mod schedules {
                     triggers: vec![],
                     tz: None,
                     priority: Priority::Medium,
+                    expiry: None,
                 },
                 0
             )
@@ -543,6 +548,7 @@ mod countdowns {
                 }],
                 tz: None,
                 priority: Priority::Medium,
+                expiry: None,
             },
             now,
         )
@@ -682,6 +688,7 @@ mod countdowns {
             }],
             tz: None,
             priority: Priority::Medium,
+            expiry: None,
         };
         assert!(c.create(make(CountdownUnit::Days, 0, None), T0).is_err());
         assert!(c
@@ -707,6 +714,7 @@ mod priorities {
                 triggers: vec![Trigger::OneOff { at: T0 }],
                 tz: None,
                 priority,
+                expiry: None,
             },
             T0,
         )
@@ -805,6 +813,7 @@ mod priorities {
                     triggers: vec![Trigger::OneOff { at }],
                     tz: None,
                     priority,
+                    expiry: None,
                 },
                 T0,
             )
@@ -869,6 +878,7 @@ mod alert_tests {
                 triggers: vec![Trigger::OneOff { at: T0 }],
                 tz: None,
                 priority,
+                expiry: None,
             },
             T0,
         )
@@ -1083,5 +1093,248 @@ mod alert_tests {
             c.skip(&id, None, T0 + 6),
             Err(Error::NoOpenOccurrence(_))
         ));
+    }
+}
+
+mod snooze_tests {
+    use super::*;
+
+    const MINUTE: Millis = 60_000;
+    const HOUR: Millis = 60 * MINUTE;
+    const DAY: Millis = 24 * HOUR;
+
+    fn setup(priority: Priority, expiry: Option<Millis>) -> (Core, AlertEngine, String) {
+        let mut c = core();
+        c.create(
+            NewReminder {
+                title: "Call the plumber".into(),
+                triggers: vec![Trigger::OneOff { at: T0 }],
+                tz: None,
+                priority,
+                expiry,
+            },
+            T0,
+        )
+        .unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        (c, AlertEngine::new("laptop"), id)
+    }
+
+    #[test]
+    fn one_tap_uses_the_priority_s_current_interval() {
+        for (priority, now, want) in [
+            (Priority::Minimum, T0, DAY),
+            (Priority::Low, T0, DAY),
+            (Priority::Medium, T0, HOUR),                   // due
+            (Priority::Medium, T0 + 2 * HOUR, 10 * MINUTE), // overdue
+            (Priority::High, T0, 10 * MINUTE),
+            (Priority::Maximum, T0, 10 * MINUTE),
+        ] {
+            let (mut c, _, id) = setup(priority, None);
+            let until = c.snooze_default(&id, SnoozeVia::Button, now).unwrap();
+            assert_eq!(until, now + want, "{priority:?}");
+            assert_eq!(
+                c.state().occurrence(&id).unwrap().snoozed_until,
+                Some(until)
+            );
+        }
+    }
+
+    #[test]
+    fn the_picker_offers_interval_one_hour_and_tomorrow_morning() {
+        let (c, _, id) = setup(Priority::Low, None);
+        let p = c.snooze_picker(&id, T0).unwrap();
+        let labels: Vec<_> = p.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Default", "1 hour", "Tomorrow morning"]);
+        assert_eq!(p.options[0].until, T0 + DAY);
+        assert_eq!(p.options[1].until, T0 + HOUR);
+        assert!(p.options[2].until > T0 + HOUR);
+        assert_eq!(p.expires_at, None);
+        // Medium's interval is already an hour: no duplicate
+        let (c, _, id) = setup(Priority::Medium, None);
+        let labels: Vec<_> = c
+            .snooze_picker(&id, T0)
+            .unwrap()
+            .options
+            .into_iter()
+            .map(|o| o.label)
+            .collect();
+        assert_eq!(labels, ["Default", "Tomorrow morning"]);
+    }
+
+    #[test]
+    fn the_picker_shows_a_known_expiry() {
+        let (c, _, id) = setup(Priority::Medium, Some(5 * HOUR));
+        assert_eq!(
+            c.snooze_picker(&id, T0).unwrap().expires_at,
+            Some(T0 + 5 * HOUR)
+        );
+    }
+
+    #[test]
+    fn a_snoozed_occurrence_stays_open_and_quiet_then_alerts_at_its_current_level() {
+        let (mut c, mut e, id) = setup(Priority::Medium, None);
+        e.poll(&mut c, T0, false).unwrap(); // gentle
+        c.snooze(&id, T0 + 3 * HOUR, SnoozeVia::Button, T0 + MINUTE)
+            .unwrap();
+        // it goes overdue on schedule, quietly; the alarm step comes and goes unheard
+        let p = e.poll(&mut c, T0 + HOUR + 30 * MINUTE, false).unwrap();
+        assert!(p.alerts.iter().all(|a| a.style == AlertStyle::Silent));
+        assert!(c.open_occurrences()[0].overdue_at <= T0 + HOUR + 30 * MINUTE);
+        assert!(c.state().is_open(&id));
+        // the snooze ends: alerts at its current level, the alarm
+        let p = e.poll(&mut c, T0 + 3 * HOUR, false).unwrap();
+        assert_eq!(p.alerts.len(), 1);
+        assert_eq!(p.alerts[0].style, AlertStyle::Alarm);
+    }
+
+    #[test]
+    fn each_snooze_is_recorded_with_what_it_was_set_to_end_on_and_how_it_ended() {
+        let (mut c, _, id) = setup(Priority::Medium, None);
+        c.snooze(&id, T0 + HOUR, SnoozeVia::Button, T0 + 1).unwrap();
+        // snoozed again before it ended; repeats are unlimited
+        c.snooze(&id, T0 + 2 * HOUR, SnoozeVia::Swipe, T0 + 2)
+            .unwrap();
+        c.fire_due(T0 + 2 * HOUR).unwrap(); // the second one runs out
+        c.snooze(&id, T0 + 3 * HOUR, SnoozeVia::Button, T0 + 2 * HOUR + 1)
+            .unwrap();
+        c.complete(&id, T0 + 2 * HOUR + 2).unwrap(); // and the third is ended by closing
+        let record: Vec<_> = c
+            .history()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Snoozed { until, via, .. } => {
+                    Some(format!("set until {} via {via:?}", until - T0))
+                }
+                Event::SnoozeEnded { how, at, .. } => Some(format!("ended {how:?} at {}", at - T0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            record,
+            [
+                format!("set until {} via Button", HOUR),
+                format!("ended Replaced at {}", 2),
+                format!("set until {} via Swipe", 2 * HOUR),
+                format!("ended Elapsed at {}", 2 * HOUR),
+                format!("set until {} via Button", 3 * HOUR),
+                format!("ended Closed at {}", 2 * HOUR + 2),
+            ]
+        );
+        assert_eq!(c.state().occurrence(&id).unwrap().snoozed_until, None);
+    }
+
+    #[test]
+    fn a_snooze_must_end_in_the_future() {
+        let (mut c, _, id) = setup(Priority::Medium, None);
+        assert!(c.snooze(&id, T0, SnoozeVia::Button, T0).is_err());
+        assert!(c.snooze("nope", T0 + HOUR, SnoozeVia::Button, T0).is_err());
+    }
+
+    #[test]
+    fn a_known_expiry_inside_the_snooze_gets_a_last_chance_alert_10_minutes_before() {
+        let (mut c, mut e, id) = setup(Priority::Low, Some(2 * HOUR));
+        e.poll(&mut c, T0, false).unwrap();
+        c.snooze(&id, T0 + DAY, SnoozeVia::Button, T0 + MINUTE)
+            .unwrap();
+        // snoozing quiets the notification already showing
+        let quiet = e.poll(&mut c, T0 + MINUTE, false).unwrap();
+        assert_eq!(
+            quiet.alerts.iter().map(|a| a.style).collect::<Vec<_>>(),
+            [AlertStyle::Silent]
+        );
+        assert!(e
+            .poll(&mut c, T0 + 2 * HOUR - 11 * MINUTE, false)
+            .unwrap()
+            .alerts
+            .is_empty());
+        let p = e.poll(&mut c, T0 + 2 * HOUR - 10 * MINUTE, false).unwrap();
+        assert_eq!(p.alerts.len(), 1);
+        let a = &p.alerts[0];
+        assert_eq!(
+            (a.kind, a.expires_at),
+            (AlertKind::LastChance, Some(T0 + 2 * HOUR))
+        );
+        // Low's due style is gentle; never quieter than that
+        assert_eq!(a.style, AlertStyle::Gentle);
+        // once only
+        assert!(e
+            .poll(&mut c, T0 + 2 * HOUR - 5 * MINUTE, false)
+            .unwrap()
+            .alerts
+            .is_empty());
+        // then the expiry applies: missed at the expiry
+        c.fire_due(T0 + 2 * HOUR).unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!(
+            (o.status, o.closed_at),
+            (OccurrenceStatus::Missed, Some(T0 + 2 * HOUR))
+        );
+    }
+
+    #[test]
+    fn last_chance_is_never_quieter_than_gentle_even_for_minimum() {
+        let (mut c, mut e, id) = setup(Priority::Minimum, Some(HOUR));
+        e.poll(&mut c, T0, false).unwrap();
+        c.snooze(&id, T0 + DAY, SnoozeVia::Button, T0 + 1).unwrap();
+        let p = e.poll(&mut c, T0 + 50 * MINUTE, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Gentle);
+    }
+
+    #[test]
+    fn a_snooze_that_ends_before_the_expiry_needs_no_last_chance() {
+        let (mut c, mut e, id) = setup(Priority::Low, Some(5 * HOUR));
+        e.poll(&mut c, T0, false).unwrap();
+        c.snooze(&id, T0 + HOUR, SnoozeVia::Button, T0 + 1).unwrap();
+        let kinds: Vec<_> = (0..=6)
+            .flat_map(|h| e.poll(&mut c, T0 + h * HOUR, false).unwrap().alerts)
+            .map(|a| a.kind)
+            .collect();
+        assert!(!kinds.contains(&AlertKind::LastChance));
+    }
+
+    #[test]
+    fn an_expected_occurrence_can_be_snoozed_ahead_of_time() {
+        let mut c = core();
+        c.set_zone("UTC");
+        let start = T0 - (T0 % DAY) + DAY + 7 * HOUR; // 7:00 UTC the next day
+        let rid = c
+            .create(
+                NewReminder {
+                    title: "Medicine".into(),
+                    triggers: vec![Trigger::Schedule {
+                        rule: "FREQ=DAILY".into(),
+                        start: crate::time::format_wall(crate::time::wall_at(
+                            start,
+                            chrono_tz::UTC,
+                        )),
+                    }],
+                    tz: None,
+                    priority: Priority::Medium,
+                    expiry: Some(4 * HOUR),
+                },
+                T0,
+            )
+            .unwrap();
+        let expected = c.expected(T0, T0 + 2 * DAY).remove(0);
+        assert_eq!(expected.reminder_id, rid);
+        // "make the 7:00 medicine 7:30"
+        c.snooze(&expected.id, start + 30 * MINUTE, SnoozeVia::Button, T0)
+            .unwrap();
+        assert_eq!(
+            c.expected(T0, T0 + 2 * DAY)[0].snoozed_until,
+            Some(start + 30 * MINUTE)
+        );
+        let mut e = AlertEngine::new("laptop");
+        // it fires at 7:00, quietly, into the lists
+        let fired = c.fire_due(start).unwrap();
+        assert_eq!(fired[0].snoozed_until, Some(start + 30 * MINUTE));
+        let p = e.poll(&mut c, start, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Silent);
+        // and alerts at 7:30
+        let p = e.poll(&mut c, start + 30 * MINUTE, false).unwrap();
+        assert_eq!(p.alerts[0].style, AlertStyle::Gentle);
+        // its expiry still counts from the scheduled time
+        assert_eq!(c.open_occurrences()[0].expires_at, Some(start + 4 * HOUR));
     }
 }
