@@ -14,9 +14,11 @@ Commands:
   fmt     Format the Rust code
   check   lint, then test (what CI runs)
   run     Build the UI, then run the desktop app
+  server  Run the sync server (arguments after `server` go to it, see --help)
   ui      Install the UI's packages if needed and build it to ui/dist
 
-Extra arguments after `build` or `run` are passed to cargo.";
+Extra arguments after `build` or `run` are passed to cargo.
+Build and test cover the server too, as part of the workspace.";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -84,6 +86,11 @@ fn main() {
         Some("run") => {
             ui_build();
             let mut a = vec!["run", "--package", "hab-app"];
+            a.extend(&rest);
+            cargo(&a);
+        }
+        Some("server") => {
+            let mut a = vec!["run", "--package", "hab-server", "--"];
             a.extend(&rest);
             cargo(&a);
         }

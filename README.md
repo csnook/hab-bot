@@ -9,6 +9,7 @@ This is the walking skeleton: on the Linux desktop, with no server, you can crea
 | Path | What |
 |---|---|
 | `crates/core` | `hab-core`: events, state, firing and SQLite storage |
+| `crates/server` | `hab-server`: the sync server (HTTPS, self-signed certificate, setup code, SQLite) |
 | `app/src-tauri` | `hab-app`: the Tauri 2 desktop app (tray, scheduler, notifications) |
 | `ui` | the Preact and TypeScript UI |
 | `xtask` | `cargo xtask`, the single entry point below |
@@ -32,6 +33,7 @@ Everything goes through `cargo xtask`. It installs the UI's packages when they'r
 | Command | Does |
 |---|---|
 | `cargo xtask run` | build the UI, then run the desktop app |
+| `cargo xtask server [options]` | run the sync server (see below) |
 | `cargo xtask build` | build the UI and the whole workspace (add `--release` for release) |
 | `cargo xtask test` | Rust tests (`cargo test --workspace`) and UI tests (vitest) |
 | `cargo xtask lint` | `cargo fmt --check`, `clippy -D warnings`, and the UI's type-check |
@@ -45,3 +47,18 @@ Fill in the form (title, date, time) and press Create. At that time an occurrenc
 Closing the window hides it and leaves the app running in the tray, where reminders still fire. Use **Quit** in the tray menu to exit. On Linux Tauri doesn't report tray clicks, so use **Open Reminders** in the tray menu to bring the window back. Starting the app a second time raises the running one.
 
 Every change is stored as an event in the personal list's stream in `~/.local/share/io.github.csnook.hab-bot/hab-bot.db` (set `HAB_BOT_DB` to use another file). On start the state is rebuilt from the stream, and a reminder whose time passed while the app was closed fires then.
+
+## The sync server
+
+`cargo xtask server -- --help` lists the options; each has an `HAB_SERVER_*` environment variable too. For example, to try it without privileges:
+
+```sh
+cargo xtask server --data-dir /tmp/hab-server --listen 127.0.0.1:8443
+```
+
+- **State** is one SQLite file, `hab-server.db`, in the data folder (default: the current folder). It holds the certificate and its private key, so the file is made readable by its owner only.
+- **One HTTPS listener**, on `0.0.0.0:443` unless `--listen` (or `--address` and `--port`) says otherwise.
+- **The certificate** is self-signed, made on first start and kept. Its SHA-256 fingerprint is printed at every start, for invites to carry.
+- **The setup code** is printed in the console only. It stops working after 24 hours or once the first account exists, and a restart makes a new one.
+- **IP addresses** are held in memory for open connections and appear in the log only with `--debug`.
+- `GET /api/v1/info` returns `{"name": ..., "version": ...}`, for an app to confirm before joining.
