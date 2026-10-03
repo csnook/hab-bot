@@ -61,6 +61,21 @@ const SETTINGS_GAVE_WAY_TEXT: &str =
 const PERSONAL_SETTING: &str = "personal_setting:";
 const DEVICE_SETTING: &str = "device_setting:";
 
+/// An open occurrence as the alarm window shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OccurrenceView {
+    pub occurrence_id: String,
+    pub title: String,
+    /// The list's name; `None` for the personal list.
+    pub list_name: Option<String>,
+    pub priority: Priority,
+    /// When it was due.
+    pub scheduled_at: i64,
+    pub overdue_at: i64,
+    pub snoozed_until: Option<i64>,
+    pub acknowledged_at: Option<i64>,
+}
+
 /// A reminder list this device holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ListInfo {
@@ -880,6 +895,50 @@ impl Core {
             },
         )?;
         Ok(())
+    }
+
+    /// One tap on Snooze: quiets an open occurrence's alerts for its
+    /// priority's snooze length (see `PrioritySettings::snooze_length`).
+    /// Returns when the snooze ends.
+    pub fn snooze_for_interval(&mut self, occurrence_id: &str, now: i64) -> Result<i64> {
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        let item = self
+            .state_of(&list_id)
+            .and_then(|s| s.due().into_iter().find(|d| d.occurrence_id == id))
+            .ok_or_else(|| Error::NotOpen(occurrence_id.to_string()))?;
+        let until = now
+            + item
+                .priority
+                .settings()
+                .snooze_length(item.overdue_at <= now);
+        self.snooze(occurrence_id, until, now)?;
+        Ok(until)
+    }
+
+    /// What the alarm window shows about an occurrence, or `None` once it is
+    /// closed (or unknown).
+    pub fn occurrence_view(&self, occurrence_id: &str) -> Option<OccurrenceView> {
+        for (list_id, state) in self.states() {
+            let id = state.resolve(occurrence_id).to_string();
+            if let Some(d) = state.due().into_iter().find(|d| d.occurrence_id == id) {
+                let list_name = if list_id == self.list_id {
+                    None
+                } else {
+                    state.list_name.clone()
+                };
+                return Some(OccurrenceView {
+                    occurrence_id: d.occurrence_id,
+                    title: d.title,
+                    list_name,
+                    priority: d.priority,
+                    scheduled_at: d.scheduled_at,
+                    overdue_at: d.overdue_at,
+                    snoozed_until: d.snoozed_until,
+                    acknowledged_at: d.acknowledged_at,
+                });
+            }
+        }
+        None
     }
 
     /// Silences an open occurrence's current alert on all of the user's devices.

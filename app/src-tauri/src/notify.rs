@@ -14,30 +14,46 @@
 //! - [`Delivery`] carries out the [`Command`]s that `hab_core::Alerter` decides
 //!   on, remembers which notification id belongs to which occurrence (so a
 //!   repeat replaces the one on screen), and turns signals into
-//!   [`UserAction`]s.
+//!   [`UserAction`]s. It is also where an alarm happens: the same `Show` that
+//!   raises the critical notification starts the looping [`Sound`] and opens
+//!   the alarm window, and anything that ends the alarm (the occurrence
+//!   closing, an action, closing the notification, closing the window) ends
+//!   all three together.
 //! - [`listen`] runs a thread that turns the server's signals into
 //!   [`Signal`]s.
 //!
 //! What each part of the freedesktop.org spec is used for:
-//! - actions: `default` (a click on the notification), `done` and `skip`;
-//! - hints: `urgency` (low for silent, normal otherwise), `desktop-entry`,
-//!   `sound-name` from the sound theme (or `suppress-sound`), no `resident`
-//!   (so the server closes it after an action) and no `transient` (so a gentle
-//!   one settles into the server's list);
-//! - `expire_timeout`, so a gentle notification times out;
+//! - actions: `default` (a click on the notification), `done`, `snooze` and
+//!   `skip` (or, on an alarm, `acknowledge`);
+//! - hints: `urgency` (low for silent, normal for gentle and insistent,
+//!   critical for an alarm), `desktop-entry`, `sound-name` from the sound
+//!   theme (or `suppress-sound`, which an alarm always sets because the app
+//!   plays its own looping sound), no `resident` (so the server closes it
+//!   after an action) and no `transient` (so a gentle one settles into the
+//!   server's list);
+//! - `expire_timeout`: a gentle notification times out, an alarm never does;
+//! - the `ActivationToken` signal, which gives the xdg-activation token of
+//!   the click on a notification, so that opening the alarm window from it is
+//!   allowed to take focus on Wayland;
 //! - `Inhibited`, which Plasma implements. GNOME doesn't expose it, so there
 //!   its "Do Not Disturb" switch (`show-banners` off) is read from gsettings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use hab_core::{Command, Notification, Urgency, ACTION_DONE, ACTION_OPEN, ACTION_SKIP};
+use hab_core::{
+    AlertStyle, Command, Notification, Urgency, ACTION_ACKNOWLEDGE, ACTION_DONE, ACTION_OPEN,
+    ACTION_SKIP, ACTION_SNOOZE,
+};
+
+use crate::alarm::{Activation, AlarmWindows};
+use crate::sound::Sound;
 
 /// The name the notification shows for the app.
 const APP_NAME: &str = "Reminders";
 /// The desktop file the notification belongs to, which is also the Tauri
 /// identifier.
-const DESKTOP_ENTRY: &str = "io.github.csnook.hab-bot";
+pub const DESKTOP_ENTRY: &str = "io.github.csnook.hab-bot";
 
 /// What the app can ask of a notification server.
 pub trait Notifier: Send {
@@ -58,6 +74,12 @@ pub enum Signal {
     Closed {
         id: u32,
     },
+    /// The xdg-activation token of the click that is about to invoke an
+    /// action on the notification.
+    ActivationToken {
+        id: u32,
+        token: String,
+    },
     /// The server's properties changed, which may be Do Not Disturb.
     PropertiesChanged,
 }
@@ -67,6 +89,10 @@ pub enum Signal {
 pub enum UserAction {
     Done(String),
     Skip(String),
+    /// One tap on Snooze: for the priority's snooze length.
+    Snooze(String),
+    /// Silence the current alert without closing the occurrence.
+    Acknowledge(String),
     /// Clicked: open the occurrence.
     Open(String),
 }
@@ -85,17 +111,43 @@ impl Ids {
     }
 }
 
+/// Which occurrences have an alarm up, and which of those are ringing.
+#[derive(Default)]
+struct Alarms {
+    /// Alarms with a notification and a window up.
+    up: HashSet<String>,
+    /// Alarms whose sound is on. One loop serves them all.
+    ringing: HashSet<String>,
+}
+
 /// Carries out alert commands and understands what comes back.
 pub struct Delivery {
     notifier: Mutex<Box<dyn Notifier>>,
     ids: Mutex<Ids>,
+    alarms: Mutex<Alarms>,
+    sound: Mutex<Box<dyn Sound>>,
+    windows: Box<dyn AlarmWindows>,
+    activation: Box<dyn Activation>,
+    /// The token of the last click on one of our notifications, until the
+    /// action it led to has used it.
+    click_token: Mutex<Option<String>>,
 }
 
 impl Delivery {
-    pub fn new(notifier: Box<dyn Notifier>) -> Self {
+    pub fn new(
+        notifier: Box<dyn Notifier>,
+        sound: Box<dyn Sound>,
+        windows: Box<dyn AlarmWindows>,
+        activation: Box<dyn Activation>,
+    ) -> Self {
         Delivery {
             notifier: Mutex::new(notifier),
             ids: Mutex::new(Ids::default()),
+            alarms: Mutex::new(Alarms::default()),
+            sound: Mutex::new(sound),
+            windows,
+            activation,
+            click_token: Mutex::new(None),
         }
     }
 
@@ -107,24 +159,13 @@ impl Delivery {
         for c in commands {
             match c {
                 Command::Show(n) => {
-                    let replaces = self
-                        .ids
-                        .lock()
-                        .unwrap()
-                        .by_occurrence
-                        .get(&n.occurrence_id)
-                        .copied();
-                    let shown = self.notifier.lock().unwrap().show(n, replaces);
-                    match shown {
-                        Ok(id) => {
-                            let mut ids = self.ids.lock().unwrap();
-                            if let Some(old) = ids.by_occurrence.insert(n.occurrence_id.clone(), id)
-                            {
-                                ids.by_id.remove(&old);
-                            }
-                            ids.by_id.insert(id, n.occurrence_id.clone());
-                        }
-                        Err(e) => eprintln!("notification failed: {e}"),
+                    self.show(n);
+                    if n.style == AlertStyle::Alarm {
+                        self.ring(&n.occurrence_id);
+                    } else {
+                        // An alarm that is now quieter (Do Not Disturb came
+                        // on) is over: its sound and window go.
+                        self.end_alarm(&n.occurrence_id);
                     }
                 }
                 Command::Close { occurrence_id } => {
@@ -132,29 +173,147 @@ impl Delivery {
                     if let Some(id) = id {
                         self.notifier.lock().unwrap().close(id);
                     }
+                    self.end_alarm(occurrence_id);
+                }
+                Command::StopRinging { occurrence_id } => {
+                    self.alarms.lock().unwrap().ringing.remove(occurrence_id);
+                    self.update_sound();
                 }
             }
         }
     }
 
+    fn show(&self, n: &Notification) {
+        let replaces = self
+            .ids
+            .lock()
+            .unwrap()
+            .by_occurrence
+            .get(&n.occurrence_id)
+            .copied();
+        let shown = self.notifier.lock().unwrap().show(n, replaces);
+        match shown {
+            Ok(id) => {
+                let mut ids = self.ids.lock().unwrap();
+                if let Some(old) = ids.by_occurrence.insert(n.occurrence_id.clone(), id) {
+                    ids.by_id.remove(&old);
+                }
+                ids.by_id.insert(id, n.occurrence_id.clone());
+            }
+            Err(e) => eprintln!("notification failed: {e}"),
+        }
+    }
+
+    /// An alarm alerts: the sound loops, and the window comes up (and is
+    /// raised again at each repeat).
+    fn ring(&self, occurrence_id: &str) {
+        {
+            let mut alarms = self.alarms.lock().unwrap();
+            alarms.up.insert(occurrence_id.to_string());
+            alarms.ringing.insert(occurrence_id.to_string());
+        }
+        self.update_sound();
+        let token = self.activation.token();
+        self.windows.open(occurrence_id, token.as_deref());
+    }
+
+    /// Turns the sound on while any alarm rings, and off when none does.
+    fn update_sound(&self) {
+        let ringing = !self.alarms.lock().unwrap().ringing.is_empty();
+        let mut sound = self.sound.lock().unwrap();
+        if ringing {
+            sound.start();
+        } else {
+            sound.stop();
+        }
+    }
+
+    /// Ends an alarm's sound and window (not its notification).
+    fn end_alarm(&self, occurrence_id: &str) {
+        let was_up = {
+            let mut alarms = self.alarms.lock().unwrap();
+            alarms.ringing.remove(occurrence_id);
+            alarms.up.remove(occurrence_id)
+        };
+        self.update_sound();
+        if was_up {
+            self.windows.close(occurrence_id);
+        }
+    }
+
+    /// Closing the alarm window or its notification silences both, and the
+    /// sound. It isn't acting on the occurrence: the alerter rings again at
+    /// the next repeat. `window_closed` is true when the window is already
+    /// going away.
+    pub fn silence(&self, occurrence_id: &str, window_closed: bool) {
+        let id = self.ids.lock().unwrap().forget(occurrence_id);
+        if let Some(id) = id {
+            self.notifier.lock().unwrap().close(id);
+        }
+        if window_closed {
+            let mut alarms = self.alarms.lock().unwrap();
+            alarms.up.remove(occurrence_id);
+            alarms.ringing.remove(occurrence_id);
+            drop(alarms);
+            self.update_sound();
+        } else {
+            self.end_alarm(occurrence_id);
+        }
+    }
+
+    /// Whether an alarm for the occurrence is up.
+    pub fn is_alarm(&self, occurrence_id: &str) -> bool {
+        self.alarms.lock().unwrap().up.contains(occurrence_id)
+    }
+
+    /// Raises the occurrence's alarm window, if it has one, with the token of
+    /// the click that asked (or a fresh one). Returns whether there was one.
+    pub fn raise_alarm(&self, occurrence_id: &str) -> bool {
+        if !self.is_alarm(occurrence_id) {
+            return false;
+        }
+        let token = self.take_click_token().or_else(|| self.activation.token());
+        self.windows.open(occurrence_id, token.as_deref());
+        true
+    }
+
+    /// The xdg-activation token of the last click on a notification, once.
+    pub fn take_click_token(&self) -> Option<String> {
+        self.click_token.lock().unwrap().take()
+    }
+
     /// What a signal means for the app, if it is about one of our
     /// notifications. A closed notification is forgotten: dismissing it is
-    /// not acting on the occurrence, so the next repeat shows a new one.
+    /// not acting on the occurrence, so the next repeat shows a new one. If
+    /// it was an alarm's, the sound stops and the window closes with it.
     pub fn on_signal(&self, signal: &Signal) -> Option<UserAction> {
-        let mut ids = self.ids.lock().unwrap();
         match signal {
             Signal::ActionInvoked { id, key } => {
-                let occurrence = ids.by_id.get(id)?.clone();
+                let occurrence = self.ids.lock().unwrap().by_id.get(id)?.clone();
                 match key.as_str() {
                     ACTION_DONE => Some(UserAction::Done(occurrence)),
                     ACTION_SKIP => Some(UserAction::Skip(occurrence)),
+                    ACTION_SNOOZE => Some(UserAction::Snooze(occurrence)),
+                    ACTION_ACKNOWLEDGE => Some(UserAction::Acknowledge(occurrence)),
                     ACTION_OPEN => Some(UserAction::Open(occurrence)),
                     _ => None,
                 }
             }
             Signal::Closed { id } => {
-                if let Some(occurrence) = ids.by_id.remove(id) {
+                let occurrence = {
+                    let mut ids = self.ids.lock().unwrap();
+                    let occurrence = ids.by_id.remove(id)?;
                     ids.by_occurrence.remove(&occurrence);
+                    occurrence
+                };
+                if self.is_alarm(&occurrence) {
+                    self.end_alarm(&occurrence);
+                }
+                None
+            }
+            Signal::ActivationToken { id, token } => {
+                if self.ids.lock().unwrap().by_id.contains_key(id) {
+                    *self.click_token.lock().unwrap() = Some(token.clone());
                 }
                 None
             }
@@ -365,6 +524,11 @@ fn listen_loop(address: Option<&str>, on_signal: &mut dyn FnMut(Signal)) -> Resu
                 .deserialize::<(u32, u32)>()
                 .ok()
                 .map(|(id, _reason)| Signal::Closed { id }),
+            Some("ActivationToken") => message
+                .body()
+                .deserialize::<(u32, String)>()
+                .ok()
+                .map(|(id, token)| Signal::ActivationToken { id, token }),
             Some("PropertiesChanged") => Some(Signal::PropertiesChanged),
             _ => None,
         };
@@ -379,6 +543,7 @@ fn listen_loop(address: Option<&str>, on_signal: &mut dyn FnMut(Signal)) -> Resu
 mod tests {
     use super::*;
     use hab_core::AlertStyle;
+    use std::sync::Arc;
 
     #[derive(Default)]
     struct Fake {
@@ -407,6 +572,9 @@ mod tests {
     }
 
     fn note(occ: &str, style: AlertStyle) -> Notification {
+        if style == AlertStyle::Alarm {
+            return alarm(occ);
+        }
         Notification {
             occurrence_id: occ.into(),
             title: "Water".into(),
@@ -415,13 +583,110 @@ mod tests {
             urgency: Urgency::Normal,
             sound: Some("message-new-instant"),
             timeout_ms: 10_000,
-            actions: vec![(ACTION_DONE, "Done"), (ACTION_SKIP, "Skip")],
+            actions: vec![
+                (ACTION_DONE, "Done"),
+                (ACTION_SNOOZE, "Snooze"),
+                (ACTION_SKIP, "Skip"),
+            ],
+        }
+    }
+
+    fn alarm(occ: &str) -> Notification {
+        Notification {
+            occurrence_id: occ.into(),
+            title: "Meds".into(),
+            body: "Overdue".into(),
+            style: AlertStyle::Alarm,
+            urgency: Urgency::Critical,
+            sound: None,
+            timeout_ms: 0,
+            actions: vec![
+                (ACTION_DONE, "Done"),
+                (ACTION_SNOOZE, "Snooze"),
+                (ACTION_ACKNOWLEDGE, "Acknowledge"),
+            ],
+        }
+    }
+
+    /// What the fake sound and window were asked, in order, plus tokens.
+    #[derive(Default)]
+    struct Log {
+        events: Vec<String>,
+        playing: bool,
+    }
+
+    #[derive(Clone, Default)]
+    struct Platform(Arc<Mutex<Log>>);
+
+    impl Platform {
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().events.clone()
+        }
+        fn playing(&self) -> bool {
+            self.0.lock().unwrap().playing
+        }
+    }
+
+    struct FakeSound(Platform);
+    impl Sound for FakeSound {
+        fn start(&mut self) {
+            let mut l = (self.0).0.lock().unwrap();
+            if !l.playing {
+                l.events.push("sound start".into());
+            }
+            l.playing = true;
+        }
+        fn stop(&mut self) {
+            let mut l = (self.0).0.lock().unwrap();
+            if l.playing {
+                l.events.push("sound stop".into());
+            }
+            l.playing = false;
+        }
+    }
+
+    struct FakeWindows(Platform);
+    impl AlarmWindows for FakeWindows {
+        fn open(&self, occurrence_id: &str, token: Option<&str>) {
+            (self.0)
+                .0
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("window open {occurrence_id} token={token:?}"));
+        }
+        fn close(&self, occurrence_id: &str) {
+            (self.0)
+                .0
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("window close {occurrence_id}"));
+        }
+    }
+
+    struct FakeActivation(Option<&'static str>);
+    impl Activation for FakeActivation {
+        fn token(&self) -> Option<String> {
+            self.0.map(str::to_string)
         }
     }
 
     fn delivery() -> (Delivery, SharedFake) {
+        let (d, fake, _) = delivery_with_platform(Some("fresh-token"));
+        (d, fake)
+    }
+
+    fn delivery_with_platform(token: Option<&'static str>) -> (Delivery, SharedFake, Platform) {
         let fake = SharedFake::default();
-        (Delivery::new(Box::new(fake.clone())), fake)
+        let platform = Platform::default();
+        let d = Delivery::new(
+            Box::new(fake.clone()),
+            Box::new(FakeSound(platform.clone())),
+            Box::new(FakeWindows(platform.clone())),
+            Box::new(FakeActivation(token)),
+        );
+        (d, fake, platform)
     }
 
     fn action(id: u32, key: &str) -> Signal {
@@ -442,6 +707,14 @@ mod tests {
         assert_eq!(
             d.on_signal(&action(1, "skip")),
             Some(UserAction::Skip("o1".into()))
+        );
+        assert_eq!(
+            d.on_signal(&action(1, "snooze")),
+            Some(UserAction::Snooze("o1".into()))
+        );
+        assert_eq!(
+            d.on_signal(&action(1, "acknowledge")),
+            Some(UserAction::Acknowledge("o1".into()))
         );
         assert_eq!(
             d.on_signal(&action(1, "default")),
@@ -512,11 +785,181 @@ mod tests {
     }
 
     #[test]
-    fn actions_are_a_click_then_done_and_skip() {
+    fn actions_are_a_click_then_done_snooze_and_the_third_button() {
         assert_eq!(
             actions_of(&note("o", AlertStyle::Gentle)),
-            ["default", "Open", "done", "Done", "skip", "Skip"]
+            ["default", "Open", "done", "Done", "snooze", "Snooze", "skip", "Skip"]
         );
+        assert_eq!(
+            actions_of(&alarm("o")),
+            [
+                "default",
+                "Open",
+                "done",
+                "Done",
+                "snooze",
+                "Snooze",
+                "acknowledge",
+                "Acknowledge"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_alarm_is_critical_with_the_sound_suppressed_for_the_apps_own() {
+        let h = hints_of(&alarm("o"));
+        assert!(h.contains(&("urgency", Hint::Byte(2))));
+        assert!(h.contains(&("suppress-sound", Hint::Bool(true))));
+        assert!(!h.iter().any(|(k, _)| *k == "sound-name"));
+    }
+
+    #[test]
+    fn an_alarm_starts_the_sound_and_opens_the_window_with_the_notification() {
+        let (d, fake, platform) = delivery_with_platform(Some("fresh-token"));
+        d.apply(&[Command::Show(alarm("o1"))]);
+        assert_eq!(fake.0.lock().unwrap().shown.len(), 1);
+        assert_eq!(
+            platform.events(),
+            ["sound start", "window open o1 token=Some(\"fresh-token\")"]
+        );
+        assert!(d.is_alarm("o1"));
+        // A repeat replaces the notification, raises the window again and
+        // doesn't start a second sound.
+        d.apply(&[Command::Show(alarm("o1"))]);
+        assert_eq!(fake.0.lock().unwrap().shown[1].2, Some(1));
+        assert_eq!(platform.events().len(), 3);
+        assert!(platform.events()[2].starts_with("window open o1"));
+        // A gentle alert opens no window and plays no sound of its own.
+        d.apply(&[Command::Show(note("o2", AlertStyle::Gentle))]);
+        assert_eq!(platform.events().len(), 3);
+    }
+
+    #[test]
+    fn the_occurrence_closing_ends_the_notification_sound_and_window() {
+        let (d2, fake2, p2) = delivery_with_platform(None);
+        d2.apply(&[Command::Show(alarm("o1"))]);
+        d2.apply(&[Command::Close {
+            occurrence_id: "o1".into(),
+        }]);
+        assert_eq!(fake2.0.lock().unwrap().closed, [1]);
+        assert!(!p2.playing());
+        assert_eq!(p2.events().last().unwrap(), "window close o1");
+        assert!(!d2.is_alarm("o1"));
+    }
+
+    #[test]
+    fn stop_ringing_ends_only_the_sound() {
+        let (d, fake, platform) = delivery_with_platform(None);
+        d.apply(&[Command::Show(alarm("o1"))]);
+        d.apply(&[Command::StopRinging {
+            occurrence_id: "o1".into(),
+        }]);
+        assert!(!platform.playing());
+        assert!(fake.0.lock().unwrap().closed.is_empty());
+        assert!(d.is_alarm("o1"), "the window and notification stay up");
+        // The next repeat rings again.
+        d.apply(&[Command::Show(alarm("o1"))]);
+        assert!(platform.playing());
+    }
+
+    #[test]
+    fn one_sound_serves_every_ringing_alarm_until_the_last_stops() {
+        let (d, _, platform) = delivery_with_platform(None);
+        d.apply(&[Command::Show(alarm("a")), Command::Show(alarm("b"))]);
+        assert_eq!(
+            platform
+                .events()
+                .iter()
+                .filter(|e| *e == "sound start")
+                .count(),
+            1
+        );
+        d.apply(&[Command::Close {
+            occurrence_id: "a".into(),
+        }]);
+        assert!(platform.playing());
+        d.apply(&[Command::Close {
+            occurrence_id: "b".into(),
+        }]);
+        assert!(!platform.playing());
+    }
+
+    #[test]
+    fn closing_the_notification_silences_the_sound_and_closes_the_window() {
+        let (d, _, platform) = delivery_with_platform(None);
+        d.apply(&[Command::Show(alarm("o1"))]);
+        assert_eq!(d.on_signal(&Signal::Closed { id: 1 }), None);
+        assert!(!platform.playing());
+        assert_eq!(platform.events().last().unwrap(), "window close o1");
+        assert!(!d.is_alarm("o1"));
+        // Not an action on the occurrence: the next repeat rings anew.
+        d.apply(&[Command::Show(alarm("o1"))]);
+        assert!(platform.playing());
+    }
+
+    #[test]
+    fn closing_the_window_silences_the_sound_and_closes_the_notification() {
+        let (d, fake, platform) = delivery_with_platform(None);
+        d.apply(&[Command::Show(alarm("o1"))]);
+        d.silence("o1", true);
+        assert!(!platform.playing());
+        assert_eq!(fake.0.lock().unwrap().closed, [1]);
+        // The window is already going: it isn't asked to close again.
+        assert!(!platform
+            .events()
+            .iter()
+            .any(|e| e.starts_with("window close")));
+        assert!(!d.is_alarm("o1"));
+        assert_eq!(
+            d.on_signal(&action(1, "done")),
+            None,
+            "notification forgotten"
+        );
+    }
+
+    #[test]
+    fn an_alarm_downgraded_to_silent_ends_the_sound_and_window() {
+        let (d, _, platform) = delivery_with_platform(None);
+        d.apply(&[Command::Show(alarm("o1"))]);
+        let silent = Notification {
+            style: AlertStyle::Silent,
+            urgency: Urgency::Low,
+            sound: None,
+            timeout_ms: -1,
+            ..note("o1", AlertStyle::Silent)
+        };
+        d.apply(&[Command::Show(silent)]);
+        assert!(!platform.playing());
+        assert_eq!(platform.events().last().unwrap(), "window close o1");
+    }
+
+    #[test]
+    fn clicking_an_alarm_raises_its_window_with_the_clicks_token() {
+        let (d, _, platform) = delivery_with_platform(Some("fresh-token"));
+        d.apply(&[Command::Show(alarm("o1"))]);
+        // The server sends the click's token before the action.
+        d.on_signal(&Signal::ActivationToken {
+            id: 1,
+            token: "click-token".into(),
+        });
+        assert!(d.raise_alarm("o1"));
+        assert_eq!(
+            platform.events().last().unwrap(),
+            "window open o1 token=Some(\"click-token\")"
+        );
+        // The token is used once; the next raise falls back to a fresh one.
+        assert!(d.raise_alarm("o1"));
+        assert_eq!(
+            platform.events().last().unwrap(),
+            "window open o1 token=Some(\"fresh-token\")"
+        );
+        // Not an alarm, or not ours: nothing to raise, and no stray token.
+        assert!(!d.raise_alarm("other"));
+        d.on_signal(&Signal::ActivationToken {
+            id: 99,
+            token: "x".into(),
+        });
+        assert_eq!(d.take_click_token(), None);
     }
 
     #[test]
@@ -658,7 +1101,13 @@ mod tests {
                 .build()
                 .unwrap();
 
-            let delivery = Arc::new(Delivery::new(Box::new(DbusNotifier::at(&address))));
+            let platform = Platform::default();
+            let delivery = Arc::new(Delivery::new(
+                Box::new(DbusNotifier::at(&address)),
+                Box::new(FakeSound(platform.clone())),
+                Box::new(FakeWindows(platform.clone())),
+                Box::new(FakeActivation(None)),
+            ));
             let (tx, rx) = mpsc::channel();
             let d = delivery.clone();
             listen(Some(address.clone()), move |signal| {
@@ -696,7 +1145,7 @@ mod tests {
             assert_eq!(call.replaces, 0);
             assert_eq!(
                 call.actions,
-                ["default", "Open", "done", "Done", "skip", "Skip"]
+                ["default", "Open", "done", "Done", "snooze", "Snooze", "skip", "Skip"]
             );
             assert_eq!(call.urgency, Some(1));
             assert_eq!(call.sound_name.as_deref(), Some("message-new-instant"));
@@ -746,6 +1195,79 @@ mod tests {
                 occurrence_id: "o2".into(),
             }]);
             assert_eq!(*closed.lock().unwrap(), [102]);
+
+            // Maximum breaks Do Not Disturb (still inhibited): a critical
+            // notification that never expires, with the app's own sound.
+            let mut core = hab_core::Core::open_in_memory().unwrap();
+            let id = core.create_reminder("Meds", t0, t0 - 60).unwrap();
+            core.edit_reminder(
+                &id,
+                hab_core::EditReminder {
+                    priority: Some(hab_core::Priority::Maximum),
+                    ..Default::default()
+                },
+                t0 - 60,
+            )
+            .unwrap();
+            core.tick(t0).unwrap();
+            let occurrence = format!("{id}@{t0}");
+            let mut alerter = hab_core::Alerter::new();
+            assert!(delivery.inhibited());
+            let pass = alerter.pass(&mut core, t0, delivery.inhibited()).unwrap();
+            delivery.apply(&pass.commands);
+            let call = calls.lock().unwrap()[2].clone();
+            assert_eq!(call.summary, "Meds");
+            assert_eq!(call.urgency, Some(2), "critical");
+            assert_eq!(call.timeout, 0, "never expires");
+            assert_eq!(call.suppress_sound, Some(true));
+            assert_eq!(call.sound_name, None);
+            assert_eq!(
+                call.actions,
+                [
+                    "default",
+                    "Open",
+                    "done",
+                    "Done",
+                    "snooze",
+                    "Snooze",
+                    "acknowledge",
+                    "Acknowledge"
+                ]
+            );
+            assert!(platform.playing(), "the app plays its own sound");
+            assert!(delivery.is_alarm(&occurrence));
+
+            // Acknowledge comes back as an action...
+            server
+                .emit_signal(
+                    None::<&str>,
+                    PATH,
+                    DEST,
+                    "ActionInvoked",
+                    &(103u32, "acknowledge"),
+                )
+                .unwrap();
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                UserAction::Acknowledge(occurrence.clone())
+            );
+            // ...and the server closing the notification (the user swiped or
+            // closed it) silences the sound and closes the window.
+            server
+                .emit_signal(
+                    None::<&str>,
+                    PATH,
+                    DEST,
+                    "NotificationClosed",
+                    &(103u32, 2u32),
+                )
+                .unwrap();
+            let end = std::time::Instant::now() + Duration::from_secs(5);
+            while platform.playing() && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!platform.playing());
+            assert!(!delivery.is_alarm(&occurrence));
         }
     }
 }

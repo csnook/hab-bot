@@ -89,6 +89,26 @@ impl PrioritySettings {
     }
 }
 
+impl PrioritySettings {
+    /// How long one tap on Snooze quiets an occurrence: the due interval
+    /// while it is due, the overdue interval once it is overdue. A priority
+    /// that is overdue at once (a due interval of 0) snoozes by the overdue
+    /// interval too.
+    pub fn snooze_length(&self, overdue: bool) -> i64 {
+        if overdue || self.due_interval == 0 {
+            self.repeat_every()
+        } else {
+            self.due_interval
+        }
+    }
+
+    /// How long an alarm rings from the moment it alerts: its ring duration,
+    /// or `None` for until someone acts (or the next repeat takes over).
+    pub fn rings_for(&self) -> Option<i64> {
+        self.ring_duration
+    }
+}
+
 const MINUTE: i64 = 60;
 const HOUR: i64 = 3_600;
 const DAY: i64 = 86_400;

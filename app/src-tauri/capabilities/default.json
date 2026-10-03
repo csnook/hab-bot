@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may listen for state changes.",
-  "windows": ["main"],
+  "description": "The main window and the alarm windows may listen for state changes and call the app.",
+  "windows": ["main", "alarm-*"],
   "permissions": ["core:default"]
 }

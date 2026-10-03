@@ -25,6 +25,7 @@ This is the walking skeleton: on the Linux desktop, with no server, you can crea
   ```
 
 - For the tray on GNOME, the AppIndicator extension. KDE Plasma shows it natively.
+- For the alarm's looping sound, any one of `pw-play` (PipeWire), `paplay`, `aplay`, `ffplay` or `canberra-gtk-play`; nothing to build. Without one the alarm still shows its critical notification and window, silently.
 
 ## Commands
 
@@ -42,7 +43,7 @@ Everything goes through `cargo xtask`. It installs the UI's packages when they'r
 
 ## Using it
 
-Fill in the form (title, date, time) and press Create. At that time an occurrence opens, a notification with **Done** and **Skip** buttons shows the title, and the reminder appears under **Due** in the Inbox. **Done** completes it.
+Fill in the form (title, date, time) and press Create. At that time an occurrence opens, a notification with **Done**, **Snooze** and **Skip** buttons shows the title (an alarm, from High or Maximum, is a critical notification with **Acknowledge** instead of Skip, a looping sound and an alarm window), and the reminder appears under **Due** in the Inbox. **Done** completes it.
 
 ## Notifications
 

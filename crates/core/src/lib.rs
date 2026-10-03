@@ -20,9 +20,12 @@ mod store;
 
 pub use crate::core::{
     Core, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox, ListInfo,
-    ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
+    OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
 };
-pub use alerter::{Alerter, Command, Notification, Urgency, ACTION_DONE, ACTION_OPEN, ACTION_SKIP};
+pub use alerter::{
+    Alerter, Command, Notification, Urgency, ACTION_ACKNOWLEDGE, ACTION_DONE, ACTION_OPEN,
+    ACTION_SKIP, ACTION_SNOOZE,
+};
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };

@@ -10,6 +10,8 @@ export interface DueItem {
   not_sent: boolean;
   snoozed_until: number | null;
   acknowledged: boolean;
+  /** When it was last acknowledged, in unix seconds. */
+  acknowledged_at: number | null;
   priority: PriorityName;
   /** When it goes (or went) overdue, in unix seconds. */
   overdue_at: number;
@@ -127,8 +129,31 @@ export const createRecurringReminder = (
 ) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
 export const completeOccurrence = (occurrenceId: string) =>
   invoke<void>("complete_occurrence", { occurrenceId });
-export const skipOccurrence = (occurrenceId: string) =>
-  invoke<void>("skip_occurrence", { occurrenceId });
+export const skipOccurrence = (occurrenceId: string, note?: string) =>
+  invoke<void>("skip_occurrence", { occurrenceId, note });
+/** Silences the current alert on all devices without closing the occurrence. */
+export const acknowledgeOccurrence = (occurrenceId: string) =>
+  invoke<void>("acknowledge_occurrence", { occurrenceId });
+/** Snoozes for `minutes`, or for the priority's snooze length without them. */
+export const snoozeOccurrence = (occurrenceId: string, minutes?: number) =>
+  invoke<void>("snooze_occurrence", { occurrenceId, minutes });
+
+/** What the alarm window shows. */
+export interface OccurrenceView {
+  occurrence_id: string;
+  title: string;
+  /** The list's name; null for the personal list. */
+  list_name: string | null;
+  priority: PriorityName;
+  /** When it was due, in unix seconds. */
+  scheduled_at: number;
+  overdue_at: number;
+  snoozed_until: number | null;
+  acknowledged_at: number | null;
+}
+/** Null once the occurrence has closed. */
+export const alarmView = (occurrenceId: string) =>
+  invoke<OccurrenceView | null>("alarm_view", { occurrenceId });
 export const dismissNotice = (id: string) => invoke<void>("dismiss_notice", { id });
 export const onStateChanged = (f: () => void) => listen("state-changed", f);
 /** A notification was clicked: the payload is its occurrence's id. */

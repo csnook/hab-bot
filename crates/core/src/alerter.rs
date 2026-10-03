@@ -21,20 +21,32 @@
 //! The first alert and each change of style are written to the history with
 //! the device that alerted; repeats and catching up at the same style are not.
 //!
-//! Alarm is #42's. This module still decides *when* an alarm alerts, and
-//! reports it as [`Notification::style`] `== Alarm`; until the alarm exists
-//! the notification it carries is the insistent one, repeated each interval.
+//! An alarm is a critical notification that never times out, with the app's
+//! own looping sound and its alarm window (the platform half carries those
+//! out; this half decides when). It alerts at first sight and again every
+//! overdue interval; [`Command::StopRinging`] ends the sound when the
+//! priority's ring duration runs out (by default it rings until someone acts
+//! or the next repeat). Maximum breaks Do Not Disturb, so it stays an alarm
+//! while the server is inhibited.
+//!
+//! Acknowledging quiets the occurrence: while due, until it goes overdue;
+//! once overdue, for one overdue interval, after which alerts resume. The
+//! time of the acknowledgement is the one recorded on its event.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::core::Core;
-use crate::priority::AlertStyle;
+use crate::priority::{AlertStyle, Priority, PrioritySettings};
 use crate::Result;
 
 /// The key of the Done button.
 pub const ACTION_DONE: &str = "done";
 /// The key of the Skip button.
 pub const ACTION_SKIP: &str = "skip";
+/// The key of the Snooze button.
+pub const ACTION_SNOOZE: &str = "snooze";
+/// The key of the Acknowledge button.
+pub const ACTION_ACKNOWLEDGE: &str = "acknowledge";
 /// The key freedesktop.org servers send when the notification itself is
 /// clicked.
 pub const ACTION_OPEN: &str = "default";
@@ -69,8 +81,14 @@ pub struct Notification {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Show(Notification),
-    /// The occurrence closed or was snoozed: take its notification down.
+    /// The occurrence closed, was snoozed or acknowledged: take its
+    /// notification down, and with it the alarm's window and sound.
     Close {
+        occurrence_id: String,
+    },
+    /// An alarm has rung for its priority's ring duration: stop the sound.
+    /// The notification and window stay until someone acts or it repeats.
+    StopRinging {
         occurrence_id: String,
     },
 }
@@ -85,11 +103,17 @@ impl Notification {
     fn new(occurrence_id: &str, title: &str, style: AlertStyle, overdue: bool) -> Self {
         let (urgency, sound, timeout_ms) = match style {
             AlertStyle::Silent => (Urgency::Low, None, -1),
-            // Gentle, insistent and (until #42) alarm are all normal
-            // notifications with a themed sound that time out.
-            AlertStyle::Gentle | AlertStyle::Insistent | AlertStyle::Alarm => {
+            AlertStyle::Gentle | AlertStyle::Insistent => {
                 (Urgency::Normal, Some(SOUND), GENTLE_TIMEOUT_MS)
             }
+            // Critical, never expires, and no themed sound: the app plays
+            // its own looping one.
+            AlertStyle::Alarm => (Urgency::Critical, None, 0),
+        };
+        let third = if style == AlertStyle::Alarm {
+            (ACTION_ACKNOWLEDGE, "Acknowledge")
+        } else {
+            (ACTION_SKIP, "Skip")
         };
         Notification {
             occurrence_id: occurrence_id.to_string(),
@@ -99,7 +123,7 @@ impl Notification {
             urgency,
             sound,
             timeout_ms,
-            actions: vec![(ACTION_DONE, "Done"), (ACTION_SKIP, "Skip")],
+            actions: vec![(ACTION_DONE, "Done"), (ACTION_SNOOZE, "Snooze"), third],
         }
     }
 }
@@ -120,6 +144,8 @@ struct Tracked {
     standing: Option<AlertStyle>,
     /// When it last alerted, for repeats.
     last_at: i64,
+    /// Whether the sound was already told to stop for the alert standing.
+    stopped: bool,
     /// The style last written to the history, so a repeat or a catch-up at
     /// the same style isn't recorded again.
     recorded: Option<AlertStyle>,
@@ -127,14 +153,30 @@ struct Tracked {
 
 /// The per-device alert planner. It remembers only what it has alerted
 /// about since the app started.
-#[derive(Debug, Default)]
 pub struct Alerter {
     tracked: HashMap<String, Tracked>,
+    settings: fn(Priority) -> PrioritySettings,
+}
+
+impl Default for Alerter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Alerter {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_settings(Priority::settings)
+    }
+
+    /// An alerter that reads each priority's settings from `settings`
+    /// instead of the built-ins: how custom priorities (and tests of ring
+    /// durations) get in.
+    pub fn with_settings(settings: fn(Priority) -> PrioritySettings) -> Self {
+        Alerter {
+            tracked: HashMap::new(),
+            settings,
+        }
     }
 
     /// One pass at `now`. `inhibited` is the notification server's Do Not
@@ -167,7 +209,7 @@ impl Alerter {
         }
 
         for d in open {
-            let settings = d.priority.settings();
+            let settings = (self.settings)(d.priority);
             let tracked = self
                 .tracked
                 .entry(d.occurrence_id.clone())
@@ -181,15 +223,21 @@ impl Alerter {
             }
             soonest(d.overdue_at, &mut out);
 
-            // Snoozed or acknowledged: quiet. A snooze that ends alerts again.
+            // Snoozed or acknowledged: quiet. A snooze that ends alerts
+            // again, and so does the quiet period after acknowledging.
             let snoozed = d.snoozed_until.filter(|&u| u > now);
-            if snoozed.is_some() || d.acknowledged {
+            let acknowledged =
+                ack_quiet_until(&settings, d.overdue_at, d.acknowledged_at).filter(|&u| u > now);
+            // An acknowledgement with no time on it can't be measured: it
+            // quiets until the occurrence closes.
+            let unmeasured = d.acknowledged && d.acknowledged_at.is_none();
+            if snoozed.is_some() || acknowledged.is_some() || unmeasured {
                 if tracked.standing.take().is_some() {
                     out.commands.push(Command::Close {
                         occurrence_id: d.occurrence_id.clone(),
                     });
                 }
-                if let Some(u) = snoozed {
+                for u in snoozed.into_iter().chain(acknowledged) {
                     soonest(u, &mut out);
                 }
                 continue;
@@ -215,6 +263,7 @@ impl Alerter {
                 }
                 tracked.standing = Some(style);
                 tracked.last_at = now;
+                tracked.stopped = false;
                 out.commands.push(Command::Show(Notification::new(
                     &d.occurrence_id,
                     &d.title,
@@ -222,10 +271,41 @@ impl Alerter {
                     d.overdue_at <= now,
                 )));
             }
+            // An alarm that has rung for its ring duration goes quiet, once.
+            if style == AlertStyle::Alarm {
+                if let Some(ring) = settings.rings_for() {
+                    let stop_at = tracked.last_at + ring;
+                    if !tracked.stopped && now >= stop_at {
+                        tracked.stopped = true;
+                        out.commands.push(Command::StopRinging {
+                            occurrence_id: d.occurrence_id.clone(),
+                        });
+                    } else if !tracked.stopped {
+                        soonest(stop_at, &mut out);
+                    }
+                }
+            }
             if repeats {
                 soonest(tracked.last_at + settings.repeat_every(), &mut out);
             }
         }
         Ok(out)
     }
+}
+
+/// Until when an acknowledgement at `acknowledged_at` quiets an occurrence
+/// that goes overdue at `overdue_at`: until it goes overdue if it was
+/// acknowledged while due, otherwise for one overdue interval. `None` if it
+/// was never acknowledged (or the time is unknown).
+fn ack_quiet_until(
+    settings: &PrioritySettings,
+    overdue_at: i64,
+    acknowledged_at: Option<i64>,
+) -> Option<i64> {
+    let at = acknowledged_at?;
+    Some(if at < overdue_at {
+        overdue_at
+    } else {
+        at + settings.repeat_every()
+    })
 }

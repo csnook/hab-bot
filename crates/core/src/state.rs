@@ -94,6 +94,10 @@ pub struct Occurrence {
     pub snoozed_until: Option<i64>,
     /// The current alert was silenced. Closing the occurrence ends it.
     pub acknowledged: bool,
+    /// When it was last acknowledged: the time recorded on the
+    /// acknowledging event, which is why that event needed no new format.
+    /// Of several (on one device or several), the latest.
+    pub acknowledged_at: Option<i64>,
 }
 
 impl Occurrence {
@@ -121,6 +125,8 @@ pub struct DueItem {
     pub not_sent: bool,
     pub snoozed_until: Option<i64>,
     pub acknowledged: bool,
+    /// When it was last acknowledged, for the quiet period that follows.
+    pub acknowledged_at: Option<i64>,
     pub priority: Priority,
     /// When it goes (or went) overdue, counted from `scheduled_at`.
     pub overdue_at: i64,
@@ -361,6 +367,7 @@ impl State {
                         closing: None,
                         snoozed_until: None,
                         acknowledged: false,
+                        acknowledged_at: None,
                     },
                 );
                 if !one_off {
@@ -404,6 +411,7 @@ impl State {
             Event::OccurrenceAcknowledged { occurrence_id } => {
                 if let Some(o) = self.open_occurrence_mut(occurrence_id) {
                     o.acknowledged = true;
+                    o.acknowledged_at = o.acknowledged_at.max(Some(stored.recorded_at));
                 }
             }
             Event::OccurrenceAlerted {
@@ -496,6 +504,7 @@ impl State {
             None => {
                 o.snoozed_until = None;
                 o.acknowledged = false;
+                o.acknowledged_at = None;
                 o.closing = Some(new);
                 return;
             }
@@ -539,6 +548,7 @@ impl State {
             if o.reminder_id == reminder_id && o.id != newest.1 && o.closing.is_none() {
                 o.snoozed_until = None;
                 o.acknowledged = false;
+                o.acknowledged_at = None;
                 o.closing = Some(Closing {
                     kind: ClosingKind::Missed,
                     by: String::new(),
@@ -695,6 +705,7 @@ impl State {
                         || self.unsent_reminders.contains(&r.id),
                     snoozed_until: o.snoozed_until,
                     acknowledged: o.acknowledged,
+                    acknowledged_at: o.acknowledged_at,
                     priority: r.priority,
                     overdue_at: r.overdue_at(o.scheduled_at),
                 })

@@ -18,3 +18,8 @@ tokio = { version = "1", features = ["sync"] }
 tauri = { version = "2", features = ["tray-icon"] }
 zbus = "5"
 tauri-plugin-single-instance = "2"
+gtk = "0.18"
+# Raising the alarm window on Wayland: our own xdg-activation token requests
+# (no library passes one on to the window).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

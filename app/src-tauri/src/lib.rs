@@ -28,8 +28,17 @@ const STATE_CHANGED: &str = "state-changed";
 /// occurrence's id.
 const OPEN_OCCURRENCE: &str = "open-occurrence";
 
+mod alarm;
 mod notify;
+mod sound;
+mod wayland;
 use notify::{Delivery, UserAction};
+
+/// What the alarm windows need to tell the alarm they were closed.
+struct AlarmState {
+    delivery: Arc<Delivery>,
+    registry: Arc<alarm::Registry>,
+}
 
 struct App {
     core: Arc<Mutex<Core>>,
@@ -160,6 +169,15 @@ fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
     core.inbox(now())
 }
 
+/// Tells the scheduler something changed, so alerts follow at once: an
+/// occurrence that was acted on takes its notification, sound and alarm
+/// window down, rather than at the next scheduled look.
+fn changed(app: &App, handle: &AppHandle) {
+    app.sync_wake.notify_one();
+    let _ = app.wake.send(());
+    let _ = handle.emit(STATE_CHANGED, ());
+}
+
 #[tauri::command]
 fn complete_occurrence(
     app: tauri::State<'_, App>,
@@ -171,8 +189,7 @@ fn complete_occurrence(
         .unwrap()
         .complete(&occurrence_id, now())
         .map_err(|e| e.to_string())?;
-    app.sync_wake.notify_one();
-    let _ = handle.emit(STATE_CHANGED, ());
+    changed(&app, &handle);
     Ok(())
 }
 
@@ -181,15 +198,62 @@ fn skip_occurrence(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     occurrence_id: String,
+    note: Option<String>,
+) -> Result<(), String> {
+    let note = note.filter(|n| !n.trim().is_empty());
+    app.core
+        .lock()
+        .unwrap()
+        .skip(&occurrence_id, note.as_deref(), now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Silences the occurrence's current alert on all of the user's devices
+/// without closing it.
+#[tauri::command]
+fn acknowledge_occurrence(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_id: String,
 ) -> Result<(), String> {
     app.core
         .lock()
         .unwrap()
-        .skip(&occurrence_id, None, now())
+        .acknowledge(&occurrence_id, now())
         .map_err(|e| e.to_string())?;
-    app.sync_wake.notify_one();
-    let _ = handle.emit(STATE_CHANGED, ());
+    changed(&app, &handle);
     Ok(())
+}
+
+/// Snoozes for `minutes`, or, with none, for the priority's snooze length.
+#[tauri::command]
+fn snooze_occurrence(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_id: String,
+    minutes: Option<i64>,
+) -> Result<(), String> {
+    {
+        let mut core = app.core.lock().unwrap();
+        let result = match minutes {
+            Some(m) if m > 0 => core.snooze(&occurrence_id, now() + m * 60, now()),
+            _ => core.snooze_for_interval(&occurrence_id, now()).map(|_| ()),
+        };
+        result.map_err(|e| e.to_string())?;
+    }
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// What the alarm window shows; `None` once the occurrence has closed.
+#[tauri::command]
+fn alarm_view(
+    app: tauri::State<'_, App>,
+    occurrence_id: String,
+) -> Option<hab_core::OccurrenceView> {
+    app.core.lock().unwrap().occurrence_view(&occurrence_id)
 }
 
 fn show_window(app: &AppHandle) {
@@ -849,20 +913,32 @@ fn run_scheduler(
 }
 
 /// What a click on a notification or one of its buttons does. It works with
-/// the window closed: Done and Skip act on the core directly.
+/// the window closed: Done, Snooze, Acknowledge and Skip act on the core
+/// directly.
 fn act_on_notification(
     action: UserAction,
     app: &AppHandle,
     core: &Mutex<Core>,
     sync_wake: &Notify,
     wake: &Sender<()>,
+    delivery: &Delivery,
 ) {
     let result = match &action {
         UserAction::Done(id) => core.lock().unwrap().complete(id, now()),
         UserAction::Skip(id) => core.lock().unwrap().skip(id, None, now()),
+        UserAction::Snooze(id) => core
+            .lock()
+            .unwrap()
+            .snooze_for_interval(id, now())
+            .map(|_| ()),
+        UserAction::Acknowledge(id) => core.lock().unwrap().acknowledge(id, now()),
         UserAction::Open(id) => {
-            show_window(app);
-            let _ = app.emit(OPEN_OCCURRENCE, id);
+            // An alarm opens its own window, with the click's token so that
+            // Wayland lets it take focus; anything else opens the app.
+            if !delivery.raise_alarm(id) {
+                show_window(app);
+                let _ = app.emit(OPEN_OCCURRENCE, id);
+            }
             return;
         }
     };
@@ -871,7 +947,8 @@ fn act_on_notification(
         eprintln!("notification action failed: {e}");
     }
     sync_wake.notify_one();
-    // The scheduler takes the notification down.
+    // The scheduler takes the notification (and an alarm's sound and window)
+    // down.
     let _ = wake.send(());
     let _ = app.emit(STATE_CHANGED, ());
 }
@@ -890,6 +967,9 @@ pub fn run() {
             inbox,
             complete_occurrence,
             skip_occurrence,
+            acknowledge_occurrence,
+            snooze_occurrence,
+            alarm_view,
             setup_state,
             choose_standalone,
             probe_server,
@@ -974,7 +1054,19 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            let delivery = Arc::new(Delivery::new(Box::new(notify::DbusNotifier::session())));
+            let registry = Arc::new(alarm::Registry::default());
+            let delivery = Arc::new(Delivery::new(
+                Box::new(notify::DbusNotifier::session()),
+                Box::new(sound::LoopingSound::bundled()),
+                Box::new(alarm::TauriWindows::new(handle.clone(), registry.clone())),
+                Box::new(alarm::WaylandActivation {
+                    app_id: notify::DESKTOP_ENTRY,
+                }),
+            ));
+            app.manage(AlarmState {
+                delivery: delivery.clone(),
+                registry,
+            });
             {
                 let (delivery, handle, core, sync_wake, wake) = (
                     delivery.clone(),
@@ -989,7 +1081,7 @@ pub fn run() {
                         let _ = wake.send(());
                     }
                     if let Some(action) = delivery.on_signal(&signal) {
-                        act_on_notification(action, &handle, &core, &sync_wake, &wake);
+                        act_on_notification(action, &handle, &core, &sync_wake, &wake, &delivery);
                     }
                 })?;
             }
@@ -997,11 +1089,24 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window leaves the app running in the tray.
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            let WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            if window.label().starts_with(alarm::LABEL_PREFIX) {
+                // Closing an alarm window silences the alarm, notification
+                // and sound too. The occurrence stays open: it rings again at
+                // its next repeat.
+                if let Some(state) = window.try_state::<AlarmState>() {
+                    if let Some(occurrence) = state.registry.occurrence_of(window.label()) {
+                        state.delivery.silence(&occurrence, true);
+                        state.registry.forget(&occurrence);
+                    }
+                }
+                return;
             }
+            // Closing the main window leaves the app running in the tray.
+            api.prevent_close();
+            let _ = window.hide();
         })
         .run(tauri::generate_context!())
         .expect("error while running the app");
