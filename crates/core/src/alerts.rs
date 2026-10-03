@@ -5,8 +5,8 @@
 //! timing is the device's own and isn't synced; the history records only the first alert
 //! and each change of style, with the device that alerted.
 
-use crate::{AlertStyle, Core, Millis, Result};
-use serde::Serialize;
+use crate::{AlertStyle, Core, Millis, Priority, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// How long before a known expiry the last-chance alert comes.
@@ -34,6 +34,7 @@ pub struct Alert {
     /// The style to deliver now, after any Do Not Disturb downgrade.
     pub style: AlertStyle,
     pub overdue: bool,
+    pub priority: Priority,
     /// For a last-chance alert: when the occurrence expires.
     pub expires_at: Option<Millis>,
 }
@@ -46,6 +47,7 @@ pub struct Poll {
     pub dismissed: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Shown {
     /// The style last delivered, after any downgrade.
     effective: AlertStyle,
@@ -54,7 +56,9 @@ struct Shown {
     at: Millis,
 }
 
-/// One device's alerting state.
+/// One device's alerting state. It's kept between runs with [`AlertEngine::load`] and
+/// [`AlertEngine::save`], since on Android each alarm may run in a fresh process.
+#[derive(Serialize, Deserialize)]
 pub struct AlertEngine {
     device: String,
     shown: HashMap<String, Shown>,
@@ -78,6 +82,21 @@ fn nominal_style(o: &crate::Occurrence, now: Millis) -> AlertStyle {
 }
 
 impl AlertEngine {
+    /// The engine as this device left it, or a new one.
+    pub fn load(core: &Core, device: &str) -> AlertEngine {
+        core.device_state("alerts")
+            .and_then(|json| serde_json::from_str::<AlertEngine>(&json).ok())
+            .map(|mut e| {
+                e.device = device.to_string();
+                e
+            })
+            .unwrap_or_else(|| AlertEngine::new(device))
+    }
+
+    pub fn save(&self, core: &Core) -> Result<()> {
+        core.set_device_state("alerts", &serde_json::to_string(self)?)
+    }
+
     pub fn new(device: &str) -> AlertEngine {
         AlertEngine {
             device: device.to_string(),
@@ -135,6 +154,7 @@ impl AlertEngine {
                         kind: AlertKind::LastChance,
                         style,
                         overdue: now >= o.overdue_at,
+                        priority: o.priority,
                         expires_at: Some(expires),
                     });
                 }
@@ -170,6 +190,7 @@ impl AlertEngine {
                 kind,
                 style: effective,
                 overdue,
+                priority: o.priority,
                 expires_at: None,
             });
         }

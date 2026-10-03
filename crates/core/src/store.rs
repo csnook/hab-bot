@@ -23,6 +23,12 @@ impl Store {
                 seq     INTEGER PRIMARY KEY AUTOINCREMENT,
                 list_id TEXT NOT NULL,
                 body    TEXT NOT NULL
+            );
+            -- state that belongs to this device and isn't synced, such as what its alerts
+            -- have shown so far
+            CREATE TABLE IF NOT EXISTS device_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
         Ok(Store { conn })
@@ -32,6 +38,23 @@ impl Store {
         self.conn.execute(
             "INSERT INTO events (list_id, body) VALUES (?1, ?2)",
             params![list_id, serde_json::to_string(event)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn device_state(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM device_state WHERE key = ?1")?;
+        let mut rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn set_device_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO device_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )?;
         Ok(())
     }

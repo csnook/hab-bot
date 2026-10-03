@@ -1717,3 +1717,33 @@ fn unsnoozing_cancels_a_snooze_and_records_how_it_ended() {
     )));
     assert!(c.unsnooze(&id, T0 + 2000).is_err());
 }
+
+#[test]
+fn the_alert_engine_survives_a_restart_without_alerting_twice() {
+    let path = std::env::temp_dir().join(format!("hab-core-{}.db", uuid::Uuid::new_v4()));
+    let p = path.to_str().unwrap();
+    {
+        let mut c = Core::open(p, "me").unwrap();
+        c.create_one_off("x", T0, T0).unwrap();
+        c.fire_due(T0).unwrap();
+        let mut e = AlertEngine::load(&c, "phone");
+        assert_eq!(e.poll(&mut c, T0, false).unwrap().alerts.len(), 1);
+        e.save(&c).unwrap();
+    }
+    // a new process, as when Android starts one for the next alarm
+    let mut c = Core::open(p, "me").unwrap();
+    let mut e = AlertEngine::load(&c, "phone");
+    assert!(
+        e.poll(&mut c, T0 + 1000, false).unwrap().alerts.is_empty(),
+        "already shown"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn next_wake_combines_instances_and_alerts() {
+    let mut c = core();
+    c.create_one_off("later", T0 + 5000, T0).unwrap();
+    let e = AlertEngine::new("phone");
+    assert_eq!(c.next_wake(&e, T0), Some(T0 + 5000));
+}

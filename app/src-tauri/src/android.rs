@@ -5,7 +5,7 @@
 //! The exports open their own `Core` on the database file each time: Tauri's managed
 //! state doesn't exist when Android starts the process for a receiver.
 
-use hab_core::{Core, Millis};
+use hab_core::{AlertEngine, Core, SnoozeVia};
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong, jstring};
 use jni::JNIEnv;
@@ -23,62 +23,86 @@ fn sync_zone(core: &mut Core) {
 
 fn with_core<T>(db: &str, f: impl FnOnce(&mut Core) -> hab_core::Result<T>) -> Option<T> {
     let mut core = Core::open(db, USER).ok()?;
+    sync_zone(&mut core);
     f(&mut core).ok()
 }
 
-/// `Native.fire(db, now)`: fires whatever is due and returns the occurrences opened
-/// as a JSON array of `{id, title}`, or an empty array.
-#[no_mangle]
-pub extern "system" fn Java_dev_habbot_reminders_Native_fire<'l>(
-    mut env: JNIEnv<'l>,
-    _class: JClass<'l>,
-    db: JString<'l>,
-    now: jlong,
-) -> jstring {
-    let db: String = env.get_string(&db).map(Into::into).unwrap_or_default();
-    let opened = with_core(&db, |core| {
-        sync_zone(core);
-        core.fire_due(now)
-    })
-    .unwrap_or_default();
-    let json: Vec<_> = opened
-        .iter()
-        .map(|o| serde_json::json!({ "id": o.id, "title": o.title }))
-        .collect();
-    env.new_string(serde_json::Value::Array(json).to_string())
+fn string(env: &mut JNIEnv, s: &JString) -> String {
+    env.get_string(s).map(Into::into).unwrap_or_default()
+}
+
+fn to_jstring(env: &mut JNIEnv, s: String) -> jstring {
+    env.new_string(s)
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// `Native.complete(db, occurrenceId, now)`: completes an open occurrence.
+/// `Native.tick(db, now, dnd, device)`: fires what is due, then asks the alert engine what to
+/// show. Returns JSON `{alerts, dismissed, next_wake}`, where `next_wake` is when to wake
+/// next (epoch millis) or -1. `dnd` is Android's interruption filter.
 #[no_mangle]
-pub extern "system" fn Java_dev_habbot_reminders_Native_complete<'l>(
+pub extern "system" fn Java_dev_habbot_reminders_Native_tick<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     db: JString<'l>,
+    now: jlong,
+    dnd: jboolean,
+    device: JString<'l>,
+) -> jstring {
+    let db = string(&mut env, &db);
+    let device = string(&mut env, &device);
+    let json = with_core(&db, |core| {
+        core.fire_due(now)?;
+        let mut engine = AlertEngine::load(core, &device);
+        let poll = engine.poll(core, now, dnd != 0)?;
+        engine.save(core)?;
+        let next_wake = core.next_wake(&engine, now).unwrap_or(-1);
+        Ok(serde_json::json!({ "alerts": poll.alerts, "dismissed": poll.dismissed, "next_wake": next_wake }))
+    })
+    .unwrap_or_else(|| serde_json::json!({ "alerts": [], "dismissed": [], "next_wake": -1 }));
+    to_jstring(&mut env, json.to_string())
+}
+
+/// `Native.act(db, action, occurrenceId, now)`: what a notification button or swipe does.
+/// `action` is `done`, `skip`, `snooze` (the button) or `swipe` (swiped away, which snoozes
+/// for the priority's interval, recorded as made by swiping).
+#[no_mangle]
+pub extern "system" fn Java_dev_habbot_reminders_Native_act<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    db: JString<'l>,
+    action: JString<'l>,
     occurrence_id: JString<'l>,
     now: jlong,
 ) -> jboolean {
-    let db: String = env.get_string(&db).map(Into::into).unwrap_or_default();
-    let id: String = env
-        .get_string(&occurrence_id)
-        .map(Into::into)
-        .unwrap_or_default();
-    with_core(&db, |core| core.complete(&id, now)).is_some() as jboolean
+    let db = string(&mut env, &db);
+    let action = string(&mut env, &action);
+    let id = string(&mut env, &occurrence_id);
+    with_core(&db, |core| match action.as_str() {
+        "done" => core.complete(&id, now),
+        "skip" => core.skip(&id, None, now),
+        "snooze" => core.snooze_default(&id, SnoozeVia::Button, now).map(|_| ()),
+        "swipe" => core.snooze_default(&id, SnoozeVia::Swipe, now).map(|_| ()),
+        _ => Ok(()),
+    })
+    .is_some() as jboolean
 }
 
-/// `Native.nextDue(db, now)`: when the next unfired reminder comes due, or -1.
+/// `Native.nextWake(db, now)`: when to wake next, or -1. Used after the app itself changes
+/// something, such as a new reminder.
 #[no_mangle]
-pub extern "system" fn Java_dev_habbot_reminders_Native_nextDue<'l>(
+pub extern "system" fn Java_dev_habbot_reminders_Native_nextWake<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     db: JString<'l>,
     now: jlong,
+    device: JString<'l>,
 ) -> jlong {
-    let db: String = env.get_string(&db).map(Into::into).unwrap_or_default();
+    let db = string(&mut env, &db);
+    let device = string(&mut env, &device);
     with_core(&db, |core| {
-        sync_zone(core);
-        Ok(core.next_due(now))
+        let engine = AlertEngine::load(core, &device);
+        Ok(core.next_wake(&engine, now))
     })
     .flatten()
     .unwrap_or(-1)
@@ -135,16 +159,17 @@ pub fn files_dir() -> Option<String> {
     })
 }
 
-/// Registers the exact alarm for the next reminder (or cancels it when `at` is `None`).
-pub fn schedule_alarm(at: Option<Millis>) {
+/// Has Kotlin fire what's due, update the notifications and register the next exact alarm.
+/// Called after the app itself changes something, such as making a reminder.
+pub fn refresh() {
     with_context(|env, context| {
         call_static(
             env,
             context,
-            "Alarms",
-            "scheduleAt",
-            "(Landroid/content/Context;J)V",
-            &[JValue::Object(context), JValue::Long(at.unwrap_or(-1))],
+            "Notifier",
+            "run",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(context)],
         )
         .map(|_| ())
     });

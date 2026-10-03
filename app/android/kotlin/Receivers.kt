@@ -1,6 +1,5 @@
 package dev.habbot.reminders
 
-import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -8,17 +7,16 @@ import android.content.Intent
 /** The exact alarm went off. Runs with the app closed: no Activity, no webview. */
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        Notifier.fireDue(context)
+        Notifier.run(context)
     }
 }
 
-/** The notification's Done button: completes through Rust without opening the app. */
-class DoneReceiver : BroadcastReceiver() {
+/** A notification's Done, Snooze or Skip, or its swipe: Rust acts without opening the app. */
+class ActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getStringExtra(Notifier.EXTRA_OCCURRENCE) ?: return
-        Native.complete(Native.dbPath(context), id, System.currentTimeMillis())
-        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .cancel(Notifier.notificationId(id))
+        val action = intent.getStringExtra(Notifier.EXTRA_ACTION) ?: return
+        Notifier.act(context, action, id)
     }
 }
 
@@ -29,6 +27,6 @@ class DoneReceiver : BroadcastReceiver() {
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        Notifier.fireDue(context)
+        Notifier.run(context)
     }
 }

@@ -9,15 +9,22 @@ object Native {
         System.loadLibrary("hab_bot_lib")
     }
 
-    /** Fires what is due. Returns a JSON array of `{id, title}` for the occurrences opened. */
-    @JvmStatic external fun fire(db: String, now: Long): String
+    /**
+     * Fires what is due and asks the alert engine what to show. Returns JSON:
+     * `{alerts: [{occurrence_id, title, kind, style, overdue, priority, expires_at}],
+     *   dismissed: [occurrence_id], next_wake: epochMillis or -1}`.
+     * [dnd] is whether Android's Do Not Disturb is on.
+     */
+    @JvmStatic external fun tick(db: String, now: Long, dnd: Boolean, device: String): String
 
-    /** Completes an open occurrence. */
-    @JvmStatic external fun complete(db: String, occurrenceId: String, now: Long): Boolean
+    /** What a notification button or swipe does: `done`, `skip`, `snooze` or `swipe`. */
+    @JvmStatic external fun act(db: String, action: String, occurrenceId: String, now: Long): Boolean
 
-    /** When the next unfired reminder comes due, or -1. */
-    @JvmStatic external fun nextDue(db: String, now: Long): Long
+    /** When to wake next, or -1. */
+    @JvmStatic external fun nextWake(db: String, now: Long, device: String): Long
 
     /** The same file the Rust side opens in the Activity (`files_dir` in android.rs). */
     fun dbPath(context: Context): String = File(context.filesDir, "reminders.db").absolutePath
+
+    fun deviceName(): String = android.os.Build.MODEL ?: "this phone"
 }

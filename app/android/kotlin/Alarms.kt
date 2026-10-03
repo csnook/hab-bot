@@ -17,8 +17,11 @@ object Alarms {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-    /** Registers the exact alarm for `at` (epoch millis), or cancels it when `at` is negative. Called from Rust. */
-    @JvmStatic
+    /**
+     * Registers the exact alarm for the next thing to do (epoch millis), or cancels it when
+     * [at] is negative. The quieter priorities use `setExactAndAllowWhileIdle`; the alarm
+     * style's `setAlarmClock` comes with the full-screen alarm.
+     */
     fun scheduleAt(context: Context, at: Long) {
         val manager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = pending(context)
@@ -33,10 +36,5 @@ object Alarms {
             // "Alarms & reminders" isn't allowed yet: inexact, until the user grants it.
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         }
-    }
-
-    /** Registers the alarm for the core's next reminder. Used after firing and at boot. */
-    fun scheduleNext(context: Context) {
-        scheduleAt(context, Native.nextDue(Native.dbPath(context), System.currentTimeMillis()))
     }
 }

@@ -920,6 +920,23 @@ impl Core {
             .min()
     }
 
+    pub fn device_state(&self, key: &str) -> Option<String> {
+        self.store.device_state(key).ok().flatten()
+    }
+
+    pub fn set_device_state(&self, key: &str, value: &str) -> Result<()> {
+        self.store.set_device_state(key, value)
+    }
+
+    /// The earliest moment the device has something to do: an instance to fire, or an
+    /// alert to show, repeat or escalate. For scheduling the next exact alarm.
+    pub fn next_wake(&self, engine: &AlertEngine, now: Millis) -> Option<Millis> {
+        [self.next_due(now), engine.next_wake(self, now)]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
     /// Every event in the personal list's stream, oldest first: the history.
     pub fn history(&self) -> Vec<Event> {
         self.store.events(PERSONAL_LIST).unwrap_or_default()

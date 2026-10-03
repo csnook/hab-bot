@@ -77,7 +77,7 @@ fn create(app: tauri::State<App>, reminder: NewReminder) -> Result<(), String> {
     let mut core = fresh(&app);
     core.create(reminder, now()).map_err(|e| e.to_string())?;
     #[cfg(target_os = "android")]
-    android::schedule_alarm(core.next_due(now()));
+    android::refresh();
     Ok(())
 }
 
@@ -140,7 +140,7 @@ fn skip_ahead(
     core.skip_ahead(&occurrence_id, note, now())
         .map_err(|e| e.to_string())?;
     #[cfg(target_os = "android")]
-    android::schedule_alarm(core.next_due(now()));
+    android::refresh();
     Ok(())
 }
 
@@ -185,7 +185,7 @@ fn complete_early(app: tauri::State<App>, reminder_id: String) -> Result<(), Str
     core.complete_early(&reminder_id, now(), now())
         .map_err(|e| e.to_string())?;
     #[cfg(target_os = "android")]
-    android::schedule_alarm(core.next_due(now()));
+    android::refresh();
     Ok(())
 }
 
@@ -239,6 +239,8 @@ fn spawn_clock(handle: AppHandle) {
             };
             if ids != last {
                 last = ids;
+                // something changed in the app: bring the notifications and alarm up to date
+                android::refresh();
                 let _ = handle.emit("changed", ());
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -368,7 +370,7 @@ pub fn run() {
             let path = dir.join("reminders.db");
             let core = Core::open(path.to_str().expect("utf-8 data path"), USER)?;
             #[cfg(target_os = "android")]
-            android::schedule_alarm(core.next_due(now()));
+            android::refresh();
             app.manage(App {
                 core: Mutex::new(core),
             });
