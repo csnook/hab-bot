@@ -5,6 +5,7 @@
 //! server is reached by IP address, LAN name or VPN name. Signatures in the
 //! handshake are still verified, so only the holder of the key can use it.
 
+use hab_proto::{auth, DeviceKeys};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
 use hyper::Request;
@@ -22,7 +23,7 @@ use tokio_rustls::TlsConnector;
 
 pub const DEFAULT_PORT: u16 = 443;
 const TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_RESPONSE: usize = 1 << 20;
+const MAX_RESPONSE: usize = 16 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
@@ -159,7 +160,7 @@ pub fn parse_address(address: &str) -> Result<(String, u16), TlsError> {
     Ok((host.to_string(), port))
 }
 
-async fn connect(
+pub(crate) async fn connect(
     address: &str,
     expected: Option<&str>,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Option<String>), TlsError> {
@@ -212,6 +213,32 @@ pub struct ServerInfo {
     pub version: String,
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The headers that sign a request as `device_id`.
+pub(crate) fn signed_headers(
+    device: &DeviceKeys,
+    device_id: i64,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Vec<(&'static str, String)> {
+    let time = unix_now();
+    vec![
+        (auth::HEADER_DEVICE, device_id.to_string()),
+        (auth::HEADER_TIME, time.to_string()),
+        (
+            auth::HEADER_SIGNATURE,
+            auth::sign_request(device, device_id, method, path, time, body),
+        ),
+    ]
+}
+
 /// A server whose certificate is pinned.
 #[derive(Debug, Clone)]
 pub struct Pinned {
@@ -240,11 +267,40 @@ impl Pinned {
         self.request("POST", path, Some(body)).await
     }
 
+    /// POST JSON signed by a device, which is how the server knows who is
+    /// asking (see `hab_proto::auth`).
+    pub async fn signed_post<B: Serialize, R: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        device_id: i64,
+        device: &DeviceKeys,
+    ) -> Result<R, TlsError> {
+        let payload = serde_json::to_vec(body).map_err(|e| TlsError::Protocol(e.to_string()))?;
+        let headers = signed_headers(device, device_id, "POST", path, &payload);
+        self.request_with("POST", path, Some(payload), &headers)
+            .await
+    }
+
     async fn request<B: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
         body: Option<&B>,
+    ) -> Result<R, TlsError> {
+        let payload = match body {
+            Some(b) => Some(serde_json::to_vec(b).map_err(|e| TlsError::Protocol(e.to_string()))?),
+            None => None,
+        };
+        self.request_with(method, path, payload, &[]).await
+    }
+
+    async fn request_with<R: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Vec<u8>>,
+        headers: &[(&'static str, String)],
     ) -> Result<R, TlsError> {
         let (tls, _) = connect(&self.address, Some(&self.fingerprint)).await?;
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
@@ -254,20 +310,20 @@ impl Pinned {
             let _ = conn.await;
         });
         let (host, port) = parse_address(&self.address)?;
-        let payload = match body {
-            Some(b) => serde_json::to_vec(b).map_err(|e| TlsError::Protocol(e.to_string()))?,
-            None => Vec::new(),
-        };
+        let has_body = body.is_some();
         let mut req = Request::builder()
             .method(method)
             .uri(path)
             .header("host", format!("{host}:{port}"))
             .header("accept", "application/json");
-        if body.is_some() {
+        if has_body {
             req = req.header("content-type", "application/json");
         }
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
         let req = req
-            .body(Full::new(Bytes::from(payload)))
+            .body(Full::new(Bytes::from(body.unwrap_or_default())))
             .map_err(|e| TlsError::Protocol(e.to_string()))?;
         let response = tokio::time::timeout(TIMEOUT, sender.send_request(req))
             .await

@@ -6,10 +6,12 @@ pub mod join;
 pub mod keystore;
 pub mod profile;
 pub mod strength;
+pub mod sync;
 pub mod tls;
 
 pub use join::{join, JoinError, JoinRequest, Joined};
 pub use keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};
 pub use profile::{Profile, Setup, SetupFile};
 pub use strength::{check_password, suggest_passphrase, PasswordCheck};
+pub use sync::{SyncError, SyncStatus, Syncer};
 pub use tls::{probe, Pinned, ServerInfo, TlsError};

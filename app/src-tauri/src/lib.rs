@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hab_client::{
     check_password, join, suggest_passphrase, tls, JoinRequest, KeyStore, PasswordCheck, Pinned,
-    Profile, Setup, SetupFile,
+    Profile, Setup, SetupFile, Syncer,
 };
 use hab_core::{Core, Snapshot};
 use serde::Serialize;
@@ -18,6 +18,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
+use tokio::sync::{watch, Notify};
 
 /// How long the scheduler sleeps at most, so it notices clock changes and
 /// resumes from suspend promptly.
@@ -27,6 +28,10 @@ const STATE_CHANGED: &str = "state-changed";
 struct App {
     core: Arc<Mutex<Core>>,
     wake: Sender<()>,
+    /// Tells the sync loop there is a change to send.
+    sync_wake: Arc<Notify>,
+    /// Stops the sync loop; set when the app quits.
+    sync_stop: watch::Sender<bool>,
     /// Where `setup.json` and the key file live.
     data_dir: PathBuf,
     /// How this device is set up; None until the first-start choice is made.
@@ -57,6 +62,7 @@ fn create_reminder(
         .unwrap()
         .create_reminder(&title, fire_at, now())
         .map_err(|e| e.to_string())?;
+    app.sync_wake.notify_one();
     let _ = app.wake.send(());
     let _ = handle.emit(STATE_CHANGED, ());
     Ok(())
@@ -73,6 +79,7 @@ fn complete_occurrence(
         .unwrap()
         .complete(&occurrence_id, now())
         .map_err(|e| e.to_string())?;
+    app.sync_wake.notify_one();
     let _ = handle.emit(STATE_CHANGED, ());
     Ok(())
 }
@@ -173,9 +180,55 @@ struct JoinArgs {
     portable: bool,
 }
 
+/// Sync this device's personal list with its server until the app quits.
+/// What the device made while standalone is uploaded first, history included;
+/// the loop then carries on from the same place after every restart, and
+/// uploads anything made offline when the server can be reached again.
+async fn start_sync(
+    handle: AppHandle,
+    profile: Profile,
+    data_dir: PathBuf,
+    core: Arc<Mutex<Core>>,
+    wake: Arc<Notify>,
+    stop: watch::Receiver<bool>,
+    upload_first: bool,
+) -> Result<(), String> {
+    {
+        let mut core = core.lock().unwrap();
+        if !core.is_joined().map_err(|e| e.to_string())? {
+            core.join(
+                &format!("u{}", profile.account_id),
+                &profile.device_id.to_string(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let store = KeyStore::open(&data_dir).await;
+    let notify = handle.clone();
+    let syncer = Syncer::new(&profile, &store, core, wake, move || {
+        let _ = notify.emit(STATE_CHANGED, ());
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = handle.emit(STATE_CHANGED, ());
+    if upload_first {
+        // If this fails the loop below does it again when it connects.
+        if let Err(e) = syncer.upload_standalone().await {
+            eprintln!("uploading the standalone history failed: {e}");
+        }
+        let _ = handle.emit(STATE_CHANGED, ());
+    }
+    tauri::async_runtime::spawn(async move { syncer.run(stop).await });
+    Ok(())
+}
+
 /// Create the first account. On success the pin and profile are remembered.
 #[tauri::command]
-async fn join_server(app: tauri::State<'_, App>, args: JoinArgs) -> Result<Profile, String> {
+async fn join_server(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    args: JoinArgs,
+) -> Result<Profile, String> {
     let store = KeyStore::open(&app.data_dir).await;
     let joined = join(
         JoinRequest {
@@ -198,6 +251,16 @@ async fn join_server(app: tauri::State<'_, App>, args: JoinArgs) -> Result<Profi
         .save(&setup)
         .map_err(|e| e.to_string())?;
     *app.setup.lock().unwrap() = Some(setup);
+    start_sync(
+        handle,
+        joined.profile.clone(),
+        app.data_dir.clone(),
+        app.core.clone(),
+        app.sync_wake.clone(),
+        app.sync_stop.subscribe(),
+        true,
+    )
+    .await?;
     Ok(joined.profile)
 }
 
@@ -210,7 +273,12 @@ async fn key_store_name(app: tauri::State<'_, App>) -> Result<String, String> {
 /// Fires what is due, shows a plain notification for each, and sleeps until
 /// the next reminder. The first pass fires reminders whose time passed while
 /// the app was closed.
-fn run_scheduler(app: AppHandle, core: Arc<Mutex<Core>>, woken: mpsc::Receiver<()>) {
+fn run_scheduler(
+    app: AppHandle,
+    core: Arc<Mutex<Core>>,
+    sync_wake: Arc<Notify>,
+    woken: mpsc::Receiver<()>,
+) {
     loop {
         let (fired, next) = {
             let mut core = core.lock().unwrap();
@@ -232,6 +300,7 @@ fn run_scheduler(app: AppHandle, core: Arc<Mutex<Core>>, woken: mpsc::Receiver<(
             }
         }
         if !fired.is_empty() {
+            sync_wake.notify_one();
             let _ = app.emit(STATE_CHANGED, ());
         }
         let wait = next
@@ -269,9 +338,25 @@ pub fn run() {
             let data_dir = data_dir_of(&db);
             let setup = SetupFile::in_dir(&data_dir).load()?;
             let (wake, woken) = mpsc::channel();
+            let sync_wake = Arc::new(Notify::new());
+            let (sync_stop, stop) = watch::channel(false);
+            if let Some(Setup::Joined(profile)) = &setup {
+                let (handle, profile, data_dir) =
+                    (handle.clone(), profile.clone(), data_dir.clone());
+                let (core, sync_wake) = (core.clone(), sync_wake.clone());
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) =
+                        start_sync(handle, profile, data_dir, core, sync_wake, stop, false).await
+                    {
+                        eprintln!("sync did not start: {e}");
+                    }
+                });
+            }
             app.manage(App {
                 core: core.clone(),
                 wake,
+                sync_wake: sync_wake.clone(),
+                sync_stop,
                 data_dir,
                 setup: Mutex::new(setup),
             });
@@ -292,7 +377,7 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            std::thread::spawn(move || run_scheduler(handle, core, woken));
+            std::thread::spawn(move || run_scheduler(handle, core, sync_wake, woken));
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -13,9 +13,14 @@ impl Algs {
     pub const IDENTITY: &'static str = "ed25519/v1";
     /// OPAQUE: ristretto255, 3DH, SHA-512.
     pub const OPAQUE: &'static str = "opaque-ristretto255-sha512/v1";
+    /// Event: XChaCha20-Poly1305 under the list key, signed with Ed25519.
+    pub const EVENT: &'static str = "xchacha20poly1305+ed25519/v1";
+    /// List key: HPKE (RFC 9180) in auth mode, DHKEM(X25519, HKDF-SHA256),
+    /// HKDF-SHA256 and ChaCha20-Poly1305.
+    pub const LIST_KEY: &'static str = "hpke-auth-x25519-hkdf-sha256-chacha20poly1305/v1";
 }
 
-mod b64 {
+pub(crate) mod b64 {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -121,6 +126,168 @@ pub fn valid_username(name: &str) -> bool {
 pub fn valid_display_name(name: &str) -> bool {
     let t = name.trim();
     !t.is_empty() && t.chars().count() <= MAX_DISPLAY_NAME && !t.chars().any(char::is_control)
+}
+
+// ---- Sync: the encrypted event log (ADR 0005) ----
+
+/// The server accepts events whose clock is at most this far ahead of its own.
+pub const MAX_CLOCK_AHEAD_SECS: i64 = 600;
+/// The largest ciphertext the server takes for one event.
+pub const MAX_EVENT_BYTES: usize = 64 * 1024;
+/// The longest id a device may make.
+pub const MAX_ID: usize = 80;
+
+/// Ids that devices make (lists, events) are short and plain, so they are safe
+/// to log, store and put in a signed header.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '@' | '.'))
+}
+
+/// One event as the server holds it. The server reads the header, which the
+/// device signed, and never the ciphertext.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Envelope {
+    /// Algorithms used to encrypt and sign: [`Algs::EVENT`].
+    pub alg: String,
+    /// Version of the event format inside. A device that doesn't know it keeps
+    /// the event without applying it; the server accepts any.
+    pub format: u32,
+    pub list_id: String,
+    pub event_id: String,
+    pub device_id: i64,
+    /// The device's clock when it made the event, in Unix seconds. The server
+    /// rejects clocks set far ahead of its own.
+    pub clock: i64,
+    #[serde(with = "b64")]
+    pub nonce: Vec<u8>,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+    /// The device's Ed25519 signature over the header and the ciphertext.
+    #[serde(with = "b64")]
+    pub signature: Vec<u8>,
+}
+
+/// A list key sealed to one device.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SealedKey {
+    pub alg: String,
+    /// The device this copy is for.
+    pub device_id: i64,
+    /// The device that sealed it (HPKE auth mode proves who).
+    pub sealed_by: i64,
+    pub key_version: u32,
+    #[serde(with = "b64")]
+    pub encapped: Vec<u8>,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RegisterList {
+    pub list_id: String,
+    pub keys: Vec<SealedKey>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ListRef {
+    pub list_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ListRefs {
+    pub lists: Vec<ListRef>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SealedKeys {
+    pub keys: Vec<SealedKey>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeviceEntry {
+    pub id: i64,
+    pub record: DeviceRecord,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeviceList {
+    pub devices: Vec<DeviceEntry>,
+}
+
+/// What the server did with an event it was sent.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Numbered {
+    pub event_id: String,
+    pub seq: i64,
+    pub received_at: i64,
+    /// True when the server already had this exact event (a resend).
+    pub duplicate: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Rejected {
+    pub event_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AppendBatch {
+    pub envelopes: Vec<Envelope>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AppendResults {
+    pub numbered: Vec<Numbered>,
+    pub rejected: Vec<Rejected>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FetchEvents {
+    pub list_id: String,
+    /// Return events numbered after this one.
+    pub after: i64,
+    pub limit: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NumberedEnvelope {
+    pub seq: i64,
+    pub received_at: i64,
+    pub envelope: Envelope,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EventPage {
+    pub events: Vec<NumberedEnvelope>,
+    pub more: bool,
+}
+
+/// What a device says on its WebSocket.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Append { envelope: Envelope },
+}
+
+/// What the server says on a device's WebSocket.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ServerMessage {
+    /// The device's own event was numbered.
+    Numbered(Numbered),
+    Rejected(Rejected),
+    /// Another device's event, numbered.
+    Event {
+        seq: i64,
+        received_at: i64,
+        envelope: Envelope,
+    },
+    /// The device missed pushes; it should download what it lacks.
+    Resync,
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! The server's one SQLite file.
 
+use hab_proto::wire::{DeviceEntry, DeviceRecord, Envelope, Numbered, NumberedEnvelope, SealedKey};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
@@ -83,7 +84,44 @@ impl Db {
                  signature      BLOB NOT NULL,
                  created_at     INTEGER NOT NULL
              );
-             PRAGMA user_version = 1;",
+             -- A reminder list the server stores for an account. Only its id is
+             -- known: its name, reminders and everything else are inside events.
+             CREATE TABLE IF NOT EXISTS lists (
+                 id         TEXT PRIMARY KEY,
+                 account_id INTEGER NOT NULL REFERENCES accounts(id),
+                 created_at INTEGER NOT NULL
+             );
+             -- The list's key, sealed to a device by another device. The server
+             -- cannot open these; it only hands them to the device they are for.
+             CREATE TABLE IF NOT EXISTS list_keys (
+                 list_id     TEXT    NOT NULL REFERENCES lists(id),
+                 device_id   INTEGER NOT NULL REFERENCES devices(id),
+                 key_version INTEGER NOT NULL,
+                 sealed_by   INTEGER NOT NULL REFERENCES devices(id),
+                 alg         TEXT    NOT NULL,
+                 encapped    BLOB    NOT NULL,
+                 sealed      BLOB    NOT NULL,
+                 PRIMARY KEY (list_id, device_id, key_version)
+             );
+             -- Each list's stream. The server numbers events and sees the list,
+             -- the device, the size and when it received them. The ciphertext
+             -- is kept so other devices can download it, never read.
+             CREATE TABLE IF NOT EXISTS events (
+                 list_id     TEXT    NOT NULL REFERENCES lists(id),
+                 seq         INTEGER NOT NULL,
+                 event_id    TEXT    NOT NULL UNIQUE,
+                 device_id   INTEGER NOT NULL REFERENCES devices(id),
+                 alg         TEXT    NOT NULL,
+                 format      INTEGER NOT NULL,
+                 clock       INTEGER NOT NULL,
+                 size        INTEGER NOT NULL,
+                 received_at INTEGER NOT NULL,
+                 nonce       BLOB    NOT NULL,
+                 ciphertext  BLOB    NOT NULL,
+                 signature   BLOB    NOT NULL,
+                 PRIMARY KEY (list_id, seq)
+             );
+             PRAGMA user_version = 2;",
         )?;
         Ok(Db { conn })
     }
@@ -175,6 +213,266 @@ impl Db {
         }))
     }
 
+    /// A device, with the keys its requests and events are checked against.
+    pub fn device(&self, id: i64) -> Result<Option<DeviceRow>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, account_id, signing_public FROM devices WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(DeviceRow {
+                        id: r.get(0)?,
+                        account_id: r.get(1)?,
+                        signing_public: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Every device of an account, as the join stored it.
+    pub fn devices_of(&self, account_id: i64) -> Result<Vec<DeviceEntry>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, portable, alg, signing_public, sealing_public, signature
+             FROM devices WHERE account_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(DeviceEntry {
+                id: r.get(0)?,
+                record: DeviceRecord {
+                    name: r.get(1)?,
+                    portable: r.get(2)?,
+                    alg: r.get(3)?,
+                    signing_public: r.get(4)?,
+                    sealing_public: r.get(5)?,
+                    signature: r.get(6)?,
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Make `list_id` a list of this account and store sealed copies of its
+    /// key. Registering again adds copies, such as for a new device. Fails
+    /// with `Forbidden` if another account has the list, or if a copy names a
+    /// device that isn't this account's.
+    pub fn register_list(
+        &self,
+        account_id: i64,
+        list_id: &str,
+        keys: &[SealedKey],
+        now: i64,
+    ) -> Result<(), SyncError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let owner: Option<i64> = tx
+            .query_row(
+                "SELECT account_id FROM lists WHERE id = ?1",
+                [list_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match owner {
+            Some(o) if o != account_id => return Err(SyncError::Forbidden),
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO lists (id, account_id, created_at) VALUES (?1, ?2, ?3)",
+                    params![list_id, account_id, now],
+                )?;
+            }
+        }
+        for k in keys {
+            for device in [k.device_id, k.sealed_by] {
+                let account: Option<i64> = tx
+                    .query_row(
+                        "SELECT account_id FROM devices WHERE id = ?1",
+                        [device],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if account != Some(account_id) {
+                    return Err(SyncError::Forbidden);
+                }
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO list_keys
+                     (list_id, device_id, key_version, sealed_by, alg, encapped, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    list_id,
+                    k.device_id,
+                    k.key_version,
+                    k.sealed_by,
+                    k.alg,
+                    k.encapped,
+                    k.ciphertext
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The ids of an account's lists, oldest first.
+    pub fn lists_of(&self, account_id: i64) -> Result<Vec<String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM lists WHERE account_id = ?1 ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map([account_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The copies of a list's key sealed to `device_id`.
+    pub fn sealed_keys(
+        &self,
+        account_id: i64,
+        list_id: &str,
+        device_id: i64,
+    ) -> Result<Vec<SealedKey>, SyncError> {
+        self.owned_list(account_id, list_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT key_version, sealed_by, alg, encapped, sealed FROM list_keys
+             WHERE list_id = ?1 AND device_id = ?2 ORDER BY key_version",
+        )?;
+        let rows = stmt.query_map(params![list_id, device_id], |r| {
+            Ok(SealedKey {
+                alg: r.get(2)?,
+                device_id,
+                sealed_by: r.get(1)?,
+                key_version: r.get(0)?,
+                encapped: r.get(3)?,
+                ciphertext: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn owned_list(&self, account_id: i64, list_id: &str) -> Result<(), SyncError> {
+        let owner: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT account_id FROM lists WHERE id = ?1",
+                [list_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match owner {
+            Some(o) if o == account_id => Ok(()),
+            // The same answer for a list that isn't there and one that isn't
+            // theirs, so ids can't be probed.
+            _ => Err(SyncError::UnknownList),
+        }
+    }
+
+    /// Add an event to its list's stream with the next number. Sending the
+    /// same event again returns its number; reusing an event id for anything
+    /// else is refused.
+    pub fn append_event(
+        &self,
+        account_id: i64,
+        e: &Envelope,
+        now: i64,
+    ) -> Result<Numbered, SyncError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let owner: Option<i64> = tx
+            .query_row(
+                "SELECT account_id FROM lists WHERE id = ?1",
+                [&e.list_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if owner != Some(account_id) {
+            return Err(SyncError::UnknownList);
+        }
+        let existing: Option<(String, i64, i64, Vec<u8>, i64)> = tx
+            .query_row(
+                "SELECT list_id, device_id, seq, signature, received_at FROM events WHERE event_id = ?1",
+                [&e.event_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        if let Some((list, device, seq, signature, received_at)) = existing {
+            if list == e.list_id && device == e.device_id && signature == e.signature {
+                return Ok(Numbered {
+                    event_id: e.event_id.clone(),
+                    seq,
+                    received_at,
+                    duplicate: true,
+                });
+            }
+            return Err(SyncError::DuplicateId);
+        }
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE list_id = ?1",
+            [&e.list_id],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO events (list_id, seq, event_id, device_id, alg, format, clock, size,
+                 received_at, nonce, ciphertext, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                e.list_id,
+                seq,
+                e.event_id,
+                e.device_id,
+                e.alg,
+                e.format,
+                e.clock,
+                e.ciphertext.len() as i64,
+                now,
+                e.nonce,
+                e.ciphertext,
+                e.signature
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Numbered {
+            event_id: e.event_id.clone(),
+            seq,
+            received_at: now,
+            duplicate: false,
+        })
+    }
+
+    /// Up to `limit` events of a list numbered after `after`, and whether more follow.
+    pub fn events_after(
+        &self,
+        account_id: i64,
+        list_id: &str,
+        after: i64,
+        limit: u32,
+    ) -> Result<(Vec<NumberedEnvelope>, bool), SyncError> {
+        self.owned_list(account_id, list_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, received_at, alg, format, event_id, device_id, clock, nonce, ciphertext, signature
+             FROM events WHERE list_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let mut rows: Vec<NumberedEnvelope> = stmt
+            .query_map(params![list_id, after, limit as i64 + 1], |r| {
+                Ok(NumberedEnvelope {
+                    seq: r.get(0)?,
+                    received_at: r.get(1)?,
+                    envelope: Envelope {
+                        alg: r.get(2)?,
+                        format: r.get(3)?,
+                        list_id: list_id.to_string(),
+                        event_id: r.get(4)?,
+                        device_id: r.get(5)?,
+                        clock: r.get(6)?,
+                        nonce: r.get(7)?,
+                        ciphertext: r.get(8)?,
+                        signature: r.get(9)?,
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        Ok((rows, more))
+    }
+
     /// The bundle and key-derivation cost stored for a username.
     #[cfg(test)]
     pub fn account(&self, username: &str) -> Result<Option<StoredAccount>, DbError> {
@@ -197,6 +495,25 @@ impl Db {
             )
             .optional()?)
     }
+}
+
+/// A device and the account it belongs to.
+pub struct DeviceRow {
+    pub id: i64,
+    pub account_id: i64,
+    pub signing_public: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+    #[error("there is no such list")]
+    UnknownList,
+    #[error("not allowed")]
+    Forbidden,
+    #[error("that event id is already used")]
+    DuplicateId,
 }
 
 /// What joining stores for an account and its first device.
@@ -343,6 +660,115 @@ mod tests {
         db.create_first_account(|_| true, &test_account("chris"), 0)
             .unwrap()
             .unwrap();
+    }
+
+    fn envelope(list: &str, id: &str, device: i64) -> Envelope {
+        Envelope {
+            alg: "x".into(),
+            format: 9,
+            list_id: list.into(),
+            event_id: id.into(),
+            device_id: device,
+            clock: 1,
+            nonce: vec![1; 24],
+            ciphertext: vec![2; 40],
+            signature: vec![3; 64],
+        }
+    }
+
+    /// Two accounts: the first from joining, the second inserted directly.
+    fn two_accounts() -> Db {
+        let db = Db::in_memory().unwrap();
+        db.create_first_account(|_| true, &test_account("chris"), 0)
+            .unwrap()
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "INSERT INTO accounts VALUES (2, 'dana', 'Dana', 0, 0, 'i', x'01', x'02', 'argon2id', 1, 1, 1, 'b', x'03', x'04');
+                 INSERT INTO devices VALUES (2, 2, 'Phone', 1, 'd', x'05', x'06', x'07', 0);",
+            )
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn the_server_numbers_each_list_in_the_order_events_arrive() {
+        let db = two_accounts();
+        db.register_list(1, "a", &[], 0).unwrap();
+        db.register_list(1, "b", &[], 0).unwrap();
+        let n = |l: &str, id: &str| db.append_event(1, &envelope(l, id, 1), 10).unwrap().seq;
+        assert_eq!(
+            (n("a", "e1"), n("a", "e2"), n("b", "e3"), n("a", "e4")),
+            (1, 2, 1, 3)
+        );
+        let (page, more) = db.events_after(1, "a", 1, 10).unwrap();
+        assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(!more);
+        let (page, more) = db.events_after(1, "a", 0, 2).unwrap();
+        assert_eq!((page.len(), more), (2, true));
+        // Any format version is stored as it came.
+        assert_eq!(page[0].envelope.format, 9);
+    }
+
+    #[test]
+    fn a_list_is_only_its_accounts_and_looks_missing_to_others() {
+        let db = two_accounts();
+        db.register_list(1, "a", &[], 0).unwrap();
+        assert!(matches!(
+            db.register_list(2, "a", &[], 0),
+            Err(SyncError::Forbidden)
+        ));
+        assert!(matches!(
+            db.append_event(2, &envelope("a", "x", 2), 1),
+            Err(SyncError::UnknownList)
+        ));
+        assert!(matches!(
+            db.events_after(2, "a", 0, 10),
+            Err(SyncError::UnknownList)
+        ));
+        assert!(matches!(
+            db.events_after(2, "nope", 0, 10),
+            Err(SyncError::UnknownList)
+        ));
+        // A sealed copy can't name another account's device.
+        let key = SealedKey {
+            alg: "k".into(),
+            device_id: 2,
+            sealed_by: 1,
+            key_version: 1,
+            encapped: vec![1],
+            ciphertext: vec![2],
+        };
+        assert!(matches!(
+            db.register_list(1, "a", &[key], 0),
+            Err(SyncError::Forbidden)
+        ));
+        assert_eq!(db.lists_of(1).unwrap(), vec!["a".to_string()]);
+        assert!(db.lists_of(2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_event_id_can_be_resent_but_not_reused() {
+        let db = two_accounts();
+        db.register_list(1, "a", &[], 0).unwrap();
+        db.register_list(1, "b", &[], 0).unwrap();
+        let e = envelope("a", "e1", 1);
+        assert!(!db.append_event(1, &e, 10).unwrap().duplicate);
+        let again = db.append_event(1, &e, 99).unwrap();
+        assert_eq!(
+            (again.seq, again.received_at, again.duplicate),
+            (1, 10, true)
+        );
+        let mut other = e.clone();
+        other.signature = vec![9; 64];
+        assert!(matches!(
+            db.append_event(1, &other, 11),
+            Err(SyncError::DuplicateId)
+        ));
+        assert!(matches!(
+            db.append_event(1, &envelope("b", "e1", 1), 11),
+            Err(SyncError::DuplicateId)
+        ));
     }
 
     #[test]

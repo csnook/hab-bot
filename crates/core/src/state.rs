@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -29,6 +29,8 @@ pub struct DueItem {
     pub title: String,
     pub scheduled_at: i64,
     pub fired_at: i64,
+    /// A change to it hasn't been received by the server yet.
+    pub not_sent: bool,
 }
 
 /// A reminder that has not fired yet.
@@ -37,6 +39,8 @@ pub struct UpcomingItem {
     pub reminder_id: String,
     pub title: String,
     pub fire_at: i64,
+    /// A change to it hasn't been received by the server yet.
+    pub not_sent: bool,
 }
 
 /// The current state, built by applying a stream's events in order.
@@ -44,6 +48,9 @@ pub struct UpcomingItem {
 pub struct State {
     pub reminders: BTreeMap<String, Reminder>,
     pub occurrences: BTreeMap<String, Occurrence>,
+    /// Reminders and occurrences with a change the server hasn't numbered.
+    unsent_reminders: BTreeSet<String>,
+    unsent_occurrences: BTreeSet<String>,
 }
 
 impl State {
@@ -51,6 +58,17 @@ impl State {
     /// devices converge: the first opening of an occurrence and the first
     /// completion win, and later duplicates are ignored.
     pub fn apply(&mut self, stored: &StoredEvent) {
+        if stored.seq.is_none() {
+            match &stored.event {
+                Event::ReminderCreated { reminder_id, .. } => {
+                    self.unsent_reminders.insert(reminder_id.clone());
+                }
+                Event::OccurrenceOpened { occurrence_id, .. }
+                | Event::OccurrenceCompleted { occurrence_id, .. } => {
+                    self.unsent_occurrences.insert(occurrence_id.clone());
+                }
+            }
+        }
         match &stored.event {
             Event::ReminderCreated {
                 reminder_id,
@@ -137,6 +155,8 @@ impl State {
                     title: r.title.clone(),
                     scheduled_at: o.scheduled_at,
                     fired_at: o.fired_at,
+                    not_sent: self.unsent_occurrences.contains(&o.id)
+                        || self.unsent_reminders.contains(&r.id),
                 })
             })
             .collect();
@@ -153,10 +173,16 @@ impl State {
                 reminder_id: r.id.clone(),
                 title: r.title.clone(),
                 fire_at: r.fire_at,
+                not_sent: self.unsent_reminders.contains(&r.id),
             })
             .collect();
         v.sort_by_key(|u| (u.fire_at, u.reminder_id.clone()));
         v
+    }
+
+    /// Whether any change hasn't been received by the server yet.
+    pub fn has_unsent(&self) -> bool {
+        !self.unsent_reminders.is_empty() || !self.unsent_occurrences.is_empty()
     }
 
     /// A one-off reminder is finished once its occurrence is closed.

@@ -6,17 +6,22 @@ export interface DueItem {
   title: string;
   scheduled_at: number;
   fired_at: number;
+  /** The server hasn't received a change to it yet. */
+  not_sent: boolean;
 }
 
 export interface UpcomingItem {
   reminder_id: string;
   title: string;
   fire_at: number;
+  not_sent: boolean;
 }
 
 export interface Snapshot {
   due: DueItem[];
   upcoming: UpcomingItem[];
+  /** Set while the list holds changes from a newer app. */
+  update_notice: string | null;
 }
 
 export const snapshot = () => invoke<Snapshot>("snapshot");

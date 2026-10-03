@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::event::{Event, StoredEvent};
+use crate::event::{Event, Outgoing, Payload, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE};
 use crate::state::{DueItem, State, UpcomingItem};
 use crate::store::Store;
 use crate::{Error, Result};
@@ -23,6 +23,9 @@ pub struct Snapshot {
     pub due: Vec<DueItem>,
     /// Reminders that haven't fired yet.
     pub upcoming: Vec<UpcomingItem>,
+    /// Set while the list holds changes from a newer app, which this one keeps
+    /// without applying.
+    pub update_notice: Option<String>,
 }
 
 /// The core for one device: its storage, its user, and the personal list's state.
@@ -32,6 +35,8 @@ pub struct Core {
     list_id: String,
     device_id: String,
     user_id: String,
+    /// Events from a newer app are being kept unapplied.
+    holding_newer: bool,
 }
 
 impl Core {
@@ -49,17 +54,152 @@ impl Core {
         let list_id = store.meta_or_init("personal_list_id", new_id)?;
         let device_id = store.meta_or_init("device_id", new_id)?;
         let user_id = store.meta_or_init("user_id", new_id)?;
-        let mut state = State::default();
-        for e in store.stream(&list_id)? {
-            state.apply(&e);
-        }
-        Ok(Core {
+        let mut core = Core {
             store,
-            state,
+            state: State::default(),
             list_id,
             device_id,
             user_id,
-        })
+            holding_newer: false,
+        };
+        core.rebuild()?;
+        Ok(core)
+    }
+
+    /// Builds the state again from the stream: the server's numbered events in
+    /// order, then this device's unsent ones on top.
+    fn rebuild(&mut self) -> Result<()> {
+        let mut state = State::default();
+        for e in self.store.stream(&self.list_id)? {
+            state.apply(&e);
+        }
+        self.state = state;
+        self.holding_newer = !self.store.held(&self.list_id)?.is_empty();
+        Ok(())
+    }
+
+    pub fn personal_list_id(&self) -> &str {
+        &self.list_id
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Whether this device has joined a server.
+    pub fn is_joined(&self) -> Result<bool> {
+        self.store.joined()
+    }
+
+    /// This device has joined a server as `user_id`, as device `device_id`
+    /// there. Everything it made while standalone is now that user's and
+    /// that device's, still unsent: the sync layer uploads it, history
+    /// included, and the server numbers it.
+    pub fn join(&mut self, user_id: &str, device_id: &str) -> Result<()> {
+        self.store.adopt(user_id, device_id)?;
+        self.user_id = user_id.to_string();
+        self.device_id = device_id.to_string();
+        // The standalone numbers were this device's own; the server's replace them.
+        self.store.forget_local_numbers(&self.list_id)?;
+        self.rebuild()
+    }
+
+    /// Use the account's personal list, whose id the server gave this device,
+    /// in place of the one it made for itself. Only for a device whose own
+    /// list is still empty, such as one just added to an account.
+    pub fn use_personal_list(&mut self, list_id: &str) -> Result<()> {
+        if list_id == self.list_id {
+            return Ok(());
+        }
+        if !self.store.stream(&self.list_id)?.is_empty() {
+            return Err(Error::BadEvent("this device already has its own list"));
+        }
+        self.store.set_meta("personal_list_id", list_id)?;
+        self.list_id = list_id.to_string();
+        self.rebuild()
+    }
+
+    /// The events the server hasn't numbered, in the order they were made.
+    pub fn unsent(&self) -> Result<Vec<Outgoing>> {
+        self.store
+            .unsent(&self.list_id)?
+            .into_iter()
+            .map(|row| {
+                let payload = Payload {
+                    author: row.author,
+                    recorded_at: row.recorded_at,
+                    event: serde_json::from_slice(&row.body)?,
+                };
+                Ok(Outgoing {
+                    list_id: self.list_id.clone(),
+                    event_id: row.event_id,
+                    format: row.format,
+                    recorded_at: payload.recorded_at,
+                    payload: serde_json::to_vec(&payload)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The server numbered one of this device's events.
+    pub fn mark_sent(&mut self, event_id: &str, seq: i64) -> Result<()> {
+        self.store.set_seq(event_id, seq)?;
+        self.rebuild()
+    }
+
+    /// An event the server numbered, decrypted and verified by the sync layer.
+    /// One in a newer format is kept without being applied. Returns whether it
+    /// was new to this device.
+    pub fn receive(
+        &mut self,
+        list_id: &str,
+        seq: i64,
+        event_id: &str,
+        device_id: &str,
+        format: u32,
+        payload: &[u8],
+    ) -> Result<bool> {
+        let p: Payload =
+            serde_json::from_slice(payload).map_err(|_| Error::BadEvent("not a payload"))?;
+        if format <= FORMAT_VERSION && serde_json::from_value::<Event>(p.event.clone()).is_err() {
+            return Err(Error::BadEvent("not an event"));
+        }
+        let inserted = self.store.insert_numbered(
+            list_id,
+            seq,
+            event_id,
+            device_id,
+            &p.author,
+            p.recorded_at,
+            format,
+            &serde_json::to_vec(&p.event)?,
+        )?;
+        self.rebuild()?;
+        Ok(inserted)
+    }
+
+    /// Ids of events kept without being applied, because a newer app made them.
+    pub fn held_events(&self) -> Result<Vec<String>> {
+        Ok(self
+            .store
+            .held(&self.list_id)?
+            .into_iter()
+            .map(|h| h.event_id)
+            .collect())
+    }
+
+    /// The highest server number this device has downloaded up to.
+    pub fn cursor(&self) -> Result<i64> {
+        Ok(self
+            .store
+            .meta(&format!("cursor:{}", self.list_id))?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn set_cursor(&self, seq: i64) -> Result<()> {
+        self.store
+            .set_meta(&format!("cursor:{}", self.list_id), &seq.to_string())
     }
 
     pub fn state(&self) -> &State {
@@ -164,6 +304,7 @@ impl Core {
         Snapshot {
             due: self.state.due(),
             upcoming: self.state.upcoming(),
+            update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
         }
     }
 }
@@ -310,8 +451,8 @@ mod tests {
         let fired = c.tick(T0).unwrap();
         c.complete(&fired[0].occurrence_id, T0 + 1).unwrap();
         let events = c.store.stream(&c.list_id).unwrap();
-        let seqs: Vec<i64> = events.iter().map(|e| e.seq).collect();
-        assert_eq!(seqs, vec![1, 2, 3]);
+        let seqs: Vec<Option<i64>> = events.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![Some(1), Some(2), Some(3)]);
         assert!(matches!(events[0].event, Event::ReminderCreated { .. }));
         assert!(matches!(events[1].event, Event::OccurrenceOpened { .. }));
         assert!(matches!(events[2].event, Event::OccurrenceCompleted { .. }));
@@ -327,7 +468,7 @@ mod tests {
         c.tick(T0).unwrap();
         let dup = StoredEvent {
             list_id: c.list_id.clone(),
-            seq: 99,
+            seq: Some(99),
             event_id: "other".into(),
             device_id: "other-device".into(),
             author: c.user_id.clone(),
@@ -342,5 +483,68 @@ mod tests {
         c.state.apply(&dup);
         assert_eq!(c.state().occurrences.len(), 1);
         assert_eq!(c.snapshot().due[0].fired_at, T0);
+    }
+
+    #[test]
+    fn after_joining_new_changes_wait_for_the_server_to_number_them() {
+        let mut c = core();
+        let rid = c.create_reminder("Before joining", T0 + 50, T0).unwrap();
+        assert!(!c.snapshot().upcoming[0].not_sent);
+        c.join("u1", "7").unwrap();
+        // The standalone history is now unsent, and is uploaded in order.
+        assert!(c.snapshot().upcoming[0].not_sent);
+        c.tick(T0 + 50).unwrap();
+        let out = c.unsent().unwrap();
+        assert_eq!(out.len(), 2);
+        let first: Payload = serde_json::from_slice(&out[0].payload).unwrap();
+        assert_eq!((first.author.as_str(), first.recorded_at), ("u1", T0));
+        assert_eq!(first.event["reminder_id"], rid);
+        // The server's numbers replace the local ones, wherever they fall.
+        c.mark_sent(&out[0].event_id, 5).unwrap();
+        assert!(c.snapshot().due[0].not_sent);
+        c.mark_sent(&out[1].event_id, 6).unwrap();
+        assert!(!c.snapshot().due[0].not_sent);
+        assert!(c.unsent().unwrap().is_empty());
+    }
+
+    #[test]
+    fn events_from_a_newer_format_are_kept_and_applied_after_an_update() {
+        let mut c = core();
+        c.join("u1", "7").unwrap();
+        let payload = |event: serde_json::Value| {
+            serde_json::to_vec(&Payload {
+                author: "u1".into(),
+                recorded_at: T0,
+                event,
+            })
+            .unwrap()
+        };
+        let list = c.personal_list_id().to_string();
+        let future = payload(serde_json::json!({"type": "hologram", "n": 1}));
+        assert!(c
+            .receive(&list, 1, "f1", "8", FORMAT_VERSION + 1, &future)
+            .unwrap());
+        assert_eq!(c.snapshot().update_notice.as_deref(), Some(UPDATE_NOTICE));
+        assert!(c.snapshot().upcoming.is_empty());
+        // An event in a known format that doesn't read is refused, not kept.
+        let junk = payload(serde_json::json!({"type": "hologram"}));
+        assert!(c
+            .receive(&list, 2, "bad", "8", FORMAT_VERSION, &junk)
+            .is_err());
+        // Receiving the same event again changes nothing.
+        assert!(!c
+            .receive(&list, 1, "f1", "8", FORMAT_VERSION + 1, &future)
+            .unwrap());
+        assert_eq!(c.held_events().unwrap(), vec!["f1".to_string()]);
+    }
+
+    #[test]
+    fn a_new_device_takes_the_accounts_list_only_while_its_own_is_empty() {
+        let mut c = core();
+        c.use_personal_list("account-list").unwrap();
+        assert_eq!(c.personal_list_id(), "account-list");
+        c.create_reminder("X", T0, T0).unwrap();
+        assert!(c.use_personal_list("other").is_err());
+        assert_eq!(c.personal_list_id(), "account-list");
     }
 }

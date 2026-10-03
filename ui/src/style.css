@@ -33,3 +33,5 @@ dd { margin: 0; }
 .sees { margin-top: 8px; }
 .sees ul { display: block; padding-left: 16px; list-style: disc; }
 .sees li { display: list-item; border: 0; }
+.not-sent { color: #888; font-size: 0.85rem; font-style: italic; }
+.notice { border: 1px solid #888; border-radius: 4px; padding: 8px; }

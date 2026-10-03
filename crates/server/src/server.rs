@@ -2,19 +2,27 @@
 
 use crate::cert::{self, CertError};
 use crate::config::{Config, DEFAULT_NAME};
-use crate::db::{Db, DbError, NewAccount, NewDevice};
+use crate::db::{Db, DbError, NewAccount, NewDevice, SyncError};
 use crate::peers::Peers;
 use crate::setup::SetupCode;
-use axum::extract::State as AxumState;
-use axum::http::StatusCode;
+use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, State as AxumState};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use hab_proto::auth::{
+    verify_request, HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME, MAX_REQUEST_AGE_SECS,
+};
 use hab_proto::opaque_ke::{
     self, RegistrationRequest, RegistrationUpload, ServerRegistration, ServerSetup,
 };
 use hab_proto::wire::{
-    valid_display_name, valid_username, Algs, ErrorBody, JoinFinish, JoinStart, JoinStarted, Joined,
+    valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ClientMessage,
+    DeviceList, Envelope, ErrorBody, EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted,
+    Joined, ListRef, ListRefs, Numbered, RegisterList, Rejected, SealedKeys, ServerMessage,
+    MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
 };
 use hab_proto::{verify_device, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
 use hyper_util::rt::TokioIo;
@@ -24,7 +32,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -67,7 +75,23 @@ struct Info {
     version: &'static str,
 }
 
+/// A numbered event, offered to the account's other devices that are connected.
+struct Pushed {
+    account_id: i64,
+    origin: i64,
+    seq: i64,
+    received_at: i64,
+    envelope: Envelope,
+}
+
+/// The most events one download returns.
+const MAX_PAGE: u32 = 100;
+/// The most events one upload may hold.
+const MAX_BATCH: usize = 100;
+const MAX_BODY: usize = 8 * 1024 * 1024;
+
 struct State {
+    push: broadcast::Sender<Arc<Pushed>>,
     db: Mutex<Db>,
     opaque: ServerSetup<Suite>,
     setup: SetupCode,
@@ -118,6 +142,7 @@ impl Server {
             db: Mutex::new(db),
             setup: SetupCode::generate(Instant::now()),
             peers: Arc::new(Peers::default()),
+            push: broadcast::channel(256).0,
         });
         let info = Arc::new(Info {
             name: name.clone(),
@@ -138,6 +163,14 @@ impl Server {
             )
             .route("/api/v1/join/start", post(join_start))
             .route("/api/v1/join/finish", post(join_finish))
+            .route("/api/v1/devices", post(devices))
+            .route("/api/v1/lists", post(lists))
+            .route("/api/v1/lists/register", post(register_list))
+            .route("/api/v1/lists/keys", post(list_keys))
+            .route("/api/v1/sync/append", post(append_batch))
+            .route("/api/v1/sync/events", post(fetch_events))
+            .route("/api/v1/sync/ws", get(sync_ws))
+            .layer(DefaultBodyLimit::max(MAX_BODY))
             .with_state(state.clone());
 
         let (shutdown, stop) = watch::channel(false);
@@ -212,6 +245,9 @@ impl Server {
 enum ApiError {
     Bad(&'static str),
     Forbidden,
+    Unauthorized,
+    NotFound,
+    Conflict(&'static str),
     Internal,
 }
 
@@ -220,6 +256,12 @@ impl IntoResponse for ApiError {
         let (status, error) = match self {
             ApiError::Bad(why) => (StatusCode::BAD_REQUEST, why),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "the setup code is not valid"),
+            ApiError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "the request is not signed by a device",
+            ),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "there is no such list"),
+            ApiError::Conflict(why) => (StatusCode::CONFLICT, why),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "something went wrong"),
         };
         (
@@ -236,6 +278,317 @@ impl From<DbError> for ApiError {
     fn from(e: DbError) -> ApiError {
         tracing::error!("database error: {e}");
         ApiError::Internal
+    }
+}
+
+impl From<SyncError> for ApiError {
+    fn from(e: SyncError) -> ApiError {
+        match e {
+            SyncError::UnknownList => ApiError::NotFound,
+            SyncError::Forbidden => ApiError::Forbidden,
+            SyncError::DuplicateId => ApiError::Conflict("that event id is already used"),
+            SyncError::Db(e) => {
+                tracing::error!("database error: {e}");
+                ApiError::Internal
+            }
+        }
+    }
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The device that signed a request, and its account.
+#[derive(Clone, Copy)]
+struct Authed {
+    device_id: i64,
+    account_id: i64,
+}
+
+/// Check the device's signature on a request (see `hab_proto::auth`).
+fn authenticate(
+    state: &State,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<Authed, ApiError> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let device_id: i64 = header(HEADER_DEVICE)
+        .and_then(|v| v.parse().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let time: i64 = header(HEADER_TIME)
+        .and_then(|v| v.parse().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let signature = header(HEADER_SIGNATURE).ok_or(ApiError::Unauthorized)?;
+    if (now() - time).abs() > MAX_REQUEST_AGE_SECS {
+        return Err(ApiError::Unauthorized);
+    }
+    let device = state
+        .db
+        .lock()
+        .unwrap()
+        .device(device_id)?
+        .ok_or(ApiError::Unauthorized)?;
+    verify_request(
+        &device.signing_public,
+        device_id,
+        method,
+        path,
+        time,
+        body,
+        signature,
+    )
+    .map_err(|_| ApiError::Unauthorized)?;
+    Ok(Authed {
+        device_id,
+        account_id: device.account_id,
+    })
+}
+
+fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
+    serde_json::from_slice(body).map_err(|_| ApiError::Bad("the request is not valid"))
+}
+
+/// Every device of the caller's account, with the signature that vouches for each.
+async fn devices(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<DeviceList>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/devices", &body)?;
+    let devices = state.db.lock().unwrap().devices_of(who.account_id)?;
+    Ok(Json(DeviceList { devices }))
+}
+
+/// The caller's lists, so a device that has just joined can find the personal one.
+async fn lists(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ListRefs>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/lists", &body)?;
+    let ids = state.db.lock().unwrap().lists_of(who.account_id)?;
+    Ok(Json(ListRefs {
+        lists: ids.into_iter().map(|list_id| ListRef { list_id }).collect(),
+    }))
+}
+
+/// Make a list the caller's and store sealed copies of its key.
+async fn register_list(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ListRef>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/lists/register", &body)?;
+    let req: RegisterList = parse(&body)?;
+    if !valid_id(&req.list_id) || req.keys.len() > 64 {
+        return Err(ApiError::Bad("the list is not valid"));
+    }
+    if req
+        .keys
+        .iter()
+        .any(|k| k.alg.len() > 80 || k.encapped.len() > 256 || k.ciphertext.len() > 256)
+    {
+        return Err(ApiError::Bad("a sealed key is not valid"));
+    }
+    state
+        .db
+        .lock()
+        .unwrap()
+        .register_list(who.account_id, &req.list_id, &req.keys, now())?;
+    Ok(Json(ListRef {
+        list_id: req.list_id,
+    }))
+}
+
+/// The copies of a list's key sealed to the calling device.
+async fn list_keys(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<SealedKeys>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/lists/keys", &body)?;
+    let req: ListRef = parse(&body)?;
+    let keys = state
+        .db
+        .lock()
+        .unwrap()
+        .sealed_keys(who.account_id, &req.list_id, who.device_id)?;
+    Ok(Json(SealedKeys { keys }))
+}
+
+/// Why the server refused an event.
+fn reject_reason(e: &ApiError) -> &'static str {
+    match e {
+        ApiError::Bad(why) => why,
+        ApiError::Conflict(why) => why,
+        ApiError::NotFound => "there is no such list",
+        ApiError::Forbidden => "not allowed",
+        ApiError::Unauthorized => "the request is not signed by a device",
+        ApiError::Internal => "something went wrong",
+    }
+}
+
+/// Number an event, if it is from the calling device, signed, and not from
+/// the future. The server never opens it: it checks the header and the
+/// signature, which cover the ciphertext.
+fn accept_event(state: &State, who: Authed, e: &Envelope) -> Result<Numbered, ApiError> {
+    if !valid_id(&e.list_id) || !valid_id(&e.event_id) {
+        return Err(ApiError::Bad("the list or event id is not valid"));
+    }
+    if e.alg != Algs::EVENT {
+        return Err(ApiError::Bad("that encryption is not supported"));
+    }
+    if e.ciphertext.len() > MAX_EVENT_BYTES {
+        return Err(ApiError::Bad("the event is too big"));
+    }
+    if e.device_id != who.device_id {
+        return Err(ApiError::Forbidden);
+    }
+    let received = now();
+    if e.clock > received + MAX_CLOCK_AHEAD_SECS {
+        return Err(ApiError::Bad("the device's clock is set too far ahead"));
+    }
+    let db = state.db.lock().unwrap();
+    let device = db.device(e.device_id)?.ok_or(ApiError::Forbidden)?;
+    if device.account_id != who.account_id || e.verify(&device.signing_public).is_err() {
+        return Err(ApiError::Bad("the event is not signed by its device"));
+    }
+    let numbered = db.append_event(who.account_id, e, received)?;
+    drop(db);
+    if !numbered.duplicate {
+        // Nobody listening is fine.
+        let _ = state.push.send(Arc::new(Pushed {
+            account_id: who.account_id,
+            origin: who.device_id,
+            seq: numbered.seq,
+            received_at: numbered.received_at,
+            envelope: e.clone(),
+        }));
+    }
+    Ok(numbered)
+}
+
+/// Bulk upload over HTTPS, such as joining with a standalone history. Events
+/// are numbered in the order given.
+async fn append_batch(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<AppendResults>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/sync/append", &body)?;
+    let batch: AppendBatch = parse(&body)?;
+    if batch.envelopes.len() > MAX_BATCH {
+        return Err(ApiError::Bad("too many events at once"));
+    }
+    let mut results = AppendResults {
+        numbered: Vec::new(),
+        rejected: Vec::new(),
+    };
+    for e in &batch.envelopes {
+        match accept_event(&state, who, e) {
+            Ok(n) => results.numbered.push(n),
+            Err(err) => results.rejected.push(Rejected {
+                event_id: e.event_id.clone(),
+                error: reject_reason(&err).into(),
+            }),
+        }
+    }
+    Ok(Json(results))
+}
+
+/// Bulk download over HTTPS.
+async fn fetch_events(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<EventPage>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/sync/events", &body)?;
+    let req: FetchEvents = parse(&body)?;
+    let (events, more) = state.db.lock().unwrap().events_after(
+        who.account_id,
+        &req.list_id,
+        req.after.max(0),
+        req.limit.clamp(1, MAX_PAGE),
+    )?;
+    Ok(Json(EventPage { events, more }))
+}
+
+/// One WebSocket per device: its new events go in, numbered, and its
+/// account's other devices' events come out.
+async fn sync_ws(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let who = authenticate(&state, &headers, "GET", "/api/v1/sync/ws", b"")?;
+    // Subscribe before the upgrade finishes, so nothing is missed after it.
+    let pushes = state.push.subscribe();
+    Ok(ws
+        .max_message_size(MAX_EVENT_BYTES * 2)
+        .on_upgrade(move |socket| ws_session(state, who, pushes, socket)))
+}
+
+async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(text) => socket.send(Message::text(text)).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+async fn ws_session(
+    state: Arc<State>,
+    who: Authed,
+    mut pushes: broadcast::Receiver<Arc<Pushed>>,
+    mut socket: WebSocket,
+) {
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                let Some(Ok(message)) = incoming else { return };
+                let reply = match message {
+                    Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::Append { envelope }) => {
+                            match accept_event(&state, who, &envelope) {
+                                Ok(n) => ServerMessage::Numbered(n),
+                                Err(e) => ServerMessage::Rejected(Rejected {
+                                    event_id: envelope.event_id.clone(),
+                                    error: reject_reason(&e).into(),
+                                }),
+                            }
+                        }
+                        Err(_) => return,
+                    },
+                    Message::Close(_) => return,
+                    _ => continue,
+                };
+                if !send(&mut socket, &reply).await {
+                    return;
+                }
+            }
+            pushed = pushes.recv() => {
+                let reply = match pushed {
+                    Ok(p) if p.account_id == who.account_id && p.origin != who.device_id => {
+                        ServerMessage::Event {
+                            seq: p.seq,
+                            received_at: p.received_at,
+                            envelope: p.envelope.clone(),
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => ServerMessage::Resync,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                if !send(&mut socket, &reply).await {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -334,10 +687,7 @@ async fn join_finish(
             signature: d.signature,
         },
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now();
     let code = req.setup_code;
     let created = state.db.lock().unwrap().create_first_account(
         |exists| state.setup.accepts(&code, Instant::now(), exists),
@@ -407,7 +757,8 @@ async fn accept_loop(
             match acceptor.accept(stream).await {
                 Ok(tls) => {
                     let conn = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(tls), service);
+                        .serve_connection(TokioIo::new(tls), service)
+                        .with_upgrades();
                     if let Err(e) = conn.await {
                         tracing::debug!(%peer, "connection ended: {e}");
                     }

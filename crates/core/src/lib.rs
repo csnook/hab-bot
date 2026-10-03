@@ -5,7 +5,9 @@
 //! (ADR 0005). [`Core`] ties the two together and decides what fires.
 //!
 //! Time is always passed in as Unix seconds, so firing is deterministic and
-//! testable. Events are neither signed nor encrypted yet.
+//! testable. Signing, encryption and talking to the server belong to the
+//! client; the core only keeps what it needs to be synced: which events the
+//! server has numbered, which it hasn't, and which are in a format it can't read.
 
 mod core;
 mod event;
@@ -13,9 +15,9 @@ mod state;
 mod store;
 
 pub use crate::core::{Core, Fired, Snapshot};
-pub use event::{Event, StoredEvent, FORMAT_VERSION};
+pub use event::{Event, Outgoing, Payload, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE};
 pub use state::{DueItem, Occurrence, Reminder, State, UpcomingItem};
-pub use store::Store;
+pub use store::{HeldEvent, Store};
 
 /// Errors from the core.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +30,8 @@ pub enum Error {
     EmptyTitle,
     #[error("there is no open occurrence {0}")]
     NotOpen(String),
+    #[error("an event from the server could not be read: {0}")]
+    BadEvent(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

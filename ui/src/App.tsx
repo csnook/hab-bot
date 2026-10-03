@@ -41,7 +41,7 @@ export function App() {
 }
 
 function Inbox() {
-  const [snap, setSnap] = useState<Snapshot>({ due: [], upcoming: [] });
+  const [snap, setSnap] = useState<Snapshot>({ due: [], upcoming: [], update_notice: null });
   const [error, setError] = useState("");
 
   const refresh = () => snapshot().then(setSnap).catch((e) => setError(String(e)));
@@ -61,6 +61,7 @@ function Inbox() {
     <main>
       <h1>Inbox</h1>
       {error && <p class="error" role="alert">{error}</p>}
+      {snap.update_notice && <p class="notice" role="status">{snap.update_notice}</p>}
 
       <section aria-labelledby="due">
         <h2 id="due">Due</h2>
@@ -69,6 +70,7 @@ function Inbox() {
           {snap.due.map((d) => (
             <li key={d.occurrence_id}>
               <span class="title">{d.title}</span>
+              {d.not_sent && <NotSent />}
               <span class="when">{formatTime(d.scheduled_at)}</span>
               <button onClick={() => done(d.occurrence_id)}>Done</button>
             </li>
@@ -83,6 +85,7 @@ function Inbox() {
           {snap.upcoming.map((u) => (
             <li key={u.reminder_id}>
               <span class="title">{u.title}</span>
+              {u.not_sent && <NotSent />}
               <span class="when">{formatTime(u.fire_at)}</span>
             </li>
           ))}
@@ -92,6 +95,11 @@ function Inbox() {
       <NewReminder onError={setError} />
     </main>
   );
+}
+
+/** A change the server hasn't numbered yet: still on this device only. */
+function NotSent() {
+  return <span class="not-sent">not sent yet</span>;
 }
 
 function NewReminder({ onError }: { onError: (e: string) => void }) {
