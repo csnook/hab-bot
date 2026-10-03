@@ -1,0 +1,22 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+export interface Occurrence {
+  id: string;
+  reminder_id: string;
+  title: string;
+  scheduled_at: number;
+  fired_at: number;
+}
+
+export interface InboxItem {
+  section: "due";
+  occurrence: Occurrence;
+}
+
+export const inbox = () => invoke<InboxItem[]>("inbox");
+export const createOneOff = (title: string, dueAt: number) =>
+  invoke<void>("create_one_off", { title, dueAt });
+export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
+/** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */
+export const onChanged = (f: () => void) => listen("changed", f);

@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "xtask"]
+# The Tauri app lives in app/src-tauri and is built with `cargo xtask`; it needs
+# the system WebKitGTK libraries, so it is not a default workspace member.
+exclude = ["app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,10 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+main { max-width: 40rem; margin: 0 auto; padding: 1rem; padding-top: max(1rem, env(safe-area-inset-top)); }
+form { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+form input[type="text"], form input:not([type]) { flex: 1 1 12rem; }
+ul { list-style: none; padding: 0; }
+li { display: flex; gap: .75rem; align-items: center; padding: .5rem 0; border-bottom: 1px solid #8884; }
+li span { flex: 1; }
+time, .empty { opacity: .7; font-size: .9em; }
+.error { color: #c33; width: 100%; }
