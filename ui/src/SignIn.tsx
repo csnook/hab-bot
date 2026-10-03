@@ -1,7 +1,18 @@
-import { useState } from "preact/hooks";
-import { readSignIn, signInServer, type Profile, type SignInFound } from "./api";
+import { useEffect, useState } from "preact/hooks";
+import {
+  approvalScan,
+  approvalShow,
+  cancelApproval,
+  finishApproval,
+  readSignIn,
+  signInServer,
+  type ApprovalCode,
+  type Profile,
+  type SignInFound,
+} from "./api";
 import {
   canContinueSignIn,
+  type Approving,
   emptySignIn,
   nextStep,
   previousStep,
@@ -23,6 +34,7 @@ export function SignIn({
   const [found, setFound] = useState<SignInFound | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [approving, setApproving] = useState<Approving>(null);
 
   const set = (patch: Partial<SignInForm>) => setForm((f) => ({ ...f, ...patch }));
   const fromCode = found?.fromCode === true;
@@ -30,9 +42,11 @@ export function SignIn({
 
   const back = () => {
     setError("");
-    const prev = previousStep(step, fromCode);
+    const prev = previousStep(step, fromCode, approving);
+    if (step === "approve") void cancelApproval();
     if (prev === null) onCancel();
     else setStep(prev);
+    if (prev === "server" || prev === "account") setApproving(null);
   };
 
   const next = async () => {
@@ -42,12 +56,16 @@ export function SignIn({
       try {
         const f = await readSignIn(form.target);
         setFound(f);
-        setStep(nextStep("server", f.fromCode)!);
+        const scanning = f.approvalLink !== null ? "scan" : null;
+        setApproving(scanning);
+        setStep(nextStep("server", f.fromCode, scanning)!);
       } catch (e) {
         setError(String(e));
       } finally {
         setBusy(false);
       }
+    } else if (step === "device" && approving) {
+      setStep("approve");
     } else if (step === "device") {
       if (!found) return;
       setBusy(true);
@@ -69,8 +87,14 @@ export function SignIn({
         setBusy(false);
       }
     } else {
-      setStep(nextStep(step, fromCode)!);
+      setStep(nextStep(step, fromCode, approving)!);
     }
+  };
+
+  const approveInstead = () => {
+    setError("");
+    setApproving("show");
+    setStep("device");
   };
 
   return (
@@ -132,6 +156,10 @@ export function SignIn({
               onInput={(e) => set({ password: e.currentTarget.value })}
             />
           </label>
+          <p class="muted">
+            Or skip the password: another device of yours that is signed in can approve this one.
+          </p>
+          <button type="button" onClick={approveInstead}>Approve from another device</button>
         </section>
       )}
 
@@ -163,11 +191,32 @@ export function SignIn({
         </section>
       )}
 
+      {step === "approve" && found && approving && (
+        <WaitForApproval
+          found={found}
+          mode={approving}
+          portable={form.portable === true}
+          onSignedIn={onSignedIn}
+          onError={(e) => {
+            setError(e);
+            setStep("device");
+          }}
+        />
+      )}
+
       <div class="buttons">
         <button type="button" onClick={back} disabled={busy}>Back</button>
-        <button type="button" onClick={next} disabled={!enabled}>
-          {busy ? "Working…" : step === "device" ? "Sign in" : "Continue"}
-        </button>
+        {step !== "approve" && (
+          <button type="button" onClick={next} disabled={!enabled}>
+            {busy
+              ? "Working…"
+              : step === "device"
+                ? approving
+                  ? "Continue"
+                  : "Sign in"
+                : "Continue"}
+          </button>
+        )}
       </div>
     </main>
   );
@@ -183,5 +232,95 @@ function Server({ found }: { found: SignInFound }) {
       <dt>Certificate fingerprint (SHA-256)</dt>
       <dd class="fingerprint">{found.fingerprint}</dd>
     </dl>
+  );
+}
+
+/**
+ * Sign in without the password: this device shows a code (or sends its request
+ * to the code it scanned), then waits until the other device's user approves.
+ */
+function WaitForApproval({
+  found,
+  mode,
+  portable,
+  onSignedIn,
+  onError,
+}: {
+  found: SignInFound;
+  mode: "scan" | "show";
+  portable: boolean;
+  onSignedIn: (p: Profile) => void;
+  onError: (message: string) => void;
+}) {
+  const [code, setCode] = useState<ApprovalCode | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const profile = await finishApproval();
+        if (cancelled) return;
+        if (profile) onSignedIn(profile);
+        else timer = setTimeout(poll, 1000);
+      } catch (e) {
+        if (!cancelled) onError(String(e));
+      }
+    };
+    const start = async () => {
+      try {
+        if (mode === "show") {
+          const c = await approvalShow(found.address, found.fingerprint, found.name, portable);
+          if (cancelled) return;
+          setCode(c);
+        } else {
+          await approvalScan(found.approvalLink ?? "", portable);
+        }
+        if (cancelled) return;
+        setReady(true);
+        timer = setTimeout(poll, 1000);
+      } catch (e) {
+        if (!cancelled) onError(String(e));
+      }
+    };
+    void start();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  return (
+    <section aria-live="polite">
+      {mode === "show" ? (
+        <>
+          <p>
+            On a device that is already signed in, open Settings → Account → Approve a new device,
+            and scan this code or paste its link.
+          </p>
+          {code && (
+            <>
+              <div
+                class="qr"
+                role="img"
+                aria-label="Approval code as a QR code"
+                // The SVG is made by this app from the server's own address.
+                dangerouslySetInnerHTML={{ __html: code.svg }}
+              />
+              <p class="fingerprint" data-testid="approval-link">{code.link}</p>
+            </>
+          )}
+        </>
+      ) : (
+        <p>
+          The request was sent. Your other device shows this device's name; confirm it there.
+        </p>
+      )}
+      <p class="muted">
+        {ready ? "Waiting for your other device to approve this one…" : "Working…"} The code works
+        once and expires after a few minutes. No password is typed on this device.
+      </p>
+    </section>
   );
 }

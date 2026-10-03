@@ -115,6 +115,8 @@ export interface SignInFound {
   version: string;
   /** The fingerprint came from a sign-in code, so it is already pinned. */
   fromCode: boolean;
+  /** The text was an existing device's approval link: no password is needed. */
+  approvalLink: string | null;
 }
 
 export interface SignInArgs {
@@ -150,3 +152,31 @@ export interface DeviceInfo {
 export const listDevices = () => invoke<DeviceInfo[]>("list_devices");
 /** Take another device off the account and rotate the keys of every list it held. */
 export const removeDevice = (deviceId: number) => invoke<void>("remove_device", { deviceId });
+
+/** A link and QR code (SVG) that one device shows for the other to scan. */
+export interface ApprovalCode {
+  link: string;
+  svg: string;
+}
+/** The new device behind a code, for the user to confirm by name. */
+export interface PendingDevice {
+  name: string;
+  portable: boolean;
+}
+
+/** New device: show a code for an existing device to scan. */
+export const approvalShow = (address: string, fingerprint: string, serverName: string, portable: boolean) =>
+  invoke<ApprovalCode>("approval_show", { address, fingerprint, serverName, portable });
+/** New device: send a request to the existing device whose code was scanned or pasted. */
+export const approvalScan = (link: string, portable: boolean) =>
+  invoke<void>("approval_scan", { link, portable });
+/** New device: has it been approved? If so it is signed in. */
+export const finishApproval = () => invoke<Profile | null>("finish_approval");
+export const cancelApproval = () => invoke<void>("cancel_approval");
+/** Existing device: make a code for a new device to scan. */
+export const offerApproval = () => invoke<ApprovalCode>("offer_approval");
+/** Existing device: has the device behind this code asked yet? Its name, if so. */
+export const pendingApproval = (link: string) =>
+  invoke<PendingDevice | null>("pending_approval", { link });
+/** Existing device: the user confirmed the device pendingApproval showed. */
+export const approvePending = () => invoke<void>("approve_pending");

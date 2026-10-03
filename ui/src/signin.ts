@@ -1,6 +1,11 @@
 // The logic of the sign-in screens, apart from the screens themselves.
 
-export type SignInStep = "server" | "confirm" | "account" | "device";
+export type SignInStep = "server" | "confirm" | "account" | "device" | "approve";
+
+/** How a device signs in without the password (approval from another device):
+ * it scanned the other's code ("scan"), or shows a code for the other to scan
+ * ("show"). null means with the password. */
+export type Approving = "scan" | "show" | null;
 
 export interface SignInForm {
   /** A sign-in code (its link), or a server address. */
@@ -19,20 +24,32 @@ export const emptySignIn: SignInForm = {
 
 /** The step after `step`. A sign-in code already carries the fingerprint, so
  * there is nothing to confirm by eye. */
-export function nextStep(step: SignInStep, fromCode: boolean): SignInStep | null {
+export function nextStep(
+  step: SignInStep,
+  fromCode: boolean,
+  approving: Approving = null,
+): SignInStep | null {
   switch (step) {
     case "server":
+      // An existing device's approval code needs no username or password.
+      if (approving === "scan") return "device";
       return fromCode ? "account" : "confirm";
     case "confirm":
       return "account";
     case "account":
       return "device";
     case "device":
+      return approving ? "approve" : null;
+    case "approve":
       return null;
   }
 }
 
-export function previousStep(step: SignInStep, fromCode: boolean): SignInStep | null {
+export function previousStep(
+  step: SignInStep,
+  fromCode: boolean,
+  approving: Approving = null,
+): SignInStep | null {
   switch (step) {
     case "server":
       return null;
@@ -41,7 +58,9 @@ export function previousStep(step: SignInStep, fromCode: boolean): SignInStep | 
     case "account":
       return fromCode ? "server" : "confirm";
     case "device":
-      return "account";
+      return approving === "scan" ? "server" : "account";
+    case "approve":
+      return "device";
   }
 }
 
@@ -62,5 +81,8 @@ export function canContinueSignIn(step: SignInStep, form: SignInForm): boolean {
       return validUsername(form.username) && form.password !== "";
     case "device":
       return form.portable !== null;
+    case "approve":
+      // The step waits for the other device and moves on by itself.
+      return false;
   }
 }

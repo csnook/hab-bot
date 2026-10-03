@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hab_client::{
-    check_password, join, parse_target, sign_in, suggest_passphrase, tls, DeviceInfo, JoinRequest,
-    KeyStore, PasswordCheck, Pinned, Profile, Setup, SetupFile, SignInCode, SignInRequest,
-    SignInTarget, Syncer,
+    check_password, join, parse_target, sign_in, suggest_passphrase, tls, ApprovalLink, DeviceInfo,
+    JoinRequest, KeyStore, NewDevice, PasswordCheck, PendingDevice, Pinned, Profile, Setup,
+    SetupFile, SignInCode, SignInRequest, SignInTarget, Syncer,
 };
 use hab_core::{Core, Snapshot};
 use serde::Serialize;
@@ -40,6 +40,12 @@ struct App {
     /// The running sync, once there is one: Settings → Account asks it for
     /// the device list and has it remove a device.
     syncer: SyncerSlot,
+    /// This device, while it waits for another of the user's devices to
+    /// approve it (Sign in → approve from another device).
+    waiting: tokio::sync::Mutex<Option<Arc<NewDevice>>>,
+    /// The new device the user is looking at on an existing device, to
+    /// confirm it by name before approving.
+    pending: Mutex<Option<PendingDevice>>,
 }
 
 type SyncerSlot = Arc<Mutex<Option<Arc<Syncer>>>>;
@@ -347,6 +353,9 @@ struct SignInFound {
     /// The fingerprint came from a sign-in code, so there is nothing to
     /// compare by eye.
     from_code: bool,
+    /// The text was an existing device's approval link: no username or
+    /// password is needed, and this is the link to send the request to.
+    approval_link: Option<String>,
 }
 
 /// Read what the user typed into the sign-in screen: a sign-in code, or a
@@ -372,6 +381,25 @@ async fn read_sign_in(text: String) -> Result<SignInFound, String> {
                 },
                 version: info.version,
                 from_code: true,
+                approval_link: None,
+            })
+        }
+        SignInTarget::Approval(link) => {
+            let info = Pinned::new(&link.address, &link.fingerprint)
+                .info()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(SignInFound {
+                address: link.address.clone(),
+                fingerprint: link.fingerprint.clone(),
+                name: if link.server_name.is_empty() {
+                    info.name
+                } else {
+                    link.server_name.clone()
+                },
+                version: info.version,
+                from_code: true,
+                approval_link: Some(link.link()),
             })
         }
         SignInTarget::Address(address) => {
@@ -386,6 +414,7 @@ async fn read_sign_in(text: String) -> Result<SignInFound, String> {
                 name: info.name,
                 version: info.version,
                 from_code: false,
+                approval_link: None,
             })
         }
     }
@@ -425,11 +454,17 @@ async fn sign_in_server(
     )
     .await
     .map_err(|e| e.to_string())?;
-    // Taking the account's list can fail, such as when no other device has
-    // synced yet. Only when it works is this device remembered as signed in.
+    finish_sign_in(&app, handle, signed.profile).await
+}
+
+/// A device that has signed in, by password or by approval, starts syncing
+/// as a new device of the account. Taking the account's list can fail, such
+/// as when no other device has synced yet. Only when it works is this device
+/// remembered as signed in.
+async fn finish_sign_in(app: &App, handle: AppHandle, profile: Profile) -> Result<Profile, String> {
     start_sync(
         handle,
-        signed.profile.clone(),
+        profile.clone(),
         app.data_dir.clone(),
         SyncShared {
             core: app.core.clone(),
@@ -440,12 +475,156 @@ async fn sign_in_server(
         Start::SignedIn,
     )
     .await?;
-    let setup = Setup::Joined(signed.profile.clone());
+    let setup = Setup::Joined(profile.clone());
     SetupFile::in_dir(&app.data_dir)
         .save(&setup)
         .map_err(|e| e.to_string())?;
     *app.setup.lock().unwrap() = Some(setup);
-    Ok(signed.profile)
+    Ok(profile)
+}
+
+/// An approval's link and QR code, shown on one device for the other to scan.
+#[derive(Serialize)]
+struct ApprovalView {
+    link: String,
+    svg: String,
+}
+
+impl ApprovalView {
+    fn of(link: &ApprovalLink) -> ApprovalView {
+        ApprovalView {
+            link: link.link(),
+            svg: link.qr_svg(),
+        }
+    }
+}
+
+fn read_link(text: &str) -> Result<ApprovalLink, String> {
+    ApprovalLink::parse(text).map_err(|e| e.to_string())
+}
+
+/// Sign in on this device without typing the password, showing a code for an
+/// existing device to scan or be given. The window then waits with
+/// [`finish_approval`].
+#[tauri::command]
+async fn approval_show(
+    app: tauri::State<'_, App>,
+    address: String,
+    fingerprint: String,
+    server_name: String,
+    portable: bool,
+) -> Result<ApprovalView, String> {
+    let new = NewDevice::show(
+        &address,
+        &fingerprint,
+        &server_name,
+        &device_name(),
+        portable,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let view = ApprovalView::of(new.link());
+    *app.waiting.lock().await = Some(Arc::new(new));
+    Ok(view)
+}
+
+/// Sign in without the password by scanning (or pasting) an existing device's
+/// code. The existing device then shows this device's name and asks.
+#[tauri::command]
+async fn approval_scan(
+    app: tauri::State<'_, App>,
+    link: String,
+    portable: bool,
+) -> Result<(), String> {
+    let new = NewDevice::scan(&read_link(&link)?, &device_name(), portable)
+        .await
+        .map_err(|e| e.to_string())?;
+    *app.waiting.lock().await = Some(Arc::new(new));
+    Ok(())
+}
+
+/// Has an existing device approved this one yet? When it has, this device
+/// starts syncing like after a password sign-in and the profile is returned.
+#[tauri::command]
+async fn finish_approval(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+) -> Result<Option<Profile>, String> {
+    let waiting = app.waiting.lock().await.clone();
+    let Some(new) = waiting else {
+        return Err("Nothing is waiting for approval. Start again.".into());
+    };
+    let store = KeyStore::open(&app.data_dir).await;
+    match new.collect(&store).await {
+        Ok(None) => Ok(None),
+        Ok(Some(signed)) => {
+            *app.waiting.lock().await = None;
+            finish_sign_in(&app, handle, signed.profile).await.map(Some)
+        }
+        Err(e) => {
+            *app.waiting.lock().await = None;
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Stop waiting for approval, such as when the user goes back.
+#[tauri::command]
+async fn cancel_approval(app: tauri::State<'_, App>) -> Result<(), String> {
+    *app.waiting.lock().await = None;
+    Ok(())
+}
+
+/// Settings → Account: make a code for a new device to scan.
+#[tauri::command]
+async fn offer_approval(app: tauri::State<'_, App>) -> Result<ApprovalView, String> {
+    let syncer = running_sync(&app)?;
+    let link = syncer.offer_approval().await.map_err(|e| e.to_string())?;
+    *app.pending.lock().unwrap() = None;
+    Ok(ApprovalView::of(&link))
+}
+
+/// The new device behind a code, as the user confirms it: its name.
+#[derive(Serialize)]
+struct PendingView {
+    name: String,
+    portable: bool,
+}
+
+/// Has the new device behind this code (shown here, or pasted from there)
+/// asked yet? When it has, its name is returned for the user to confirm.
+#[tauri::command]
+async fn pending_approval(
+    app: tauri::State<'_, App>,
+    link: String,
+) -> Result<Option<PendingView>, String> {
+    let syncer = running_sync(&app)?;
+    let pending = syncer
+        .pending_device(&read_link(&link)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    let view = pending.as_ref().map(|p| PendingView {
+        name: p.name.clone(),
+        portable: p.portable,
+    });
+    *app.pending.lock().unwrap() = pending;
+    Ok(view)
+}
+
+/// The user confirmed the device [`pending_approval`] showed: sign it, give
+/// it the keys and tell the other devices.
+#[tauri::command]
+async fn approve_pending(app: tauri::State<'_, App>) -> Result<(), String> {
+    let syncer = running_sync(&app)?;
+    let pending = app.pending.lock().unwrap().take();
+    let Some(pending) = pending else {
+        return Err("Check the new device's name first.".into());
+    };
+    syncer
+        .approve_device(&pending)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// The sign-in code for Settings → Account, as a link and a QR code.
@@ -576,6 +755,13 @@ pub fn run() {
             read_sign_in,
             sign_in_server,
             sign_in_code,
+            approval_show,
+            approval_scan,
+            finish_approval,
+            cancel_approval,
+            offer_approval,
+            pending_approval,
+            approve_pending,
             dismiss_notice,
             list_devices,
             remove_device,
@@ -622,6 +808,8 @@ pub fn run() {
                 data_dir,
                 setup: Mutex::new(setup),
                 syncer,
+                waiting: tokio::sync::Mutex::new(None),
+                pending: Mutex::new(None),
             });
 
             let open = MenuItem::with_id(app, "open", "Open Reminders", true, None::<&str>)?;

@@ -13,6 +13,20 @@ test("a sign-in code skips the fingerprint check, an address does not", () => {
   expect(previousStep("server", false)).toBeNull();
 });
 
+test("approving from another device skips the username and password", () => {
+  // The existing device's code was scanned: straight to naming the kind of device.
+  expect(nextStep("server", true, "scan")).toBe("device");
+  expect(nextStep("device", true, "scan")).toBe("approve");
+  expect(previousStep("device", true, "scan")).toBe("server");
+  expect(previousStep("approve", true, "scan")).toBe("device");
+  // Or the user chose approval at the password step, and shows a code instead.
+  expect(nextStep("account", true, "show")).toBe("device");
+  expect(nextStep("device", true, "show")).toBe("approve");
+  expect(previousStep("device", true, "show")).toBe("account");
+  expect(nextStep("approve", true, "show")).toBeNull();
+  expect(canContinueSignIn("approve", { ...emptySignIn, portable: true })).toBe(false);
+});
+
 test("each step needs what it asks for", () => {
   const form = { ...emptySignIn };
   expect(canContinueSignIn("server", form)).toBe(false);

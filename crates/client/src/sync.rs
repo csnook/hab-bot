@@ -6,6 +6,7 @@
 //! bulk uploads and downloads go over HTTPS. Changes made offline stay "not
 //! sent yet" in the core and are uploaded when the connection returns.
 
+use crate::approve::ApprovalLink;
 use crate::keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};
 use crate::profile::Profile;
 use crate::tls::{self, parse_address, Pinned, TlsError};
@@ -17,7 +18,12 @@ use hab_proto::wire::{
     FetchEvents, ListRef, ListRefs, Numbered, NumberedEnvelope, RegisterList, RemoveDevice,
     Rotation, ServerMessage,
 };
-use hab_proto::{open_list_key, seal_list_key, verify_device, DeviceKeys, KeyError, Keys, ListKey};
+use hab_proto::wire::{
+    ApprovalFetched, ApprovalGrant, ApprovalGrantPlain, ApprovalRef, ApprovalRequestPlain, Joined,
+};
+use hab_proto::{
+    open_list_key, seal_list_key, sign_device, verify_device, DeviceKeys, KeyError, Keys, ListKey,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +69,10 @@ pub enum SyncError {
     UnknownDevice,
     #[error("this account has a list whose key this device cannot rotate")]
     CannotRotate,
+    #[error("This approval has expired or was already used. Start again.")]
+    ApprovalExpired,
+    #[error("The approval did not check out: {0}")]
+    BadApproval(&'static str),
 }
 
 /// One of the account's devices, as Settings → Account lists it.
@@ -89,8 +99,24 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
 }
 
+/// A new device that asked to be approved, as the existing device shows it
+/// for confirmation. Only [`Syncer::pending_device`] makes one, so a device
+/// is approved only after its name has been looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDevice {
+    /// What the new device calls itself. The user confirms it by name.
+    pub name: String,
+    pub portable: bool,
+    link: ApprovalLink,
+    signing_public: [u8; 32],
+    sealing_public: [u8; 32],
+}
+
 pub struct Syncer {
     server: Pinned,
+    server_name: String,
+    username: String,
+    display_name: String,
     device_id: i64,
     device: DeviceKeys,
     keys: Keys,
@@ -142,6 +168,9 @@ impl Syncer {
             .ok_or(SyncError::MissingKeys)?;
         Ok(Syncer {
             server: Pinned::new(&profile.server_address, &profile.server_fingerprint),
+            server_name: profile.server_name.clone(),
+            username: profile.username.clone(),
+            display_name: profile.display_name.clone(),
             device_id: profile.device_id,
             device: DeviceKeys::from_bytes(&device)?,
             keys: Keys::from_bytes(&account)?,
@@ -352,6 +381,117 @@ impl Syncer {
         self.wake.notify_one();
         (self.on_change)();
         Ok(())
+    }
+
+    /// Offer to approve a new device that will scan the returned link (or be
+    /// given it). Settings → Account shows it as a QR code. It lasts a few
+    /// minutes and approves one device.
+    pub async fn offer_approval(&self) -> Result<ApprovalLink, SyncError> {
+        let started: ApprovalRef = self.post("/api/v1/approvals/create", &()).await?;
+        Ok(ApprovalLink {
+            address: self.server.address.clone(),
+            server_name: self.server_name.clone(),
+            fingerprint: self.server.fingerprint.clone(),
+            id: started.approval_id,
+            key: hab_proto::ApprovalKey::generate(),
+        })
+    }
+
+    /// The new device behind `link`, if it has sent its request: the link
+    /// was shown by this device and scanned by the new one, or it was shown
+    /// by the new one and scanned here. None until it has. The link has to
+    /// be for this account's server.
+    pub async fn pending_device(
+        &self,
+        link: &ApprovalLink,
+    ) -> Result<Option<PendingDevice>, SyncError> {
+        if !crate::tls::same_fingerprint(&link.fingerprint, &self.server.fingerprint) {
+            return Err(SyncError::BadApproval("the code is for another server"));
+        }
+        let fetched: Result<ApprovalFetched, SyncError> = self
+            .post(
+                "/api/v1/approvals/fetch",
+                &ApprovalRef {
+                    approval_id: link.id.clone(),
+                },
+            )
+            .await;
+        let fetched = match fetched {
+            Err(SyncError::Server(TlsError::Status { status: 404, .. })) => {
+                return Err(SyncError::ApprovalExpired)
+            }
+            other => other?,
+        };
+        let Some(blob) = fetched.request else {
+            return Ok(None);
+        };
+        let plain = link
+            .key
+            .open(&link.id, "request", &blob)
+            .map_err(|_| SyncError::BadApproval("the request is not for this code"))?;
+        let request: ApprovalRequestPlain = serde_json::from_slice(&plain)
+            .map_err(|_| SyncError::BadApproval("the request is damaged"))?;
+        let name = request.name.trim().to_string();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err(SyncError::BadApproval("the device's name is not valid"));
+        }
+        let key = |bytes: &[u8]| <[u8; 32]>::try_from(bytes);
+        let (Ok(signing_public), Ok(sealing_public)) =
+            (key(&request.signing_public), key(&request.sealing_public))
+        else {
+            return Err(SyncError::BadApproval("the device's keys are not valid"));
+        };
+        Ok(Some(PendingDevice {
+            name,
+            portable: request.portable,
+            link: link.clone(),
+            signing_public,
+            sealing_public,
+        }))
+    }
+
+    /// Approve a device the user has confirmed by name: sign it with the
+    /// identity key, give it the account's keys, and seal it every version of
+    /// the personal list's key, so it syncs as after a password sign-in. The
+    /// password is never involved. Returns the new device's id on the server.
+    pub async fn approve_device(&self, pending: &PendingDevice) -> Result<i64, SyncError> {
+        let record = sign_device(
+            &self.keys.identity,
+            &pending.signing_public,
+            &pending.sealing_public,
+            pending.portable,
+        );
+        let mut keys = self.keys.to_bytes();
+        let grant = ApprovalGrantPlain {
+            username: self.username.clone(),
+            display_name: self.display_name.clone(),
+            keys: keys.clone(),
+        };
+        zeroize_vec(&mut keys);
+        let mut plain = serde_json::to_vec(&grant).expect("a grant serializes");
+        let sealed = pending.link.key.seal(&pending.link.id, "grant", &plain);
+        zeroize_vec(&mut plain);
+        let joined: Result<Joined, SyncError> = self
+            .post(
+                "/api/v1/approvals/grant",
+                &ApprovalGrant {
+                    approval_id: pending.link.id.clone(),
+                    device: record,
+                    grant: sealed,
+                },
+            )
+            .await;
+        let joined = match joined {
+            Err(SyncError::Server(TlsError::Status { status: 404, .. })) => {
+                return Err(SyncError::ApprovalExpired)
+            }
+            other => other?,
+        };
+        // Every version this device holds, to every device including the new
+        // one. It joins knowing only the first version.
+        self.register_personal_list().await?;
+        (self.on_change)();
+        Ok(joined.device_id)
     }
 
     /// The ids of the account's lists on the server. A device added to an
@@ -831,6 +971,10 @@ enum Ingest {
     Dropped,
     /// No key this device has opens it.
     NoKey,
+}
+
+fn zeroize_vec(v: &mut [u8]) {
+    v.fill(0);
 }
 
 /// An event that fails a check is dropped, and the others carry on.

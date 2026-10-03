@@ -5,6 +5,7 @@
 //!
 //! It holds nothing secret: signing in still takes the username and password.
 
+use crate::approve::{ApprovalLink, APPROVE_SCHEME};
 use crate::profile::Profile;
 use crate::tls::parse_address;
 
@@ -25,6 +26,9 @@ pub enum SignInTarget {
     Code(SignInCode),
     /// Just an address: the fingerprint has to be shown and confirmed.
     Address(String),
+    /// An existing device's offer to approve this one, scanned or pasted:
+    /// it carries the server's fingerprint too.
+    Approval(ApprovalLink),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -65,6 +69,9 @@ impl SignInCode {
 /// Read a sign-in code (its link), or else a server address.
 pub fn parse_target(text: &str) -> Result<SignInTarget, CodeError> {
     let text = text.trim();
+    if text.starts_with(APPROVE_SCHEME) {
+        return ApprovalLink::parse(text).map(SignInTarget::Approval);
+    }
     if let Some(query) = text
         .strip_prefix(SCHEME)
         .and_then(|rest| rest.strip_prefix('?'))
@@ -100,12 +107,12 @@ pub fn parse_target(text: &str) -> Result<SignInTarget, CodeError> {
     Ok(SignInTarget::Address(text.to_string()))
 }
 
-fn plausible_fingerprint(f: &str) -> bool {
+pub(crate) fn plausible_fingerprint(f: &str) -> bool {
     let digits: String = f.chars().filter(|c| *c != ':').collect();
     digits.len() == 64 && digits.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -117,7 +124,7 @@ fn encode(s: &str) -> String {
     out
 }
 
-fn decode(s: &str) -> Option<String> {
+pub(crate) fn decode(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;

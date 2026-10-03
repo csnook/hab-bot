@@ -277,6 +277,18 @@ impl Db {
             .optional()?)
     }
 
+    /// An account's identity key, and whether it is a server admin.
+    pub fn identity_of(&self, account_id: i64) -> Result<Option<(Vec<u8>, bool)>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT identity_public, admin FROM accounts WHERE id = ?1",
+                [account_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// Add a device to an existing account. Returns `None` if the account
     /// already has [`MAX_DEVICES`].
     pub fn add_device(

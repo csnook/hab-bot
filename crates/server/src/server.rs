@@ -22,10 +22,12 @@ use hab_proto::opaque_ke::{
     ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use hab_proto::wire::{
-    valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ClientMessage,
-    DeviceList, Envelope, ErrorBody, EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted,
-    Joined, Kdf, KeyBundle, ListRef, ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart,
-    LoginStarted, Numbered, RegisterList, Rejected, RemoveDevice, SealedKeys, ServerMessage,
+    valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ApprovalBlob,
+    ApprovalCollect, ApprovalCollected, ApprovalFetched, ApprovalGrant, ApprovalGranted,
+    ApprovalOpen, ApprovalRef, ApprovalRequest, ClientMessage, DeviceList, Envelope, ErrorBody,
+    EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted, Joined, Kdf, KeyBundle, ListRef,
+    ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart, LoginStarted, Numbered,
+    RegisterList, Rejected, RemoveDevice, SealedKeys, ServerMessage, MAX_APPROVAL_BLOB,
     MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
 };
 use hab_proto::{verify_device, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
@@ -111,6 +113,27 @@ const LOGIN_TTL: Duration = Duration::from_secs(300);
 /// Sign-ins in progress at once, so strangers can't fill the memory.
 const MAX_LOGINS: usize = 1000;
 
+/// How long an approval of a new device by an existing one may take, from the
+/// moment its code is made.
+const APPROVAL_TTL: Duration = Duration::from_secs(300);
+/// Approvals in progress at once, so strangers can't fill the memory.
+const MAX_APPROVALS: usize = 1000;
+/// Approvals one account may have in progress.
+const MAX_APPROVALS_PER_ACCOUNT: usize = 5;
+
+/// One new device being approved by an existing one (ADR 0004). Kept in
+/// memory only, like a sign-in: a restart ends it. Its id is 128 random bits
+/// and it is used once, so there is nothing to guess.
+struct Approval {
+    at: Instant,
+    /// The account whose device offered the approval, or None if the new
+    /// device started it and the first device of an account to approve it
+    /// (having read the code) takes it.
+    account_id: Option<i64>,
+    request: Option<(ApprovalBlob, String)>,
+    granted: Option<ApprovalGranted>,
+}
+
 /// Where a sign-in is. Kept in memory only: a restart ends it.
 enum Login {
     /// The client has been answered; waiting for its proof of the password.
@@ -127,6 +150,7 @@ enum Login {
 
 struct State {
     logins: Mutex<HashMap<String, (Instant, Login)>>,
+    approvals: Mutex<HashMap<String, Approval>>,
     push: broadcast::Sender<Arc<Pushed>>,
     removals: broadcast::Sender<Removal>,
     db: Mutex<Db>,
@@ -188,6 +212,7 @@ impl Server {
 
         let state = Arc::new(State {
             logins: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
             opaque,
             db: Mutex::new(db),
             setup: SetupCode::generate(Instant::now()),
@@ -217,6 +242,12 @@ impl Server {
             .route("/api/v1/login/start", post(login_start))
             .route("/api/v1/login/finish", post(login_finish))
             .route("/api/v1/login/device", post(login_device))
+            .route("/api/v1/approvals/create", post(approval_create))
+            .route("/api/v1/approvals/open", post(approval_open))
+            .route("/api/v1/approvals/request", post(approval_request))
+            .route("/api/v1/approvals/fetch", post(approval_fetch))
+            .route("/api/v1/approvals/grant", post(approval_grant))
+            .route("/api/v1/approvals/collect", post(approval_collect))
             .route("/api/v1/devices", post(devices))
             .route("/api/v1/devices/remove", post(remove_device))
             .route("/api/v1/lists", post(lists))
@@ -372,6 +403,9 @@ enum ApiError {
     Forbidden,
     Unauthorized,
     NotFound,
+    /// The same answer for an approval that never was, expired, was used, or
+    /// is someone else's.
+    NoApproval,
     Conflict(&'static str),
     /// The same answer for a wrong password, an unknown username and a sign-in
     /// that expired, so none of them can be told apart.
@@ -389,6 +423,10 @@ impl IntoResponse for ApiError {
                 "the request is not signed by a device",
             ),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "there is no such list"),
+            ApiError::NoApproval => (
+                StatusCode::NOT_FOUND,
+                "that approval has expired, been used, or never existed",
+            ),
             ApiError::Conflict(why) => (StatusCode::CONFLICT, why),
             ApiError::BadLogin => (
                 StatusCode::UNAUTHORIZED,
@@ -622,7 +660,7 @@ fn reject_reason(e: &ApiError) -> &'static str {
     match e {
         ApiError::Bad(why) => why,
         ApiError::Conflict(why) => why,
-        ApiError::NotFound => "there is no such list",
+        ApiError::NotFound | ApiError::NoApproval => "there is no such list",
         ApiError::Forbidden => "not allowed",
         ApiError::Unauthorized | ApiError::BadLogin => "the request is not signed by a device",
         ApiError::Internal => "something went wrong",
@@ -1095,6 +1133,226 @@ async fn login_device(
         }
         None => Err(ApiError::Conflict("this account has too many devices")),
     }
+}
+
+// ---- Approving a new device from an existing one (ADR 0004) ----
+
+fn new_approval_id() -> String {
+    use opaque_ke::rand::RngCore;
+    let mut bytes = [0u8; 16];
+    opaque_ke::rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn blob_ok(b: &ApprovalBlob) -> bool {
+    b.alg == Algs::APPROVAL && b.nonce.len() == 24 && b.ciphertext.len() <= MAX_APPROVAL_BLOB
+}
+
+fn token_ok(t: &str) -> bool {
+    (16..=128).contains(&t.len())
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Constant-time comparison, so a token can't be found out a byte at a time.
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Forget approvals that ran out of time, and make room for one more.
+fn make_room(approvals: &mut HashMap<String, Approval>) -> Result<(), ApiError> {
+    approvals.retain(|_, a| a.at.elapsed() < APPROVAL_TTL);
+    if approvals.len() >= MAX_APPROVALS {
+        return Err(ApiError::Conflict("too many approvals at once, try again"));
+    }
+    Ok(())
+}
+
+/// The approval `id`, if it is still good and, when it belongs to an account,
+/// that account's.
+fn live<'a>(
+    approvals: &'a mut HashMap<String, Approval>,
+    id: &str,
+    account_id: Option<i64>,
+) -> Result<&'a mut Approval, ApiError> {
+    let a = approvals.get_mut(id).ok_or(ApiError::NoApproval)?;
+    if a.at.elapsed() >= APPROVAL_TTL {
+        approvals.remove(id);
+        return Err(ApiError::NoApproval);
+    }
+    // Re-borrow: the removal above ends the first borrow.
+    let a = approvals.get_mut(id).ok_or(ApiError::NoApproval)?;
+    if let (Some(owner), Some(caller)) = (a.account_id, account_id) {
+        if owner != caller {
+            return Err(ApiError::NoApproval);
+        }
+    }
+    Ok(a)
+}
+
+/// A signed-in device offers to approve a new device that will scan its code.
+async fn approval_create(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ApprovalRef>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/approvals/create", &body)?;
+    let mut approvals = state.approvals.lock().unwrap();
+    make_room(&mut approvals)?;
+    if approvals
+        .values()
+        .filter(|a| a.account_id == Some(who.account_id))
+        .count()
+        >= MAX_APPROVALS_PER_ACCOUNT
+    {
+        return Err(ApiError::Conflict("too many approvals at once, try again"));
+    }
+    let id = new_approval_id();
+    approvals.insert(
+        id.clone(),
+        Approval {
+            at: Instant::now(),
+            account_id: Some(who.account_id),
+            request: None,
+            granted: None,
+        },
+    );
+    Ok(Json(ApprovalRef { approval_id: id }))
+}
+
+/// A new device that shows a code starts an approval, with its request. It
+/// proves nothing yet: only an existing device that has read the code (which
+/// holds the id and the key) can answer it, and only the new device can
+/// collect the answer.
+async fn approval_open(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<ApprovalOpen>,
+) -> Result<Json<ApprovalRef>, ApiError> {
+    let id = req.approval_id;
+    let id_ok = id.len() == 32 && id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+    if !id_ok || !blob_ok(&req.request) || !token_ok(&req.collect_token) {
+        return Err(ApiError::Bad("the approval is not valid"));
+    }
+    let mut approvals = state.approvals.lock().unwrap();
+    make_room(&mut approvals)?;
+    if approvals.contains_key(&id) {
+        return Err(ApiError::Conflict("that approval already exists"));
+    }
+    approvals.insert(
+        id.clone(),
+        Approval {
+            at: Instant::now(),
+            account_id: None,
+            request: Some((req.request, req.collect_token)),
+            granted: None,
+        },
+    );
+    Ok(Json(ApprovalRef { approval_id: id }))
+}
+
+/// A new device that scanned an existing device's code sends its request.
+async fn approval_request(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<ApprovalRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !blob_ok(&req.request) || !token_ok(&req.collect_token) {
+        return Err(ApiError::Bad("the approval is not valid"));
+    }
+    let mut approvals = state.approvals.lock().unwrap();
+    let a = live(&mut approvals, &req.approval_id, None)?;
+    // Offered by a device, and not yet answered by another new one.
+    if a.account_id.is_none() || a.request.is_some() {
+        return Err(ApiError::NoApproval);
+    }
+    a.request = Some((req.request, req.collect_token));
+    Ok(Json(serde_json::json!({})))
+}
+
+/// The existing device reads the new device's request, to show its name.
+async fn approval_fetch(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ApprovalFetched>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/approvals/fetch", &body)?;
+    let req: ApprovalRef = parse(&body)?;
+    let mut approvals = state.approvals.lock().unwrap();
+    let a = live(&mut approvals, &req.approval_id, Some(who.account_id))?;
+    Ok(Json(ApprovalFetched {
+        request: a.request.as_ref().map(|(blob, _)| blob.clone()),
+    }))
+}
+
+/// The existing device approves: the server checks the identity key signed the
+/// new device, adds it, and keeps the sealed keys for it to collect.
+async fn approval_grant(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Joined>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/approvals/grant", &body)?;
+    let req: ApprovalGrant = parse(&body)?;
+    if !blob_ok(&req.grant) {
+        return Err(ApiError::Bad("the approval is not valid"));
+    }
+    let mut approvals = state.approvals.lock().unwrap();
+    let a = live(&mut approvals, &req.approval_id, Some(who.account_id))?;
+    if a.request.is_none() || a.granted.is_some() {
+        return Err(ApiError::NoApproval);
+    }
+    let db = state.db.lock().unwrap();
+    let (identity_public, admin) = db.identity_of(who.account_id)?.ok_or(ApiError::Internal)?;
+    if verify_device(&identity_public, &req.device).is_err() {
+        return Err(ApiError::Bad(
+            "the device is not signed by the identity key",
+        ));
+    }
+    let d = req.device.clone();
+    let new = NewDevice {
+        portable: d.portable,
+        alg: d.alg,
+        signing_public: d.signing_public,
+        sealing_public: d.sealing_public,
+        signature: d.signature,
+    };
+    let Some(device_id) = db.add_device(who.account_id, &new, now())? else {
+        return Err(ApiError::Conflict("this account has too many devices"));
+    };
+    let joined = Joined {
+        account_id: who.account_id,
+        device_id,
+        admin,
+    };
+    a.account_id = Some(who.account_id);
+    a.granted = Some(ApprovalGranted {
+        joined: joined.clone(),
+        device: req.device,
+        grant: req.grant,
+    });
+    tracing::info!("a device was approved");
+    Ok(Json(joined))
+}
+
+/// The new device collects the answer, once.
+async fn approval_collect(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<ApprovalCollect>,
+) -> Result<Json<ApprovalCollected>, ApiError> {
+    let mut approvals = state.approvals.lock().unwrap();
+    let a = live(&mut approvals, &req.approval_id, None)?;
+    match &a.request {
+        Some((_, token)) if same_token(token, &req.collect_token) => {}
+        _ => return Err(ApiError::NoApproval),
+    }
+    if a.granted.is_none() {
+        return Ok(Json(ApprovalCollected { granted: None }));
+    }
+    let done = approvals.remove(&req.approval_id).and_then(|a| a.granted);
+    Ok(Json(ApprovalCollected { granted: done }))
 }
 
 async fn wait_for_signal() {

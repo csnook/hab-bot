@@ -17,6 +17,9 @@ impl Algs {
     pub const EVENT: &'static str = "xchacha20poly1305+ed25519/v1";
     /// List key: HPKE (RFC 9180) in auth mode, DHKEM(X25519, HKDF-SHA256),
     /// HKDF-SHA256 and ChaCha20-Poly1305.
+    /// Approval: XChaCha20-Poly1305 under HKDF-SHA256 of the approval key
+    /// that travels in the QR code or link.
+    pub const APPROVAL: &'static str = "xchacha20poly1305+hkdf-sha256/approval-v1";
     pub const LIST_KEY: &'static str = "hpke-auth-x25519-hkdf-sha256-chacha20poly1305/v1";
 }
 
@@ -155,6 +158,102 @@ pub struct Joined {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ErrorBody {
     pub error: String,
+}
+
+// ---- Approving a new device from an existing one (ADR 0004) ----
+
+/// Something sealed under the approval key, which only the two devices have:
+/// it is in the QR code or link and never reaches the server. The server
+/// relays these and cannot read or change them.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalBlob {
+    pub alg: String,
+    #[serde(with = "b64")]
+    pub nonce: Vec<u8>,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+}
+
+/// The longest blob the server relays.
+pub const MAX_APPROVAL_BLOB: usize = 4096;
+
+/// What the new device tells the approving one, sealed: its name and keys.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRequestPlain {
+    pub name: String,
+    pub portable: bool,
+    #[serde(with = "b64")]
+    pub signing_public: Vec<u8>,
+    #[serde(with = "b64")]
+    pub sealing_public: Vec<u8>,
+}
+
+/// What the approving device gives the new one, sealed: the account's keys.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalGrantPlain {
+    pub username: String,
+    pub display_name: String,
+    /// [`crate::Keys::to_bytes`].
+    #[serde(with = "b64")]
+    pub keys: Vec<u8>,
+}
+
+/// A new device that shows the code starts an approval with its request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalOpen {
+    /// Made by the new device (128 random bits as 32 hex digits), because
+    /// its request is sealed to the id.
+    pub approval_id: String,
+    pub request: ApprovalBlob,
+    /// Proves, when collecting, that the caller is the device that started it.
+    pub collect_token: String,
+}
+
+/// A device that scans an existing device's code sends its request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalRequest {
+    pub approval_id: String,
+    pub request: ApprovalBlob,
+    pub collect_token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRef {
+    pub approval_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalFetched {
+    /// None until the new device has sent its request.
+    pub request: Option<ApprovalBlob>,
+}
+
+/// The existing device approves: the identity key's signature on the new
+/// device, and the account's keys sealed for it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalGrant {
+    pub approval_id: String,
+    pub device: DeviceRecord,
+    pub grant: ApprovalBlob,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalCollect {
+    pub approval_id: String,
+    pub collect_token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalGranted {
+    pub joined: Joined,
+    pub device: DeviceRecord,
+    pub grant: ApprovalBlob,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApprovalCollected {
+    /// None while the existing device hasn't approved yet.
+    pub granted: Option<ApprovalGranted>,
 }
 
 pub const MAX_USERNAME: usize = 32;

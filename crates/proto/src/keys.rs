@@ -175,18 +175,32 @@ impl DeviceKeys {
 
     /// This device's public keys, signed by the identity key.
     pub fn record(&self, identity: &SigningKey, portable: bool) -> DeviceRecord {
-        let signing_public = self.signing.verifying_key().to_bytes();
-        let sealing_public = self.sealing_public();
-        let signature = identity
-            .sign(&device_statement(&signing_public, &sealing_public))
-            .to_bytes();
-        DeviceRecord {
-            alg: Algs::DEVICE.into(),
+        sign_device(
+            identity,
+            &self.signing.verifying_key().to_bytes(),
+            &self.sealing_public(),
             portable,
-            signing_public: signing_public.to_vec(),
-            sealing_public: sealing_public.to_vec(),
-            signature: signature.to_vec(),
-        }
+        )
+    }
+}
+
+/// Have the identity key vouch for a device from its public keys alone, as an
+/// existing device does when it approves a new one (ADR 0004).
+pub fn sign_device(
+    identity: &SigningKey,
+    signing_public: &[u8; 32],
+    sealing_public: &[u8; 32],
+    portable: bool,
+) -> DeviceRecord {
+    let signature = identity
+        .sign(&device_statement(signing_public, sealing_public))
+        .to_bytes();
+    DeviceRecord {
+        alg: Algs::DEVICE.into(),
+        portable,
+        signing_public: signing_public.to_vec(),
+        sealing_public: sealing_public.to_vec(),
+        signature: signature.to_vec(),
     }
 }
 
