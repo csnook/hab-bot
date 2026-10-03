@@ -1963,6 +1963,7 @@ dependencies = [
 name = "hab-core"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "rusqlite",
  "serde",
  "serde_json",

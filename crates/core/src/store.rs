@@ -162,7 +162,7 @@ impl Store {
                 device_id,
                 author,
                 recorded_at,
-                FORMAT_VERSION,
+                event.format(),
                 serde_json::to_vec(&event)?
             ],
         )?;

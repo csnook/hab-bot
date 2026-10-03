@@ -302,7 +302,8 @@ async fn the_server_database_holds_no_reminder_content() {
     assert!(size > 16 && received >= now() - 60);
     assert_eq!(
         (alg.as_str(), format),
-        (hab_proto::wire::Algs::EVENT, FORMAT_VERSION)
+        // A one-off reminder's events are still in format 1.
+        (hab_proto::wire::Algs::EVENT, 1)
     );
     // And no table has a place for content.
     let columns: Vec<String> = {

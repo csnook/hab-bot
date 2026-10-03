@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use jiff::tz::TimeZone;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -8,7 +9,8 @@ use crate::event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
-use crate::state::{ClosingKind, DueItem, State, UpcomingItem};
+use crate::schedule::{self, Schedule};
+use crate::state::{ClosingKind, DueItem, Reminder, State, UpcomingItem};
 use crate::store::Store;
 use crate::{Error, Result};
 
@@ -102,7 +104,48 @@ pub struct EditReminder {
     pub title: Option<String>,
     pub fire_at: Option<i64>,
     pub note: Option<String>,
+    /// All the schedule triggers, replacing the reminder's.
+    pub schedules: Option<Vec<Schedule>>,
+    /// Pins the reminder to a time zone, or with `Some(None)` makes it
+    /// floating.
+    pub zone: Option<Option<String>>,
 }
+
+/// An occurrence predicted to come due: it becomes an occurrence only if the
+/// reminder fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExpectedItem {
+    pub reminder_id: String,
+    pub title: String,
+    pub scheduled_at: i64,
+}
+
+/// A closed occurrence for the Inbox's Earlier today section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EarlierItem {
+    pub occurrence_id: String,
+    pub title: String,
+    pub scheduled_at: i64,
+    pub closed_at: i64,
+    pub kind: ClosingKind,
+}
+
+/// The Inbox's sections about the rest of today and what's behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Inbox {
+    /// Expected occurrences from now to the end of today, earliest first.
+    pub later_today: Vec<ExpectedItem>,
+    /// Occurrences closed today, including missed ones, latest first.
+    pub earlier_today: Vec<EarlierItem>,
+}
+
+/// Instances kept when a device was away long enough to pass many: the most
+/// recent ones. Older ones are not recorded.
+const MAX_LATE_INSTANCES: usize = 50;
+/// How many instances are looked at in one go.
+const MAX_INSTANCES: usize = 5_000;
+const DEVICE_ZONE: &str = "time_zone";
+const DAY: i64 = 86_400;
 
 /// "New device signed in: <name>, just now. Not you? Remove it".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -493,6 +536,85 @@ impl Core {
         Ok(reminder_id)
     }
 
+    /// Creates a reminder in the personal list that repeats on `schedules`
+    /// (several of them mean several times). `zone` pins it to a named time
+    /// zone; `None` makes it floating, firing at the same local time wherever
+    /// the device is. Nothing fires for instants before `now`.
+    pub fn create_recurring_reminder(
+        &mut self,
+        title: &str,
+        schedules: Vec<Schedule>,
+        zone: Option<&str>,
+        now: i64,
+    ) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(Error::EmptyTitle);
+        }
+        check_schedules(&schedules, zone)?;
+        let reminder_id = Uuid::new_v4().to_string();
+        self.record(
+            now,
+            Event::RecurringReminderCreated {
+                reminder_id: reminder_id.clone(),
+                title: title.to_string(),
+                schedules,
+                zone: zone.map(str::to_string),
+            },
+        )?;
+        Ok(reminder_id)
+    }
+
+    /// The time zone floating reminders follow on this device. Until the app
+    /// says (from the system's setting), UTC.
+    pub fn device_zone(&self) -> String {
+        self.device_setting(DEVICE_ZONE)
+            .ok()
+            .flatten()
+            .filter(|z| schedule::zone(z).is_some())
+            .unwrap_or_else(|| "UTC".to_string())
+    }
+
+    /// Sets the time zone this device is in. The device's own: it is not
+    /// synced, and a reminder pinned to a zone ignores it.
+    pub fn set_device_zone(&self, name: &str) -> Result<()> {
+        if schedule::zone(name).is_none() {
+            return Err(Error::BadZone(name.to_string()));
+        }
+        self.set_device_setting(DEVICE_ZONE, name)
+    }
+
+    /// Follows the system's time zone, which changes when the user travels.
+    pub fn use_system_zone(&self) -> Result<()> {
+        match schedule::system_zone_name() {
+            Some(name) if schedule::zone(&name).is_some() => self.set_device_zone(&name),
+            _ => Ok(()),
+        }
+    }
+
+    fn zone_of(&self, r: &Reminder) -> TimeZone {
+        r.zone
+            .as_deref()
+            .and_then(schedule::zone)
+            .or_else(|| schedule::zone(&self.device_zone()))
+            .unwrap_or(TimeZone::UTC)
+    }
+
+    /// The instants a repeating reminder's schedules have after `after` and
+    /// up to `until`, earliest first and without repeats.
+    fn instances(&self, r: &Reminder, after: i64, until: i64, max: usize) -> Vec<i64> {
+        let zone = self.zone_of(r);
+        let mut v: Vec<i64> = r
+            .schedules
+            .iter()
+            .flat_map(|s| s.instances(&zone, after, until, max))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v.truncate(max);
+        v
+    }
+
     /// Fires every reminder whose time has come, opening an occurrence for
     /// each. A reminder whose time passed while the app was closed fires late,
     /// on the first tick after start.
@@ -533,6 +655,86 @@ impl Core {
                 reminder_id,
                 title,
             });
+        }
+        fired.extend(self.fire_schedules(now)?);
+        Ok(fired)
+    }
+
+    /// Fires the schedules whose instants have come. A device that was off or
+    /// asleep fires late, on waking: the latest instance fires, with its
+    /// scheduled time unchanged so what is overdue and what has expired count
+    /// from it. Earlier instances that passed meanwhile are recorded as
+    /// missed, and so is any occurrence still open when an instance fires
+    /// (ADR 0001): a reminder never has two open.
+    fn fire_schedules(&mut self, now: i64) -> Result<Vec<Fired>> {
+        struct Work {
+            list_id: String,
+            reminder: Reminder,
+            instances: Vec<i64>,
+        }
+        let mut work = Vec::new();
+        for (list_id, state) in self.states() {
+            for r in state.reminders.values().filter(|r| r.repeats()) {
+                let after = state
+                    .last_scheduled(&r.id)
+                    .unwrap_or(i64::MIN)
+                    .max(r.active_from.saturating_sub(1));
+                let mut instances = self.instances(r, after, now, MAX_INSTANCES);
+                if instances.len() > MAX_LATE_INSTANCES {
+                    instances.drain(..instances.len() - MAX_LATE_INSTANCES);
+                }
+                if !instances.is_empty() {
+                    work.push(Work {
+                        list_id: list_id.to_string(),
+                        reminder: r.clone(),
+                        instances,
+                    });
+                }
+            }
+        }
+        let mut fired = Vec::new();
+        for w in work {
+            let reminder_id = &w.reminder.id;
+            let last = *w.instances.last().expect("some instances");
+            for at in w.instances {
+                let occurrence_id = format!("{reminder_id}@{at}");
+                let state = self.state_of(&w.list_id).expect("the list is held");
+                if state.occurrences.contains_key(&occurrence_id) {
+                    continue; // another device already fired this instance
+                }
+                let open = state
+                    .occurrences
+                    .values()
+                    .find(|o| &o.reminder_id == reminder_id && o.is_open())
+                    .map(|o| o.id.clone());
+                if let Some(open) = open {
+                    self.record_in(
+                        &w.list_id,
+                        now,
+                        Event::OccurrenceMissed {
+                            occurrence_id: open,
+                            missed_at: at,
+                        },
+                    )?;
+                }
+                self.record_in(
+                    &w.list_id,
+                    now,
+                    Event::OccurrenceOpened {
+                        occurrence_id: occurrence_id.clone(),
+                        reminder_id: reminder_id.clone(),
+                        scheduled_at: at,
+                        fired_at: now,
+                    },
+                )?;
+                if at == last {
+                    fired.push(Fired {
+                        occurrence_id,
+                        reminder_id: reminder_id.clone(),
+                        title: w.reminder.title.clone(),
+                    });
+                }
+            }
         }
         Ok(fired)
     }
@@ -650,6 +852,15 @@ impl Core {
         if let Some(note) = edit.note.filter(|n| *n != current.note) {
             changes.push(Change::Note(note));
         }
+        if let Some(schedules) = edit.schedules.filter(|s| *s != current.schedules) {
+            let zone = edit.zone.as_ref().unwrap_or(&current.zone);
+            check_schedules(&schedules, zone.as_deref())?;
+            changes.push(Change::Schedules(schedules));
+        }
+        if let Some(zone) = edit.zone.filter(|z| *z != current.zone) {
+            check_schedules(&current.schedules, zone.as_deref())?;
+            changes.push(Change::Zone(zone));
+        }
         for change in changes {
             let hlc = self.next_hlc(&list_id, now);
             self.record_in(
@@ -698,7 +909,86 @@ impl Core {
 
     /// When the next unfired reminder is due, so the scheduler can sleep.
     pub fn next_fire_at(&self) -> Option<i64> {
-        self.states().filter_map(|(_, s)| s.next_fire_at()).min()
+        let one_off = self.states().filter_map(|(_, s)| s.next_fire_at()).min();
+        let scheduled = self
+            .states()
+            .flat_map(|(_, s)| {
+                s.reminders
+                    .values()
+                    .filter(|r| r.repeats())
+                    .filter_map(|r| {
+                        let after = s
+                            .last_scheduled(&r.id)
+                            .unwrap_or(i64::MIN)
+                            .max(r.active_from.saturating_sub(1));
+                        let until = after.max(0).saturating_add(5 * 366 * DAY);
+                        self.instances(r, after, until, 1).first().copied()
+                    })
+            })
+            .min();
+        one_off.into_iter().chain(scheduled).min()
+    }
+
+    /// Occurrences predicted after `now` and up to `until`, earliest first:
+    /// the one-offs yet to fire and the instances of every schedule. The
+    /// views ask for the range they show.
+    pub fn expected(&self, now: i64, until: i64) -> Vec<ExpectedItem> {
+        let mut out = Vec::new();
+        for (_, s) in self.states() {
+            for r in s.reminders.values() {
+                let times = if r.repeats() {
+                    let after = s
+                        .last_scheduled(&r.id)
+                        .unwrap_or(i64::MIN)
+                        .max(r.active_from.saturating_sub(1))
+                        .max(now);
+                    self.instances(r, after, until, 500)
+                } else if r.fire_at > now
+                    && r.fire_at <= until
+                    && !s.occurrences.values().any(|o| o.reminder_id == r.id)
+                {
+                    vec![r.fire_at]
+                } else {
+                    Vec::new()
+                };
+                out.extend(times.into_iter().map(|t| ExpectedItem {
+                    reminder_id: r.id.clone(),
+                    title: r.title.clone(),
+                    scheduled_at: t,
+                }));
+            }
+        }
+        out.sort_by(|a, b| (a.scheduled_at, &a.reminder_id).cmp(&(b.scheduled_at, &b.reminder_id)));
+        out
+    }
+
+    /// The Inbox's Later today and Earlier today, for the day `now` falls in
+    /// on this device (in the device's time zone).
+    pub fn inbox(&self, now: i64) -> Inbox {
+        let zone = schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC);
+        let (start, end) = schedule::day_bounds(&zone, now);
+        let mut earlier: Vec<EarlierItem> = self
+            .states()
+            .flat_map(|(_, s)| {
+                s.occurrences.values().filter_map(move |o| {
+                    let c = o.closing.as_ref().filter(|c| c.at >= start && c.at < end)?;
+                    let r = s.reminders.get(&o.reminder_id)?;
+                    Some(EarlierItem {
+                        occurrence_id: o.id.clone(),
+                        title: r.title.clone(),
+                        scheduled_at: o.scheduled_at,
+                        closed_at: c.at,
+                        kind: c.kind,
+                    })
+                })
+            })
+            .collect();
+        earlier
+            .sort_by(|a, b| (b.closed_at, &b.occurrence_id).cmp(&(a.closed_at, &a.occurrence_id)));
+        Inbox {
+            later_today: self.expected(now, end - 1),
+            earlier_today: earlier,
+        }
     }
 
     /// Records that this device is called `name`, in the personal list.
@@ -887,6 +1177,19 @@ impl Core {
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
         }
     }
+}
+
+/// Checks a reminder's schedules and zone can be used.
+fn check_schedules(schedules: &[Schedule], zone: Option<&str>) -> Result<()> {
+    if let Some(z) = zone {
+        if schedule::zone(z).is_none() {
+            return Err(Error::BadZone(z.to_string()));
+        }
+    }
+    for s in schedules {
+        s.validate().map_err(Error::BadSchedule)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

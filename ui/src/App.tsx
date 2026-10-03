@@ -1,8 +1,11 @@
 import { useEffect, useState } from "preact/hooks";
 import {
   completeOccurrence,
+  createRecurringReminder,
   createReminder,
   dismissNotice,
+  inbox,
+  type Inbox as InboxSections,
   onStateChanged,
   skipOccurrence,
   snapshot,
@@ -10,6 +13,7 @@ import {
 } from "./api";
 import { formatTime, signInNoticeText, toUnixSeconds } from "./time";
 import { setupState, type Setup } from "./api";
+import { DAYS, patternFor, REPEATS, type Repeat } from "./repeat";
 import { Account } from "./Account";
 import { FirstStart } from "./FirstStart";
 
@@ -124,9 +128,16 @@ function Inbox() {
     security_notices: [],
     update_notice: null,
   });
+  const [sections, setSections] = useState<InboxSections>({
+    later_today: [],
+    earlier_today: [],
+  });
   const [error, setError] = useState("");
 
-  const refresh = () => snapshot().then(setSnap).catch((e) => setError(String(e)));
+  const refresh = () => {
+    snapshot().then(setSnap).catch((e) => setError(String(e)));
+    inbox().then(setSections).catch((e) => setError(String(e)));
+  };
 
   useEffect(() => {
     refresh();
@@ -163,6 +174,34 @@ function Inbox() {
         </ul>
       </section>
 
+      <section aria-labelledby="later-today">
+        <h2 id="later-today">Later today</h2>
+        {sections.later_today.length === 0 && <p class="empty">Nothing more today.</p>}
+        <ul>
+          {sections.later_today.map((e) => (
+            <li key={`${e.reminder_id}@${e.scheduled_at}`}>
+              <span class="title">{e.title}</span>
+              <span class="when">{formatTime(e.scheduled_at)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section aria-labelledby="earlier-today">
+        <h2 id="earlier-today">Earlier today</h2>
+        {sections.earlier_today.length === 0 && <p class="empty">Nothing closed yet today.</p>}
+        <ul>
+          {sections.earlier_today.map((e) => (
+            <li key={e.occurrence_id}>
+              <span class="title">{e.title}</span>
+              <span class="when">
+                {e.kind} {formatTime(e.closed_at)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
       <section aria-labelledby="upcoming">
         <h2 id="upcoming">Later</h2>
         {snap.upcoming.length === 0 && <p class="empty">No reminders waiting.</p>}
@@ -191,13 +230,24 @@ function NewReminder({ onError }: { onError: (e: string) => void }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
+  const [repeat, setRepeat] = useState<Repeat>("once");
+  const [days, setDays] = useState<string[]>([]);
+  // Floating (the same local time wherever the device is) unless pinned.
+  const [pinned, setPinned] = useState(false);
 
   const submit = async (e: Event) => {
     e.preventDefault();
     const fireAt = toUnixSeconds(date, time);
     if (fireAt === null) return onError("Pick a date and time.");
     try {
-      await createReminder(title, fireAt);
+      if (repeat === "once") {
+        await createReminder(title, fireAt);
+      } else {
+        const pattern = patternFor(repeat, date, days);
+        if (!pattern) return onError("Choose the days it repeats on.");
+        const zone = pinned ? Intl.DateTimeFormat().resolvedOptions().timeZone : null;
+        await createRecurringReminder(title, pattern, date, time, zone);
+      }
       setTitle("");
       onError("");
     } catch (err) {
@@ -220,6 +270,41 @@ function NewReminder({ onError }: { onError: (e: string) => void }) {
         Time
         <input type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} required />
       </label>
+      <label>
+        Repeat
+        <select value={repeat} onChange={(e) => setRepeat(e.currentTarget.value as Repeat)}>
+          {REPEATS.map(([value, label]) => (
+            <option value={value} key={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+      {repeat === "weekly" && (
+        <fieldset>
+          <legend>On</legend>
+          {DAYS.map(([code, label]) => (
+            <label key={code}>
+              <input
+                type="checkbox"
+                checked={days.includes(code)}
+                onChange={(e) =>
+                  setDays(e.currentTarget.checked ? [...days, code] : days.filter((d) => d !== code))
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+      )}
+      {repeat !== "once" && (
+        <label>
+          <input
+            type="checkbox"
+            checked={pinned}
+            onChange={(e) => setPinned(e.currentTarget.checked)}
+          />
+          Keep to this time zone when I travel
+        </label>
+      )}
       <button type="submit">Create</button>
     </form>
   );

@@ -303,6 +303,7 @@ fn edit(
             title: title.map(str::to_string),
             fire_at: fire,
             note: note.map(str::to_string),
+            ..Default::default()
         },
         at,
     )

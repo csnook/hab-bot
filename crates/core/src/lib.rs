@@ -12,17 +12,19 @@
 mod core;
 mod event;
 mod hlc;
+mod schedule;
 mod state;
 mod store;
 
 pub use crate::core::{
-    Core, DeviceNotice, EditReminder, Fired, ListInfo, ReconciliationNotice, SecurityNotice,
-    SignInNotice, Snapshot,
+    Core, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox, ListInfo,
+    ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
 };
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 pub use hlc::{Hlc, MAX_AHEAD_MS};
+pub use schedule::{day_bounds, system_zone_name, zone, Pattern, Schedule};
 pub use state::{
     Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder, SettingVersion, SignIn,
     State, UpcomingItem,
@@ -38,6 +40,10 @@ pub enum Error {
     Corrupt(#[from] serde_json::Error),
     #[error("the title is empty")]
     EmptyTitle,
+    #[error("the schedule can't be used: {0}")]
+    BadSchedule(String),
+    #[error("{0} is not a time zone this device knows")]
+    BadZone(String),
     #[error("there is no reminder {0}")]
     NoReminder(String),
     #[error("that value was never one of the setting's")]

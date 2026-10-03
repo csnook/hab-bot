@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hlc::Hlc;
+use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -18,6 +19,16 @@ pub enum Event {
         reminder_id: String,
         title: String,
         fire_at: i64,
+    },
+    /// A repeating reminder was created, firing on its schedules, in the time
+    /// zone `zone` or, if that is `None`, wherever the device is (floating).
+    /// Format 2: an app that only reads format 1 keeps it without applying it,
+    /// rather than mistaking it for a one-off.
+    RecurringReminderCreated {
+        reminder_id: String,
+        title: String,
+        schedules: Vec<Schedule>,
+        zone: Option<String>,
     },
     /// A reminder fired: an occurrence is open. Its id is the reminder plus
     /// the scheduled time, so firings on several devices merge.
@@ -79,6 +90,10 @@ pub enum Setting {
     FireAt,
     /// A free-text note. It is one value: concurrent edits never merge.
     Note,
+    /// The schedule triggers, all of them as one value.
+    Schedules,
+    /// The time zone a reminder is pinned to, or floating.
+    Zone,
 }
 
 /// A new value for one setting.
@@ -88,6 +103,9 @@ pub enum Change {
     Title(String),
     FireAt(i64),
     Note(String),
+    Schedules(Vec<Schedule>),
+    /// `None` is floating.
+    Zone(Option<String>),
 }
 
 impl Change {
@@ -96,6 +114,23 @@ impl Change {
             Change::Title(_) => Setting::Title,
             Change::FireAt(_) => Setting::FireAt,
             Change::Note(_) => Setting::Note,
+            Change::Schedules(_) => Setting::Schedules,
+            Change::Zone(_) => Setting::Zone,
+        }
+    }
+}
+
+impl Event {
+    /// The event format this event needs a reader to understand. Most are
+    /// still format 1, so apps that read only that keep working with them.
+    pub fn format(&self) -> u32 {
+        match self {
+            Event::RecurringReminderCreated { .. }
+            | Event::ReminderEdited {
+                change: Change::Schedules(_) | Change::Zone(_),
+                ..
+            } => 2,
+            _ => 1,
         }
     }
 }

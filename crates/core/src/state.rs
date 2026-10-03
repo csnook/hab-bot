@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::event::{Change, Event, Setting, StoredEvent};
 use crate::hlc::Hlc;
+use crate::schedule::Schedule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reminder {
@@ -12,6 +13,24 @@ pub struct Reminder {
     pub title: String,
     pub fire_at: i64,
     pub note: String,
+    /// What fires it, if it repeats. A reminder with none is a one-off,
+    /// firing once at `fire_at`.
+    pub schedules: Vec<Schedule>,
+    /// The time zone the schedules are in. `None` is floating: wherever the
+    /// device is.
+    pub zone: Option<String>,
+    /// When the reminder was made, in Unix seconds.
+    pub created_at: i64,
+    /// Schedules fire only for instants from here: when the reminder was made,
+    /// or its schedules or zone were last changed. Setting a 7:00 reminder at
+    /// 8:00 doesn't fire this morning's.
+    pub active_from: i64,
+}
+
+impl Reminder {
+    pub fn repeats(&self) -> bool {
+        !self.schedules.is_empty()
+    }
 }
 
 /// How an occurrence was closed. The order is the order of the rules for
@@ -163,6 +182,7 @@ impl State {
         if stored.seq.is_none() {
             match &stored.event {
                 Event::ReminderCreated { reminder_id, .. }
+                | Event::RecurringReminderCreated { reminder_id, .. }
                 | Event::ReminderEdited { reminder_id, .. } => {
                     self.unsent_reminders.insert(reminder_id.clone());
                 }
@@ -201,6 +221,41 @@ impl State {
                             title: title.clone(),
                             fire_at: *fire_at,
                             note: String::new(),
+                            schedules: Vec::new(),
+                            zone: None,
+                            created_at: stored.recorded_at,
+                            active_from: stored.recorded_at,
+                        },
+                    );
+                    self.refresh(reminder_id);
+                }
+            }
+            Event::RecurringReminderCreated {
+                reminder_id,
+                title,
+                schedules,
+                zone,
+            } => {
+                if !self.reminders.contains_key(reminder_id) {
+                    for change in [
+                        Change::Title(title.clone()),
+                        Change::Schedules(schedules.clone()),
+                        Change::Zone(zone.clone()),
+                    ] {
+                        self.add_version(reminder_id, Hlc::default(), change, stored);
+                    }
+                    self.reminders.insert(
+                        reminder_id.clone(),
+                        Reminder {
+                            id: reminder_id.clone(),
+                            list_id: stored.list_id.clone(),
+                            title: title.clone(),
+                            fire_at: 0,
+                            note: String::new(),
+                            schedules: schedules.clone(),
+                            zone: zone.clone(),
+                            created_at: stored.recorded_at,
+                            active_from: stored.recorded_at,
                         },
                     );
                     self.refresh(reminder_id);
@@ -226,15 +281,21 @@ impl State {
                 {
                     return;
                 }
-                // A one-off reminder has one occurrence (ADR 0001).
-                let existing = self
-                    .occurrences
-                    .values()
-                    .find(|o| &o.reminder_id == reminder_id)
-                    .map(|o| o.id.clone());
-                if let Some(existing) = existing {
-                    self.aliases.insert(occurrence_id.clone(), existing);
-                    return;
+                let one_off = self
+                    .reminders
+                    .get(reminder_id)
+                    .is_some_and(|r| !r.repeats());
+                if one_off {
+                    // A one-off reminder has one occurrence (ADR 0001).
+                    let existing = self
+                        .occurrences
+                        .values()
+                        .find(|o| &o.reminder_id == reminder_id)
+                        .map(|o| o.id.clone());
+                    if let Some(existing) = existing {
+                        self.aliases.insert(occurrence_id.clone(), existing);
+                        return;
+                    }
                 }
                 self.occurrences.insert(
                     occurrence_id.clone(),
@@ -248,6 +309,9 @@ impl State {
                         acknowledged: false,
                     },
                 );
+                if !one_off {
+                    self.expire_superseded(reminder_id);
+                }
             }
             Event::OccurrenceCompleted {
                 occurrence_id,
@@ -377,6 +441,45 @@ impl State {
         }
     }
 
+    /// Keeps a repeating reminder to one open occurrence (ADR 0001), whatever
+    /// order its openings arrive in: only the latest instance can be open. An
+    /// older one is closed as missed, as of when the next instance was due.
+    /// Nobody did this, so it names no user and no device.
+    fn expire_superseded(&mut self, reminder_id: &str) {
+        let Some(newest) = self
+            .occurrences
+            .values()
+            .filter(|o| o.reminder_id == reminder_id)
+            .map(|o| (o.scheduled_at, o.id.clone()))
+            .max()
+        else {
+            return;
+        };
+        for o in self.occurrences.values_mut() {
+            if o.reminder_id == reminder_id && o.id != newest.1 && o.closing.is_none() {
+                o.snoozed_until = None;
+                o.acknowledged = false;
+                o.closing = Some(Closing {
+                    kind: ClosingKind::Missed,
+                    by: String::new(),
+                    device_id: String::new(),
+                    at: newest.0.max(o.scheduled_at),
+                    note: None,
+                    event_id: format!("expired:{}", o.id),
+                });
+            }
+        }
+    }
+
+    /// The scheduled time of the reminder's latest occurrence.
+    pub fn last_scheduled(&self, reminder_id: &str) -> Option<i64> {
+        self.occurrences
+            .values()
+            .filter(|o| o.reminder_id == reminder_id)
+            .map(|o| o.scheduled_at)
+            .max()
+    }
+
     fn add_version(&mut self, reminder_id: &str, hlc: Hlc, change: Change, stored: &StoredEvent) {
         let versions = self
             .versions
@@ -404,12 +507,24 @@ impl State {
 
     /// Sets each of a reminder's settings to its latest value.
     fn refresh(&mut self, reminder_id: &str) {
-        for setting in [Setting::Title, Setting::FireAt, Setting::Note] {
+        let mut active_from = None;
+        for setting in [
+            Setting::Title,
+            Setting::FireAt,
+            Setting::Note,
+            Setting::Schedules,
+            Setting::Zone,
+        ] {
             let latest = self
                 .versions
                 .get(&(reminder_id.to_string(), setting))
-                .and_then(|v| v.iter().max_by(|a, b| a.hlc.cmp(&b.hlc)))
-                .map(|v| v.change.clone());
+                .and_then(|v| v.iter().max_by(|a, b| a.hlc.cmp(&b.hlc)));
+            if matches!(setting, Setting::Schedules | Setting::Zone) {
+                if let Some(v) = latest.filter(|v| v.hlc != Hlc::default()) {
+                    active_from = active_from.max(Some(v.recorded_at));
+                }
+            }
+            let latest = latest.map(|v| v.change.clone());
             let Some(r) = self.reminders.get_mut(reminder_id) else {
                 return;
             };
@@ -417,8 +532,13 @@ impl State {
                 Some(Change::Title(t)) => r.title = t,
                 Some(Change::FireAt(t)) => r.fire_at = t,
                 Some(Change::Note(n)) => r.note = n,
+                Some(Change::Schedules(s)) => r.schedules = s,
+                Some(Change::Zone(z)) => r.zone = z,
                 None => {}
             }
+        }
+        if let (Some(r), Some(at)) = (self.reminders.get_mut(reminder_id), active_from) {
+            r.active_from = r.active_from.max(at);
         }
     }
 
@@ -456,7 +576,7 @@ impl State {
         let mut v: Vec<&Reminder> = self
             .reminders
             .values()
-            .filter(|r| r.fire_at <= now && !self.has_fired(&r.id))
+            .filter(|r| !r.repeats() && r.fire_at <= now && !self.has_fired(&r.id))
             .collect();
         v.sort_by_key(|r| (r.fire_at, r.id.clone()));
         v
@@ -466,7 +586,7 @@ impl State {
     pub fn next_fire_at(&self) -> Option<i64> {
         self.reminders
             .values()
-            .filter(|r| !self.has_fired(&r.id))
+            .filter(|r| !r.repeats() && !self.has_fired(&r.id))
             .map(|r| r.fire_at)
             .min()
     }
@@ -500,7 +620,7 @@ impl State {
         let mut v: Vec<UpcomingItem> = self
             .reminders
             .values()
-            .filter(|r| !self.has_fired(&r.id))
+            .filter(|r| !r.repeats() && !self.has_fired(&r.id))
             .map(|r| UpcomingItem {
                 reminder_id: r.id.clone(),
                 title: r.title.clone(),
@@ -519,8 +639,12 @@ impl State {
 
     /// A one-off reminder is finished once its occurrence is closed.
     pub fn is_finished(&self, reminder_id: &str) -> bool {
-        self.occurrences
-            .values()
-            .any(|o| o.reminder_id == reminder_id && !o.is_open())
+        self.reminders
+            .get(reminder_id)
+            .is_some_and(|r| !r.repeats())
+            && self
+                .occurrences
+                .values()
+                .any(|o| o.reminder_id == reminder_id && !o.is_open())
     }
 }

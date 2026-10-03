@@ -88,6 +88,40 @@ fn create_reminder(
     Ok(())
 }
 
+/// A reminder that repeats: a common pattern from a date, at a time of day,
+/// pinned to a time zone or, with none, floating.
+#[tauri::command]
+fn create_recurring_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    title: String,
+    pattern: hab_core::Pattern,
+    date: String,
+    time: String,
+    zone: Option<String>,
+) -> Result<(), String> {
+    let schedule =
+        hab_core::Schedule::from_pattern(&pattern, &date, &time).map_err(|e| e.to_string())?;
+    {
+        let mut core = app.core.lock().unwrap();
+        let _ = core.use_system_zone();
+        core.create_recurring_reminder(&title, vec![schedule], zone.as_deref(), now())
+            .map_err(|e| e.to_string())?;
+    }
+    app.sync_wake.notify_one();
+    let _ = app.wake.send(());
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
+}
+
+/// Later today and Earlier today, and the zone the device is in.
+#[tauri::command]
+fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.inbox(now())
+}
+
 #[tauri::command]
 fn complete_occurrence(
     app: tauri::State<'_, App>,
@@ -716,6 +750,8 @@ fn run_scheduler(
     loop {
         let (fired, next) = {
             let mut core = core.lock().unwrap();
+            // The user may have travelled: floating reminders follow.
+            let _ = core.use_system_zone();
             let fired = core.tick(now()).unwrap_or_else(|e| {
                 eprintln!("tick failed: {e}");
                 Vec::new()
@@ -756,6 +792,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             create_reminder,
+            create_recurring_reminder,
+            inbox,
             complete_occurrence,
             skip_occurrence,
             setup_state,

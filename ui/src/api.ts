@@ -57,9 +57,46 @@ export interface Snapshot {
   update_notice: string | null;
 }
 
+export interface ExpectedItem {
+  reminder_id: string;
+  title: string;
+  scheduled_at: number;
+}
+
+export interface EarlierItem {
+  occurrence_id: string;
+  title: string;
+  scheduled_at: number;
+  closed_at: number;
+  kind: "missed" | "skipped" | "completed";
+}
+
+/** The Inbox's Later today and Earlier today. */
+export interface Inbox {
+  later_today: ExpectedItem[];
+  earlier_today: EarlierItem[];
+}
+
+/** The patterns the editor offers; anything else is a written rule. */
+export type Pattern =
+  | { kind: "daily" }
+  | { kind: "weekdays" }
+  | { kind: "weekly"; days: string[] }
+  | { kind: "monthly_by_date"; day: number }
+  | { kind: "monthly_by_weekday"; ordinal: number; weekday: string };
+
 export const snapshot = () => invoke<Snapshot>("snapshot");
 export const createReminder = (title: string, fireAt: number) =>
   invoke<void>("create_reminder", { title, fireAt });
+export const inbox = () => invoke<Inbox>("inbox");
+/** `date` is "2026-10-03", `time` "09:30". No `zone` makes it floating. */
+export const createRecurringReminder = (
+  title: string,
+  pattern: Pattern,
+  date: string,
+  time: string,
+  zone: string | null,
+) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone });
 export const completeOccurrence = (occurrenceId: string) =>
   invoke<void>("complete_occurrence", { occurrenceId });
 export const skipOccurrence = (occurrenceId: string) =>
