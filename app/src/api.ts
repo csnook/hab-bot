@@ -28,6 +28,9 @@ export interface Occurrence {
   expires_at: number | null;
   status: "expected" | "due" | "completed" | "skipped" | "missed";
   closed_at: number | null;
+  tapped_at: number | null;
+  note: string | null;
+  corrected_from: "expected" | "due" | "completed" | "skipped" | "missed" | null;
 }
 
 export type Trigger =
@@ -54,7 +57,13 @@ export const inbox = () => invoke<InboxItem[]>("inbox");
 export const createOneOff = (title: string, dueAt: number) =>
   invoke<void>("create_one_off", { title, dueAt });
 export const createReminder = (reminder: NewReminder) => invoke<void>("create_reminder", { reminder });
-export const skip = (occurrenceId: string) => invoke<void>("skip", { occurrenceId });
+export const skip = (occurrenceId: string, note: string | null = null) => invoke<void>("skip", { occurrenceId, note });
+export const skipAhead = (occurrenceId: string, note: string | null = null) => invoke<void>("skip_ahead", { occurrenceId, note });
+export const completeAt = (occurrenceId: string, at: number) => invoke<void>("complete_at", { occurrenceId, at });
+export const undo = (occurrenceId: string) => invoke<void>("undo", { occurrenceId });
+export const correct = (occurrenceId: string, to: "completed" | "skipped", at: number, note: string | null) =>
+  invoke<void>("correct", { occurrenceId, to, at, note });
+export const recentSkipNotes = () => invoke<string[]>("recent_skip_notes");
 export const completeEarly = (reminderId: string) => invoke<void>("complete_early", { reminderId });
 export const complete = (occurrenceId: string) => invoke<void>("complete", { occurrenceId });
 /** Calls back whenever the core's state changed (a reminder fired, or an action was taken). */

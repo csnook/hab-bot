@@ -27,14 +27,14 @@ const PRIORITIES: api.Priority[] = ["minimum", "low", "medium", "high", "maximum
 const dayLabel = (i: number) => DAY_NAMES[i];
 
 /** Snooze: one tap uses the priority's interval; the menu lists the rest, and shows a known expiry. */
-function SnoozeButton({ id, onDone }: { id: string; onDone: () => void }) {
+function SnoozeButton({ id, onDone, ahead }: { id: string; onDone: () => void; ahead?: boolean }) {
   const [picker, setPicker] = useState<api.SnoozePicker | null>(null);
   const [custom, setCustom] = useState("");
   const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const until = (ms: number) => api.snoozeUntil(id, ms).then(() => { setPicker(null); onDone(); });
   return (
     <span class="snooze">
-      <button onClick={() => api.snooze(id).then(onDone)}>Snooze</button>
+      <button onClick={() => api.snooze(id).then(onDone)}>{ahead ? "Snooze ahead" : "Snooze"}</button>
       <button title="More snooze choices" onClick={() => (picker ? setPicker(null) : api.snoozePicker(id).then(setPicker))}>▾</button>
       {picker && (
         <span class="menu">
@@ -47,6 +47,74 @@ function SnoozeButton({ id, onDone }: { id: string; onDone: () => void }) {
         </span>
       )}
     </span>
+  );
+}
+
+/** The details panel, with the buttons that fit what the occurrence is: open, expected or closed. */
+function Details({ o, onClose, refresh }: { o: api.Occurrence; onClose: () => void; refresh: () => void }) {
+  const [more, setMore] = useState(false);
+  const [when, setWhen] = useState(localInputValue(Date.now()));
+  const [note, setNote] = useState("");
+  const [notes, setNotes] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => void api.recentSkipNotes().then(setNotes), []);
+  const act = (f: () => Promise<unknown>) => f().then(() => { refresh(); onClose(); }, (e) => setError(String(e)));
+  const at = () => new Date(when).getTime();
+  const n = note.trim() || null;
+  const closed = o.status === "completed" || o.status === "skipped" || o.status === "missed";
+  const time = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "");
+
+  return (
+    <dialog open class="details">
+      <h2>{o.title}</h2>
+      <p>
+        {o.priority} · scheduled {time(o.scheduled_at)}
+        {o.status === "expected" && " · expected"}
+        {o.closed_at && ` · ${o.status} ${time(o.closed_at)}`}
+        {o.tapped_at && o.tapped_at !== o.closed_at && ` (tapped ${time(o.tapped_at)})`}
+        {o.corrected_from && ` · corrected from ${o.corrected_from}`}
+        {o.note && ` · "${o.note}"`}
+      </p>
+      {(o.status === "due") && (
+        <p>
+          <button onClick={() => act(() => api.complete(o.id))}>Done</button>
+          <SnoozeButton id={o.id} onDone={() => { refresh(); onClose(); }} />
+          <button onClick={() => act(() => api.skip(o.id, n))}>Skip</button>
+          <button onClick={() => setMore(!more)}>More ▾</button>
+        </p>
+      )}
+      {o.status === "due" && more && (
+        <p>
+          Done at a different time: <input type="datetime-local" value={when} onInput={(e) => setWhen(e.currentTarget.value)} />
+          <button onClick={() => act(() => api.completeAt(o.id, at()))}>Done at this time</button>
+          <button disabled title="Comes with the editor">Edit reminder</button>
+        </p>
+      )}
+      {o.status === "expected" && (
+        <p>
+          <button onClick={() => act(() => api.completeEarly(o.reminder_id))}>Complete early</button>
+          <button onClick={() => act(() => api.skipAhead(o.id, n))}>Skip ahead</button>
+          <SnoozeButton id={o.id} ahead onDone={() => { refresh(); onClose(); }} />
+        </p>
+      )}
+      {(o.status === "due" || o.status === "expected") && (
+        <p>
+          Skip note: <input list="notes" value={note} onInput={(e) => setNote(e.currentTarget.value)} />
+          <datalist id="notes">{notes.map((x) => <option value={x} />)}</datalist>
+        </p>
+      )}
+      {closed && (
+        <p>
+          {o.status !== "missed" && <button onClick={() => act(() => api.undo(o.id))}>Undo</button>}
+          <input type="datetime-local" value={when} onInput={(e) => setWhen(e.currentTarget.value)} />
+          <input placeholder="note" value={note} onInput={(e) => setNote(e.currentTarget.value)} />
+          <button onClick={() => act(() => api.correct(o.id, "completed", at(), n))}>Correct to done</button>
+          <button onClick={() => act(() => api.correct(o.id, "skipped", at(), n))}>Correct to skipped</button>
+        </p>
+      )}
+      {error && <p class="error">{error}</p>}
+      <button onClick={onClose}>Close</button>
+    </dialog>
   );
 }
 
@@ -239,6 +307,7 @@ function Inbox() {
   const [items, setItems] = useState<api.InboxItem[]>([]);
   const [settings, setSettings] = useState(false);
   const [opened, setOpened] = useState("");
+  const [selected, setSelected] = useState<api.Occurrence | null>(null);
   const refresh = () => api.inbox().then(setItems);
 
   useEffect(() => {
@@ -259,6 +328,7 @@ function Inbox() {
         Inbox <button class="link" onClick={() => setSettings(true)}>Settings</button>
       </h1>
       {settings && <Settings onClose={() => setSettings(false)} />}
+      {selected && <Details o={selected} onClose={() => setSelected(null)} refresh={refresh} />}
       <NewReminder onCreated={refresh} />
       {by("overdue").length > 0 && (
         <section>
@@ -266,7 +336,7 @@ function Inbox() {
           <ul>
             {by("overdue").map(({ occurrence: o }) => (
               <li key={o.id} class={`overdue ${o.id === opened ? "opened" : ""}`}>
-                <span>
+                <span class="title" onClick={() => setSelected(o)}>
                   {o.title} <small>{o.priority}</small>
                 </span>
                 <time>since {new Date(o.overdue_at).toLocaleString()}</time>
@@ -284,7 +354,7 @@ function Inbox() {
         <ul>
           {by("due").map(({ occurrence: o }) => (
             <li key={o.id} class={o.id === opened ? "opened" : ""}>
-              <span>{o.title}</span>
+              <span class="title" onClick={() => setSelected(o)}>{o.title}</span>
               <time>{new Date(o.scheduled_at).toLocaleString()}</time>
               <button onClick={() => api.complete(o.id).then(refresh)}>Done</button>
               <SnoozeButton id={o.id} onDone={refresh} />
@@ -299,7 +369,7 @@ function Inbox() {
           <ul>
             {by("later_today").map(({ occurrence: o }) => (
               <li key={o.id} class="expected">
-                <span>{o.title}</span>
+                <span class="title" onClick={() => setSelected(o)}>{o.title}</span>
                 <time>{hhmm(o.scheduled_at)}</time>
                 <button onClick={() => api.completeEarly(o.reminder_id).then(refresh)}>Done early</button>
                 <SnoozeButton id={o.id} onDone={refresh} />
@@ -314,7 +384,7 @@ function Inbox() {
           <ul>
             {by("earlier_today").map(({ occurrence: o }) => (
               <li key={o.id} class={o.status}>
-                <span>{o.title}</span>
+                <span class="title" onClick={() => setSelected(o)}>{o.title}</span>
                 <time>
                   {o.status === "missed" ? "Missed" : o.status === "skipped" ? "Skipped" : "Done"} {hhmm(o.closed_at ?? o.scheduled_at)}
                 </time>

@@ -107,10 +107,59 @@ fn snooze_picker(app: tauri::State<App>, occurrence_id: String) -> Option<hab_co
 }
 
 #[tauri::command]
-fn skip(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
+fn skip(app: tauri::State<App>, occurrence_id: String, note: Option<String>) -> Result<(), String> {
     fresh(&app)
-        .skip(&occurrence_id, None, now())
+        .skip(&occurrence_id, note, now())
         .map_err(|e| e.to_string())
+}
+
+/// Done at a time the user says, which can be before the firing.
+#[tauri::command]
+fn complete_at(app: tauri::State<App>, occurrence_id: String, at: Millis) -> Result<(), String> {
+    fresh(&app)
+        .complete_at(&occurrence_id, at, now())
+        .map_err(|e| e.to_string())
+}
+
+/// Skips an expected occurrence ahead of time.
+#[tauri::command]
+fn skip_ahead(
+    app: tauri::State<App>,
+    occurrence_id: String,
+    note: Option<String>,
+) -> Result<(), String> {
+    let mut core = fresh(&app);
+    core.skip_ahead(&occurrence_id, note, now())
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
+    android::schedule_alarm(core.next_due(now()));
+    Ok(())
+}
+
+#[tauri::command]
+fn undo(app: tauri::State<App>, occurrence_id: String) -> Result<(), String> {
+    fresh(&app)
+        .undo(&occurrence_id, now())
+        .map_err(|e| e.to_string())
+}
+
+/// Changes a closed occurrence to completed or skipped, at a time.
+#[tauri::command]
+fn correct(
+    app: tauri::State<App>,
+    occurrence_id: String,
+    to: hab_core::Outcome,
+    at: Millis,
+    note: Option<String>,
+) -> Result<(), String> {
+    fresh(&app)
+        .correct(&occurrence_id, to, at, note, now())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn recent_skip_notes(app: tauri::State<App>) -> Vec<String> {
+    fresh(&app).recent_skip_notes(5)
 }
 
 /// Completes a reminder ahead of its next expected occurrence, which then never fires.
@@ -277,6 +326,11 @@ pub fn run() {
             create_reminder,
             complete,
             skip,
+            skip_ahead,
+            complete_at,
+            undo,
+            correct,
+            recent_skip_notes,
             snooze,
             snooze_until,
             snooze_picker,

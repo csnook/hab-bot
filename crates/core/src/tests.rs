@@ -1338,3 +1338,275 @@ mod snooze_tests {
         assert_eq!(c.open_occurrences()[0].expires_at, Some(start + 4 * HOUR));
     }
 }
+
+mod action_tests {
+    use super::*;
+
+    const MINUTE: Millis = 60_000;
+    const HOUR: Millis = 60 * MINUTE;
+    const DAY: Millis = 24 * HOUR;
+
+    fn daily_7(c: &mut Core, expiry: Option<Millis>) -> String {
+        c.set_zone("UTC");
+        let day0 = T0 - (T0 % DAY);
+        let start = crate::time::format_wall(crate::time::wall_at(day0 + 7 * HOUR, chrono_tz::UTC));
+        c.create(
+            NewReminder {
+                title: "Medicine".into(),
+                triggers: vec![Trigger::Schedule {
+                    rule: "FREQ=DAILY".into(),
+                    start,
+                }],
+                tz: None,
+                priority: Priority::Medium,
+                expiry,
+            },
+            day0,
+        )
+        .unwrap()
+    }
+
+    fn day0() -> Millis {
+        T0 - (T0 % DAY)
+    }
+
+    #[test]
+    fn done_can_be_recorded_at_a_different_time_even_before_the_firing() {
+        let mut c = core();
+        daily_7(&mut c, None);
+        let at7 = day0() + 7 * HOUR;
+        let id = c.fire_due(at7).unwrap().remove(0).id;
+        // tapped at 7:05, took it at 6:55
+        c.complete_at(&id, at7 - 5 * MINUTE, at7 + 5 * MINUTE)
+            .unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!(
+            (o.closed_at, o.tapped_at),
+            (Some(at7 - 5 * MINUTE), Some(at7 + 5 * MINUTE))
+        );
+        assert!(c.complete_at(&id, at7, at7).is_err(), "already closed");
+    }
+
+    #[test]
+    fn a_completion_cannot_be_recorded_in_the_future() {
+        let mut c = core();
+        c.create_one_off("x", T0, T0).unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        assert!(c.complete_at(&id, T0 + 1, T0).is_err());
+    }
+
+    #[test]
+    fn completing_early_closes_the_next_expected_occurrence_which_never_fires() {
+        let mut c = core();
+        let rid = daily_7(&mut c, None);
+        let now = day0() + 3 * HOUR;
+        c.complete_early(&rid, now, now).unwrap();
+        assert!(c.fire_due(day0() + 7 * HOUR).unwrap().is_empty());
+        // the following day's instance is untouched
+        assert_eq!(c.fire_due(day0() + DAY + 7 * HOUR).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_expected_occurrence_means_no_early_completion() {
+        let mut c = core();
+        let rid = c.create_one_off("x", T0, T0).unwrap();
+        c.fire_due(T0).unwrap();
+        assert!(c.next_expected(&rid, T0).is_none());
+        assert!(c.complete_early(&rid, T0, T0).is_err());
+    }
+
+    #[test]
+    fn skip_takes_a_note_and_recent_notes_are_offered() {
+        let mut c = core();
+        daily_7(&mut c, None);
+        let id = c.fire_due(day0() + 7 * HOUR).unwrap().remove(0).id;
+        c.skip(&id, Some("away".into()), day0() + 8 * HOUR).unwrap();
+        assert_eq!(
+            c.state().occurrence(&id).unwrap().note.as_deref(),
+            Some("away")
+        );
+        let id2 = c.fire_due(day0() + DAY + 7 * HOUR).unwrap().remove(0).id;
+        c.skip(&id2, Some("ill".into()), day0() + DAY + 8 * HOUR)
+            .unwrap();
+        let id3 = c
+            .fire_due(day0() + 2 * DAY + 7 * HOUR)
+            .unwrap()
+            .remove(0)
+            .id;
+        c.skip(&id3, Some("away".into()), day0() + 2 * DAY + 8 * HOUR)
+            .unwrap();
+        assert_eq!(c.recent_skip_notes(5), ["away", "ill"]);
+    }
+
+    #[test]
+    fn an_expected_occurrence_can_be_skipped_ahead_of_time() {
+        let mut c = core();
+        daily_7(&mut c, None);
+        let now = day0() + 3 * HOUR;
+        let exp = c.expected(now, now + 2 * DAY).remove(0);
+        c.skip_ahead(&exp.id, Some("holiday".into()), now).unwrap();
+        assert!(c.fire_due(day0() + 7 * HOUR).unwrap().is_empty());
+        assert_eq!(
+            c.state().occurrence(&exp.id).unwrap().status,
+            OccurrenceStatus::Skipped
+        );
+    }
+
+    #[test]
+    fn undo_reopens_when_it_would_still_be_open() {
+        let mut c = core();
+        let rid = c.create_one_off("x", T0, T0).unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        c.complete(&id, T0 + MINUTE).unwrap();
+        assert!(c.state().reminder(&rid).unwrap().finished);
+        c.undo(&id, T0 + 2 * MINUTE).unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!((o.status, o.closed_at), (OccurrenceStatus::Due, None));
+        assert!(!c.state().reminder(&rid).unwrap().finished);
+        // a skip undoes the same way
+        c.skip(&id, None, T0 + 3 * MINUTE).unwrap();
+        c.undo(&id, T0 + 4 * MINUTE).unwrap();
+        assert_eq!(
+            c.state().occurrence(&id).unwrap().status,
+            OccurrenceStatus::Due
+        );
+    }
+
+    #[test]
+    fn undo_makes_it_missed_if_it_expired_or_a_newer_one_came_up() {
+        // expired
+        let mut c = core();
+        daily_7(&mut c, Some(2 * HOUR));
+        let at7 = day0() + 7 * HOUR;
+        let id = c.fire_due(at7).unwrap().remove(0).id;
+        c.complete(&id, at7 + MINUTE).unwrap();
+        c.undo(&id, at7 + 3 * HOUR).unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!(
+            (o.status, o.closed_at),
+            (OccurrenceStatus::Missed, Some(at7 + 2 * HOUR))
+        );
+
+        // a newer occurrence has come up
+        let mut c = core();
+        daily_7(&mut c, None);
+        let first = c.fire_due(at7).unwrap().remove(0).id;
+        c.complete(&first, at7 + MINUTE).unwrap();
+        let second = c.fire_due(at7 + DAY).unwrap().remove(0).id;
+        c.undo(&first, at7 + DAY + MINUTE).unwrap();
+        assert_eq!(
+            c.state().occurrence(&first).unwrap().status,
+            OccurrenceStatus::Missed
+        );
+        assert_eq!(
+            c.state().occurrence(&second).unwrap().status,
+            OccurrenceStatus::Due
+        );
+        // there is still only one open occurrence
+        assert_eq!(c.open_occurrences().len(), 1);
+    }
+
+    #[test]
+    fn undo_moves_a_countdown_back() {
+        let mut c = core();
+        c.create(
+            NewReminder {
+                title: "Plants".into(),
+                triggers: vec![Trigger::Countdown {
+                    unit: CountdownUnit::Hours,
+                    amount: 8,
+                    at: None,
+                    last_done: None,
+                }],
+                tz: None,
+                priority: Priority::Medium,
+                expiry: Some(2 * HOUR),
+            },
+            T0,
+        )
+        .unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        c.complete(&id, T0 + MINUTE).unwrap();
+        assert_eq!(c.next_due(T0 + MINUTE), Some(T0 + MINUTE + 8 * HOUR));
+        // undone after it would have expired: missed at the expiry, so it counts from there
+        c.undo(&id, T0 + 3 * HOUR).unwrap();
+        assert_eq!(c.next_due(T0 + 3 * HOUR), Some(T0 + 2 * HOUR + 8 * HOUR));
+    }
+
+    #[test]
+    fn correct_changes_a_miss_to_completed_done_late_and_keeps_both_in_history() {
+        let mut c = core();
+        daily_7(&mut c, None);
+        let at7 = day0() + 7 * HOUR;
+        let first = c.fire_due(at7).unwrap().remove(0).id;
+        c.fire_due(at7 + DAY).unwrap(); // the first is missed
+        assert_eq!(
+            c.state().occurrence(&first).unwrap().status,
+            OccurrenceStatus::Missed
+        );
+        c.correct(
+            &first,
+            Outcome::Completed,
+            at7 + 3 * HOUR,
+            None,
+            at7 + DAY + HOUR,
+        )
+        .unwrap();
+        let o = c.state().occurrence(&first).unwrap();
+        assert_eq!(
+            (o.status, o.closed_at),
+            (OccurrenceStatus::Completed, Some(at7 + 3 * HOUR))
+        );
+        assert!(o.done_late());
+        let kinds: Vec<_> = c
+            .history()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::OccurrenceMissed { occurrence_id, .. } if occurrence_id == first => {
+                    Some("missed")
+                }
+                Event::OccurrenceCorrected { occurrence_id, .. } if occurrence_id == first => {
+                    Some("corrected")
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["missed", "corrected"]);
+    }
+
+    #[test]
+    fn correct_changes_completed_to_skipped_and_back() {
+        let mut c = core();
+        c.create_one_off("x", T0, T0).unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        c.complete(&id, T0).unwrap();
+        c.correct(
+            &id,
+            Outcome::Skipped,
+            T0 + MINUTE,
+            Some("didn't".into()),
+            T0 + MINUTE,
+        )
+        .unwrap();
+        let o = c.state().occurrence(&id).unwrap();
+        assert_eq!(
+            (o.status, o.note.as_deref()),
+            (OccurrenceStatus::Skipped, Some("didn't"))
+        );
+        assert!(!o.done_late());
+        assert!(
+            c.correct(&id, Outcome::Completed, T0 + HOUR, None, T0)
+                .is_err(),
+            "not in the future"
+        );
+    }
+
+    #[test]
+    fn open_occurrences_cannot_be_corrected_or_undone() {
+        let mut c = core();
+        c.create_one_off("x", T0, T0).unwrap();
+        let id = c.fire_due(T0).unwrap().remove(0).id;
+        assert!(c.correct(&id, Outcome::Completed, T0, None, T0).is_err());
+        assert!(c.undo(&id, T0).is_err());
+    }
+}

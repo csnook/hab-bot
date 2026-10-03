@@ -1,4 +1,4 @@
-use crate::{Event, Millis, Priority};
+use crate::{Event, Millis, Outcome, Priority};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -96,6 +96,18 @@ pub struct Occurrence {
     /// When it was closed: the recorded time for a completion, the time it was
     /// superseded for a miss.
     pub closed_at: Option<Millis>,
+    /// When a completion was tapped, if different from the recorded time.
+    pub tapped_at: Option<Millis>,
+    pub note: Option<String>,
+    /// The status before a correction. A miss corrected to completed counts as done late.
+    pub corrected_from: Option<OccurrenceStatus>,
+}
+
+impl Occurrence {
+    pub fn done_late(&self) -> bool {
+        self.status == OccurrenceStatus::Completed
+            && self.corrected_from == Some(OccurrenceStatus::Missed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -195,6 +207,9 @@ impl State {
                         status: OccurrenceStatus::Due,
                         completed_by: None,
                         closed_at: None,
+                        tapped_at: None,
+                        note: None,
+                        corrected_from: None,
                     },
                 );
             }
@@ -219,7 +234,7 @@ impl State {
                 occurrence_id,
                 by,
                 at,
-                ..
+                note,
             } => {
                 self.close(
                     occurrence_id,
@@ -227,6 +242,9 @@ impl State {
                     *at,
                     Some(by.clone()),
                 );
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    o.note = note.clone();
+                }
             }
             Event::PriorityChanged {
                 reminder_id,
@@ -240,6 +258,7 @@ impl State {
                 occurrence_id,
                 by,
                 at,
+                tapped_at,
             } => {
                 self.close(
                     occurrence_id,
@@ -247,6 +266,64 @@ impl State {
                     *at,
                     Some(by.clone()),
                 );
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    o.tapped_at = *tapped_at;
+                }
+            }
+            Event::OccurrenceUndone {
+                occurrence_id,
+                missed_at,
+                ..
+            } => {
+                let Some(o) = self.occurrences.get_mut(occurrence_id) else {
+                    return;
+                };
+                if !matches!(
+                    o.status,
+                    OccurrenceStatus::Completed | OccurrenceStatus::Skipped
+                ) {
+                    return;
+                }
+                o.completed_by = None;
+                o.tapped_at = None;
+                o.note = None;
+                match missed_at {
+                    Some(at) => {
+                        o.status = OccurrenceStatus::Missed;
+                        o.closed_at = Some(*at);
+                    }
+                    None => {
+                        o.status = OccurrenceStatus::Due;
+                        o.closed_at = None;
+                        if let Some(r) = self.reminders.get_mut(&o.reminder_id) {
+                            r.finished = false;
+                        }
+                    }
+                }
+            }
+            Event::OccurrenceCorrected {
+                occurrence_id,
+                by,
+                to,
+                at,
+                note,
+                ..
+            } => {
+                let Some(o) = self.occurrences.get_mut(occurrence_id) else {
+                    return;
+                };
+                if o.status == OccurrenceStatus::Due || o.status == OccurrenceStatus::Expected {
+                    return;
+                }
+                o.corrected_from.get_or_insert(o.status);
+                o.status = match to {
+                    Outcome::Completed => OccurrenceStatus::Completed,
+                    Outcome::Skipped => OccurrenceStatus::Skipped,
+                };
+                o.closed_at = Some(*at);
+                o.completed_by = Some(by.clone());
+                o.note = note.clone();
+                o.tapped_at = None;
             }
             Event::OccurrenceMissed { occurrence_id, at } => {
                 self.close(occurrence_id, OccurrenceStatus::Missed, *at, None);

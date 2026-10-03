@@ -20,3 +20,5 @@ td, th { padding: .2rem .5rem; text-align: left; border-bottom: 1px solid #8884;
 .opened { background: #3366cc22; }
 .menu { display: flex; flex-direction: column; position: absolute; background: Canvas; border: 1px solid #8886; padding: .4rem; z-index: 2; }
 .snooze { position: relative; }
+.title { cursor: pointer; }
+.details { max-width: 32rem; box-shadow: 0 4px 24px #0006; }

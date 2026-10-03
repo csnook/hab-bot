@@ -76,8 +76,34 @@ pub enum Event {
         occurrence_id: String,
         /// Who recorded it; the user, not the device.
         by: String,
-        /// The recorded time of doing it.
+        /// The recorded time of doing it. It can be edited, even to before the firing
+        /// ("took it at 6:55").
         at: Millis,
+        /// When it was actually tapped. The time the server received it joins this once
+        /// sync exists.
+        #[serde(default)]
+        tapped_at: Option<Millis>,
+    },
+    /// Undo of a completion or skip. It reopens the occurrence, or, if it could no longer
+    /// be open, closes it as missed at `missed_at`. The history keeps the original.
+    OccurrenceUndone {
+        occurrence_id: String,
+        by: String,
+        at: Millis,
+        #[serde(default)]
+        missed_at: Option<Millis>,
+    },
+    /// Any closed occurrence changed to completed or skipped, at a recorded time. The
+    /// history keeps both the original and the correction.
+    OccurrenceCorrected {
+        occurrence_id: String,
+        by: String,
+        to: Outcome,
+        /// The recorded time.
+        at: Millis,
+        corrected_at: Millis,
+        #[serde(default)]
+        note: Option<String>,
     },
     /// An alert changed style on a device: the first alert, or a step of escalation. History
     /// keeps these, not repeats.
@@ -115,6 +141,14 @@ pub enum Event {
     },
     /// The app closed an occurrence nobody dealt with, because a newer instance fired.
     OccurrenceMissed { occurrence_id: String, at: Millis },
+}
+
+/// What a correction changes an occurrence to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Completed,
+    Skipped,
 }
 
 /// How a snooze was made.
@@ -375,47 +409,166 @@ impl Core {
         Ok(opened)
     }
 
-    /// Completes a reminder ahead of its next expected occurrence: that occurrence never
-    /// fires, and a countdown restarts from `at`. Returns the instance that was closed.
-    pub fn complete_early(&mut self, reminder_id: &str, at: Millis, now: Millis) -> Result<()> {
-        let reminder = self
-            .state
-            .reminder(reminder_id)
-            .ok_or_else(|| Error::NoOpenOccurrence(reminder_id.to_string()))?
-            .clone();
-        let next = self
+    /// Opens an expected occurrence early and returns its id. Its scheduled time stays the
+    /// identity, so it never fires again.
+    fn fire_expected(&mut self, expected_id: &str, now: Millis) -> Result<String> {
+        let o = self
             .expected(now, now.saturating_add(HORIZON))
             .into_iter()
-            .find(|o| o.reminder_id == reminder.id)
-            .ok_or_else(|| Error::NoOpenOccurrence(reminder_id.to_string()))?;
-        if let Some(open) = self
-            .state
-            .open_occurrence(reminder_id)
-            .map(|o| o.id.clone())
-        {
-            self.record(Event::OccurrenceMissed {
-                occurrence_id: open,
-                at: now,
-            })?;
-        }
+            .find(|o| o.id == expected_id)
+            .ok_or_else(|| Error::NoOpenOccurrence(expected_id.to_string()))?;
         self.record(Event::OccurrenceFired {
-            occurrence_id: next.id.clone(),
-            reminder_id: reminder.id,
-            scheduled_at: next.scheduled_at,
+            occurrence_id: o.id.clone(),
+            reminder_id: o.reminder_id,
+            scheduled_at: o.scheduled_at,
             fired_at: now,
         })?;
-        self.complete(&next.id, at)
+        Ok(o.id)
     }
 
-    /// Completes an open occurrence, recording who and when. A one-off is then finished.
+    /// The reminder's next expected occurrence, if it has one. Reminders with none (such as
+    /// "when I arrive at the gym") don't offer early completion.
+    pub fn next_expected(&self, reminder_id: &str, now: Millis) -> Option<Occurrence> {
+        self.expected(now, now.saturating_add(HORIZON))
+            .into_iter()
+            .find(|o| o.reminder_id == reminder_id)
+    }
+
+    /// Completes a reminder ahead of its next expected occurrence, which then never fires.
+    /// A countdown restarts from `at`, and a wait would end.
+    pub fn complete_early(&mut self, reminder_id: &str, at: Millis, now: Millis) -> Result<()> {
+        let next = self
+            .next_expected(reminder_id, now)
+            .ok_or_else(|| Error::NoOpenOccurrence(reminder_id.to_string()))?;
+        let id = self.fire_expected(&next.id, now)?;
+        self.complete_at(&id, at.min(now), now)
+    }
+
+    /// Skips an expected occurrence ahead of time: it never fires.
+    pub fn skip_ahead(
+        &mut self,
+        expected_id: &str,
+        note: Option<String>,
+        now: Millis,
+    ) -> Result<()> {
+        let id = self.fire_expected(expected_id, now)?;
+        self.skip(&id, note, now)
+    }
+
+    /// The notes used on recent skips, newest first and without repeats, to offer again.
+    pub fn recent_skip_notes(&self, limit: usize) -> Vec<String> {
+        let mut notes: Vec<String> = Vec::new();
+        for e in self.history().into_iter().rev() {
+            if let Event::OccurrenceSkipped { note: Some(n), .. }
+            | Event::OccurrenceCorrected {
+                note: Some(n),
+                to: Outcome::Skipped,
+                ..
+            } = e
+            {
+                if !n.trim().is_empty() && !notes.contains(&n) {
+                    notes.push(n);
+                }
+            }
+            if notes.len() == limit {
+                break;
+            }
+        }
+        notes
+    }
+
+    /// Undoes a completion or skip. The occurrence reopens if it would still be open: not
+    /// expired, and no newer occurrence of the reminder has come up. Otherwise it becomes
+    /// missed, at the expiry or when the newer one came up, which also moves a countdown back.
+    pub fn undo(&mut self, occurrence_id: &str, now: Millis) -> Result<()> {
+        let o = self
+            .state
+            .occurrence(occurrence_id)
+            .filter(|o| {
+                matches!(
+                    o.status,
+                    OccurrenceStatus::Completed | OccurrenceStatus::Skipped
+                )
+            })
+            .ok_or_else(|| Error::NoOpenOccurrence(occurrence_id.to_string()))?
+            .clone();
+        let expired = o.expires_at.filter(|e| *e <= now);
+        let newer = self
+            .state
+            .occurrences()
+            .filter(|n| n.reminder_id == o.reminder_id && n.id != o.id)
+            .filter(|n| n.scheduled_at > o.scheduled_at || n.status == OccurrenceStatus::Due)
+            .map(|n| n.scheduled_at.max(o.scheduled_at))
+            .min();
+        let missed_at = expired.or(newer);
+        self.record(Event::OccurrenceUndone {
+            occurrence_id: occurrence_id.to_string(),
+            by: self.user.clone(),
+            at: now,
+            missed_at,
+        })
+    }
+
+    /// Changes any closed occurrence, including a missed one, to completed or skipped at a
+    /// time. A miss corrected to completed counts as done late.
+    pub fn correct(
+        &mut self,
+        occurrence_id: &str,
+        to: Outcome,
+        recorded_at: Millis,
+        note: Option<String>,
+        now: Millis,
+    ) -> Result<()> {
+        let closed = self.state.occurrence(occurrence_id).is_some_and(|o| {
+            matches!(
+                o.status,
+                OccurrenceStatus::Completed | OccurrenceStatus::Skipped | OccurrenceStatus::Missed
+            )
+        });
+        if !closed {
+            return Err(Error::NoOpenOccurrence(occurrence_id.to_string()));
+        }
+        if recorded_at > now {
+            return Err(Error::BadSchedule(
+                "a correction can't be recorded in the future".into(),
+            ));
+        }
+        self.record(Event::OccurrenceCorrected {
+            occurrence_id: occurrence_id.to_string(),
+            by: self.user.clone(),
+            to,
+            at: recorded_at,
+            corrected_at: now,
+            note,
+        })
+    }
+
+    /// Completes an open occurrence now, recording who and when. A one-off is then finished.
     pub fn complete(&mut self, occurrence_id: &str, now: Millis) -> Result<()> {
+        self.complete_at(occurrence_id, now, now)
+    }
+
+    /// Completes an open occurrence at a time the user says, which can be before the firing
+    /// ("took it at 6:55"). The completion keeps both the time said and the time tapped.
+    pub fn complete_at(
+        &mut self,
+        occurrence_id: &str,
+        recorded_at: Millis,
+        now: Millis,
+    ) -> Result<()> {
         if !self.state.is_open(occurrence_id) {
             return Err(Error::NoOpenOccurrence(occurrence_id.to_string()));
+        }
+        if recorded_at > now {
+            return Err(Error::BadSchedule(
+                "a completion can't be recorded in the future".into(),
+            ));
         }
         self.record(Event::OccurrenceCompleted {
             occurrence_id: occurrence_id.to_string(),
             by: self.user.clone(),
-            at: now,
+            at: recorded_at,
+            tapped_at: Some(now),
         })
     }
 
@@ -453,6 +606,9 @@ impl Core {
                     status: OccurrenceStatus::Expected,
                     completed_by: None,
                     closed_at: None,
+                    tapped_at: None,
+                    note: None,
+                    corrected_from: None,
                 });
             }
         }
