@@ -21,3 +21,9 @@ Everything goes through `cargo xtask`:
 | `cargo xtask android` | build a debug APK and `adb install` it |
 
 On Debian/Ubuntu the desktop app needs `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`. Android needs the SDK/NDK, `JAVA_HOME`, `ANDROID_HOME`, `NDK_HOME` and the Rust Android targets.
+
+## Android notes
+
+`cargo xtask android` generates `app/src-tauri/gen/android` (git-ignored) on first run, then copies the Kotlin in `app/android/` into it and patches the manifest between `<!-- hab-bot -->` markers. If you ran an older version of the task, delete `gen/android` once and run it again.
+
+The Kotlin only carries events to and from Rust over JNI (`app/src-tauri/src/android.rs`): the core's alert engine decides what to alert with and when, and Kotlin shows it (notifications, the foreground alarm service and the full-screen alarm screen).
