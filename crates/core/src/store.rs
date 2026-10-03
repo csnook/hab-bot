@@ -106,6 +106,15 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Removes every stored setting whose key starts with `prefix`.
+    pub fn delete_meta_prefix(&self, prefix: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1",
+            [prefix],
+        )?;
+        Ok(())
+    }
+
     /// A stored setting, created with `make` on first use.
     pub fn meta_or_init(&self, key: &str, make: impl FnOnce() -> String) -> Result<String> {
         if let Some(v) = self.meta(key)? {

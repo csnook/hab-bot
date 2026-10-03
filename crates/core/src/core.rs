@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
@@ -36,6 +37,35 @@ pub struct Snapshot {
     /// Things the server told this user's devices, such as failed sign-ins,
     /// not yet dismissed.
     pub security_notices: Vec<SecurityNotice>,
+    /// Things the app did to this device's data that the user should know,
+    /// such as settings giving way to the account's, not yet dismissed.
+    pub notices: Vec<DeviceNotice>,
+}
+
+/// "Your quiet hours here were replaced by your account's." Kept on this
+/// device until the user dismisses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceNotice {
+    /// Names the notice, for dismissing it.
+    pub id: String,
+    pub text: String,
+}
+
+const SETTINGS_GAVE_WAY: &str = "settings-gave-way";
+const SETTINGS_GAVE_WAY_TEXT: &str =
+    "This device's own personal settings, such as quiet hours, were replaced by your account's. \
+     Settings that belong to this device alone were kept.";
+const PERSONAL_SETTING: &str = "personal_setting:";
+const DEVICE_SETTING: &str = "device_setting:";
+
+/// A reminder list this device holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListInfo {
+    pub id: String,
+    /// What the list is called. The personal list is not named.
+    pub name: Option<String>,
+    /// The account's personal list, which also holds its settings.
+    pub personal: bool,
 }
 
 /// "5 failed sign-ins to your account", from the server. The server has no
@@ -85,10 +115,15 @@ pub struct SignInNotice {
     pub at: i64,
 }
 
-/// The core for one device: its storage, its user, and the personal list's state.
+/// The core for one device: its storage, its user, and the state of the
+/// personal list and of any other lists it holds, such as the one a
+/// standalone device's reminders became when it signed in to an account.
 pub struct Core {
     store: Store,
+    /// The personal list's state.
     state: State,
+    /// The state of every other list this device holds, by id.
+    others: BTreeMap<String, State>,
     list_id: String,
     device_id: String,
     user_id: String,
@@ -114,6 +149,7 @@ impl Core {
         let mut core = Core {
             store,
             state: State::default(),
+            others: BTreeMap::new(),
             list_id,
             device_id,
             user_id,
@@ -126,13 +162,66 @@ impl Core {
     /// Builds the state again from the stream: the server's numbered events in
     /// order, then this device's unsent ones on top.
     fn rebuild(&mut self) -> Result<()> {
-        let mut state = State::default();
-        for e in self.store.stream(&self.list_id)? {
-            state.apply(&e);
+        let build = |store: &Store, list_id: &str| -> Result<State> {
+            let mut state = State::default();
+            for e in store.stream(list_id)? {
+                state.apply(&e);
+            }
+            Ok(state)
+        };
+        self.state = build(&self.store, &self.list_id)?;
+        let mut others = BTreeMap::new();
+        let mut holding_newer = !self.store.held(&self.list_id)?.is_empty();
+        for id in self.store.list_ids()? {
+            if id == self.list_id {
+                continue;
+            }
+            holding_newer |= !self.store.held(&id)?.is_empty();
+            let state = build(&self.store, &id)?;
+            others.insert(id, state);
         }
-        self.state = state;
-        self.holding_newer = !self.store.held(&self.list_id)?.is_empty();
+        self.others = others;
+        self.holding_newer = holding_newer;
         Ok(())
+    }
+
+    /// The state of a list this device holds.
+    pub fn state_of(&self, list_id: &str) -> Option<&State> {
+        if list_id == self.list_id {
+            Some(&self.state)
+        } else {
+            self.others.get(list_id)
+        }
+    }
+
+    /// Every list this device holds: the personal list first, then the
+    /// others by id. A list the device has no events of yet is not held.
+    pub fn lists(&self) -> Vec<ListInfo> {
+        let mut v = vec![ListInfo {
+            id: self.list_id.clone(),
+            name: None,
+            personal: true,
+        }];
+        v.extend(self.others.iter().map(|(id, s)| ListInfo {
+            id: id.clone(),
+            name: s.list_name.clone(),
+            personal: false,
+        }));
+        v
+    }
+
+    /// Every state, personal list first.
+    fn states(&self) -> impl Iterator<Item = (&str, &State)> {
+        std::iter::once((self.list_id.as_str(), &self.state))
+            .chain(self.others.iter().map(|(id, s)| (id.as_str(), s)))
+    }
+
+    fn state_mut(&mut self, list_id: &str) -> &mut State {
+        if list_id == self.list_id {
+            &mut self.state
+        } else {
+            self.others.entry(list_id.to_string()).or_default()
+        }
     }
 
     pub fn personal_list_id(&self) -> &str {
@@ -176,26 +265,110 @@ impl Core {
         self.rebuild()
     }
 
-    /// The events the server hasn't numbered, in the order they were made.
-    pub fn unsent(&self) -> Result<Vec<Outgoing>> {
+    /// This device has signed in to an existing account, whose personal list
+    /// has the id `list_id`. The account's personal list becomes this
+    /// device's. What the device made while standalone is never merged into
+    /// it: if there is any, it stays a list of its own, with its reminders,
+    /// occurrences and history exactly as they were, and is named `name`
+    /// (the device's). It is uploaded and synced like any other list.
+    ///
+    /// The device's standalone personal settings give way to the account's,
+    /// and a notice says so; settings that belong to this device alone stay.
+    /// Safe to run again after a failure part way: each step checks first.
+    pub fn link_account(&mut self, list_id: &str, name: &str, now: i64) -> Result<()> {
+        if list_id == self.list_id {
+            return Ok(());
+        }
+        let standalone = self.list_id.clone();
+        let has_events = self.store.list_ids()?.contains(&standalone);
+        if has_events {
+            // Named first, so a list that arrives is never unnamed.
+            if self.state.list_name.is_none() {
+                let name = name.trim();
+                let name = if name.is_empty() { "This device" } else { name };
+                let stored = self.store.append(
+                    &standalone,
+                    &self.device_id,
+                    &self.user_id,
+                    now,
+                    Event::ListNamed {
+                        name: name.to_string(),
+                    },
+                    Uuid::new_v4().to_string(),
+                )?;
+                self.state.apply(&stored);
+            }
+        }
+        let had_settings = !self.store.meta_prefix(PERSONAL_SETTING)?.is_empty();
+        self.store.set_meta("personal_list_id", list_id)?;
+        self.list_id = list_id.to_string();
+        if had_settings {
+            self.store.delete_meta_prefix(PERSONAL_SETTING)?;
+            self.store
+                .set_meta(&format!("notice:{SETTINGS_GAVE_WAY}"), "1")?;
+        }
+        self.rebuild()
+    }
+
+    /// A setting that belongs to the user, such as quiet hours. A standalone
+    /// device keeps these itself; once it is on an account, the account's
+    /// replace them ([`Self::link_account`]).
+    pub fn set_personal_setting(&self, key: &str, value: &str) -> Result<()> {
         self.store
-            .unsent(&self.list_id)?
-            .into_iter()
-            .map(|row| {
+            .set_meta(&format!("{PERSONAL_SETTING}{key}"), value)
+    }
+
+    pub fn personal_setting(&self, key: &str) -> Result<Option<String>> {
+        self.store.meta(&format!("{PERSONAL_SETTING}{key}"))
+    }
+
+    /// A setting that stays on this device, such as its loudest alert style.
+    /// Signing in to an account leaves these alone.
+    pub fn set_device_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.store
+            .set_meta(&format!("{DEVICE_SETTING}{key}"), value)
+    }
+
+    pub fn device_setting(&self, key: &str) -> Result<Option<String>> {
+        self.store.meta(&format!("{DEVICE_SETTING}{key}"))
+    }
+
+    fn device_notices(&self) -> Vec<DeviceNotice> {
+        let id = SETTINGS_GAVE_WAY;
+        let shown = matches!(self.store.meta(&format!("notice:{id}")), Ok(Some(_)));
+        let dismissed = matches!(self.store.meta(&format!("dismissed:{id}")), Ok(Some(_)));
+        if shown && !dismissed {
+            vec![DeviceNotice {
+                id: id.to_string(),
+                text: SETTINGS_GAVE_WAY_TEXT.to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The events the server hasn't numbered, in the order they were made:
+    /// the personal list's, then each other list's.
+    pub fn unsent(&self) -> Result<Vec<Outgoing>> {
+        let mut out = Vec::new();
+        let ids: Vec<String> = self.states().map(|(id, _)| id.to_string()).collect();
+        for list_id in ids {
+            for row in self.store.unsent(&list_id)? {
                 let payload = Payload {
                     author: row.author,
                     recorded_at: row.recorded_at,
                     event: serde_json::from_slice(&row.body)?,
                 };
-                Ok(Outgoing {
-                    list_id: self.list_id.clone(),
+                out.push(Outgoing {
+                    list_id: list_id.clone(),
                     event_id: row.event_id,
                     format: row.format,
                     recorded_at: payload.recorded_at,
                     payload: serde_json::to_vec(&payload)?,
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The server numbered one of this device's events.
@@ -237,26 +410,35 @@ impl Core {
 
     /// Ids of events kept without being applied, because a newer app made them.
     pub fn held_events(&self) -> Result<Vec<String>> {
-        Ok(self
-            .store
-            .held(&self.list_id)?
-            .into_iter()
-            .map(|h| h.event_id)
-            .collect())
+        let mut out = Vec::new();
+        for (id, _) in self.states() {
+            out.extend(self.store.held(id)?.into_iter().map(|h| h.event_id));
+        }
+        Ok(out)
     }
 
-    /// The highest server number this device has downloaded up to.
+    /// The highest server number this device has downloaded up to, in the
+    /// personal list.
     pub fn cursor(&self) -> Result<i64> {
+        self.cursor_of(&self.list_id)
+    }
+
+    pub fn set_cursor(&self, seq: i64) -> Result<()> {
+        self.set_cursor_of(&self.list_id, seq)
+    }
+
+    /// The same for any list this device holds.
+    pub fn cursor_of(&self, list_id: &str) -> Result<i64> {
         Ok(self
             .store
-            .meta(&format!("cursor:{}", self.list_id))?
+            .meta(&format!("cursor:{list_id}"))?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0))
     }
 
-    pub fn set_cursor(&self, seq: i64) -> Result<()> {
+    pub fn set_cursor_of(&self, list_id: &str, seq: i64) -> Result<()> {
         self.store
-            .set_meta(&format!("cursor:{}", self.list_id), &seq.to_string())
+            .set_meta(&format!("cursor:{list_id}"), &seq.to_string())
     }
 
     pub fn state(&self) -> &State {
@@ -268,16 +450,29 @@ impl Core {
     }
 
     fn record(&mut self, now: i64, event: Event) -> Result<StoredEvent> {
+        let list_id = self.list_id.clone();
+        self.record_in(&list_id, now, event)
+    }
+
+    fn record_in(&mut self, list_id: &str, now: i64, event: Event) -> Result<StoredEvent> {
         let stored = self.store.append(
-            &self.list_id,
+            list_id,
             &self.device_id,
             &self.user_id,
             now,
             event,
             Uuid::new_v4().to_string(),
         )?;
-        self.state.apply(&stored);
+        self.state_mut(list_id).apply(&stored);
         Ok(stored)
+    }
+
+    /// The list a reminder is in.
+    fn list_of_reminder(&self, reminder_id: &str) -> Result<String> {
+        self.states()
+            .find(|(_, s)| s.reminders.contains_key(reminder_id))
+            .map(|(id, _)| id.to_string())
+            .ok_or_else(|| Error::NoReminder(reminder_id.to_string()))
     }
 
     /// Creates a one-off reminder in the personal list, to fire at `fire_at`.
@@ -302,18 +497,29 @@ impl Core {
     /// each. A reminder whose time passed while the app was closed fires late,
     /// on the first tick after start.
     pub fn tick(&mut self, now: i64) -> Result<Vec<Fired>> {
-        let pending: Vec<(String, String, i64)> = self
-            .state
-            .pending_firings(now)
-            .into_iter()
-            .map(|r| (r.id.clone(), r.title.clone(), r.fire_at))
+        let pending: Vec<(String, String, String, i64)> = self
+            .states()
+            .flat_map(|(list_id, s)| {
+                s.pending_firings(now)
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            list_id.to_string(),
+                            r.id.clone(),
+                            r.title.clone(),
+                            r.fire_at,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
             .collect();
         let mut fired = Vec::new();
-        for (reminder_id, title, scheduled_at) in pending {
+        for (list_id, reminder_id, title, scheduled_at) in pending {
             // The occurrence's identity is the reminder plus the scheduled
             // time, so firings on several devices merge into one.
             let occurrence_id = format!("{reminder_id}@{scheduled_at}");
-            self.record(
+            self.record_in(
+                &list_id,
                 now,
                 Event::OccurrenceOpened {
                     occurrence_id: occurrence_id.clone(),
@@ -331,20 +537,28 @@ impl Core {
         Ok(fired)
     }
 
-    /// The id of an open occurrence, which may have merged into another's.
-    fn open_id(&self, occurrence_id: &str) -> Result<String> {
-        let id = self.state.resolve(occurrence_id).to_string();
-        match self.state.occurrences.get(&id) {
-            Some(o) if o.is_open() => Ok(id),
-            _ => Err(Error::NotOpen(occurrence_id.to_string())),
+    /// The list and id of an open occurrence, which may have merged into
+    /// another's.
+    fn open_id(&self, occurrence_id: &str) -> Result<(String, String)> {
+        for (list_id, state) in self.states() {
+            let id = state.resolve(occurrence_id).to_string();
+            if let Some(o) = state.occurrences.get(&id) {
+                return if o.is_open() {
+                    Ok((list_id.to_string(), id))
+                } else {
+                    Err(Error::NotOpen(occurrence_id.to_string()))
+                };
+            }
         }
+        Err(Error::NotOpen(occurrence_id.to_string()))
     }
 
     /// Completes an open occurrence, recording who and when. The one-off
     /// reminder is then finished.
     pub fn complete(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
-        let id = self.open_id(occurrence_id)?;
-        self.record(
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        self.record_in(
+            &list_id,
             now,
             Event::OccurrenceCompleted {
                 occurrence_id: id,
@@ -356,9 +570,10 @@ impl Core {
 
     /// Skips an open occurrence, with an optional note.
     pub fn skip(&mut self, occurrence_id: &str, note: Option<&str>, now: i64) -> Result<()> {
-        let id = self.open_id(occurrence_id)?;
+        let (list_id, id) = self.open_id(occurrence_id)?;
         let note = note.map(str::trim).filter(|n| !n.is_empty());
-        self.record(
+        self.record_in(
+            &list_id,
             now,
             Event::OccurrenceSkipped {
                 occurrence_id: id,
@@ -371,8 +586,9 @@ impl Core {
 
     /// Closes an open occurrence as missed, because it expired.
     pub fn mark_missed(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
-        let id = self.open_id(occurrence_id)?;
-        self.record(
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        self.record_in(
+            &list_id,
             now,
             Event::OccurrenceMissed {
                 occurrence_id: id,
@@ -384,8 +600,9 @@ impl Core {
 
     /// Quiets an open occurrence's alerts until `until`.
     pub fn snooze(&mut self, occurrence_id: &str, until: i64, now: i64) -> Result<()> {
-        let id = self.open_id(occurrence_id)?;
-        self.record(
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        self.record_in(
+            &list_id,
             now,
             Event::OccurrenceSnoozed {
                 occurrence_id: id,
@@ -397,25 +614,26 @@ impl Core {
 
     /// Silences an open occurrence's current alert on all of the user's devices.
     pub fn acknowledge(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
-        let id = self.open_id(occurrence_id)?;
-        self.record(now, Event::OccurrenceAcknowledged { occurrence_id: id })?;
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        self.record_in(
+            &list_id,
+            now,
+            Event::OccurrenceAcknowledged { occurrence_id: id },
+        )?;
         Ok(())
     }
 
     /// The clock for a change made now, later than any this device has seen.
-    fn next_hlc(&self, now: i64) -> Hlc {
-        Hlc::next(now, &self.device_id, self.state.latest_hlc())
+    fn next_hlc(&self, list_id: &str, now: i64) -> Hlc {
+        let state = self.state_of(list_id).unwrap_or(&self.state);
+        Hlc::next(now, &self.device_id, state.latest_hlc())
     }
 
     /// Changes a reminder's settings. Each setting that differs is its own
     /// change, judged on its own against changes from other devices.
     pub fn edit_reminder(&mut self, reminder_id: &str, edit: EditReminder, now: i64) -> Result<()> {
-        let current = self
-            .state
-            .reminders
-            .get(reminder_id)
-            .ok_or_else(|| Error::NoReminder(reminder_id.to_string()))?
-            .clone();
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let current = self.state_of(&list_id).unwrap().reminders[reminder_id].clone();
         let mut changes = Vec::new();
         if let Some(title) = edit.title {
             let title = title.trim().to_string();
@@ -433,11 +651,13 @@ impl Core {
             changes.push(Change::Note(note));
         }
         for change in changes {
-            self.record(
+            let hlc = self.next_hlc(&list_id, now);
+            self.record_in(
+                &list_id,
                 now,
                 Event::ReminderEdited {
                     reminder_id: reminder_id.to_string(),
-                    hlc: self.next_hlc(now),
+                    hlc,
                     change,
                 },
             )?;
@@ -454,21 +674,22 @@ impl Core {
         version_event_id: &str,
         now: i64,
     ) -> Result<()> {
-        if !self.state.reminders.contains_key(reminder_id) {
-            return Err(Error::NoReminder(reminder_id.to_string()));
-        }
+        let list_id = self.list_of_reminder(reminder_id)?;
         let change = self
-            .state
+            .state_of(&list_id)
+            .unwrap()
             .history(reminder_id, setting)
             .into_iter()
             .find(|v| v.event_id == version_event_id)
             .ok_or(Error::NoSuchVersion)?
             .change;
-        self.record(
+        let hlc = self.next_hlc(&list_id, now);
+        self.record_in(
+            &list_id,
             now,
             Event::ReminderEdited {
                 reminder_id: reminder_id.to_string(),
-                hlc: self.next_hlc(now),
+                hlc,
                 change,
             },
         )?;
@@ -477,7 +698,7 @@ impl Core {
 
     /// When the next unfired reminder is due, so the scheduler can sleep.
     pub fn next_fire_at(&self) -> Option<i64> {
-        self.state.next_fire_at()
+        self.states().filter_map(|(_, s)| s.next_fire_at()).min()
     }
 
     /// Records that this device is called `name`, in the personal list.
@@ -614,17 +835,17 @@ impl Core {
     /// Closings by this user's devices that lost to a completion, which the
     /// user hasn't dismissed.
     fn reconciliation_notices(&self) -> Vec<ReconciliationNotice> {
-        self.state
-            .reconciliations
-            .iter()
-            .filter(|r| r.by == self.user_id)
-            .filter(|r| !matches!(self.store.meta(&format!("dismissed:{}", r.id)), Ok(Some(_))))
-            .map(|r| {
-                let title = self
-                    .state
+        self.states()
+            .flat_map(|(_, state)| state.reconciliations.iter().map(move |r| (state, r)))
+            .filter(|(_, r)| r.by == self.user_id)
+            .filter(|(_, r)| {
+                !matches!(self.store.meta(&format!("dismissed:{}", r.id)), Ok(Some(_)))
+            })
+            .map(|(state, r)| {
+                let title = state
                     .occurrences
                     .get(&r.occurrence_id)
-                    .and_then(|o| self.state.reminders.get(&o.reminder_id))
+                    .and_then(|o| state.reminders.get(&o.reminder_id))
                     .map_or("a reminder", |rem| rem.title.as_str());
                 let device_name = self.device_name(&r.device_id).map(str::to_string);
                 let device = device_name.as_deref().unwrap_or("another device");
@@ -651,8 +872,18 @@ impl Core {
             reconciliations: self.reconciliation_notices(),
             sign_in_notices: self.sign_in_notices(),
             security_notices: self.security_notices(),
-            due: self.state.due(),
-            upcoming: self.state.upcoming(),
+            due: {
+                let mut due: Vec<DueItem> = self.states().flat_map(|(_, s)| s.due()).collect();
+                due.sort_by_key(|d| (d.fired_at, d.occurrence_id.clone()));
+                due
+            },
+            upcoming: {
+                let mut up: Vec<UpcomingItem> =
+                    self.states().flat_map(|(_, s)| s.upcoming()).collect();
+                up.sort_by_key(|u| (u.fire_at, u.reminder_id.clone()));
+                up
+            },
+            notices: self.device_notices(),
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
         }
     }
@@ -1019,5 +1250,108 @@ mod tests {
         c.create_reminder("X", T0, T0).unwrap();
         assert!(c.use_personal_list("other").is_err());
         assert_eq!(c.personal_list_id(), "account-list");
+    }
+
+    #[test]
+    fn linking_a_standalone_device_keeps_its_list_apart_and_named() {
+        let mut c = core();
+        let standalone = c.personal_list_id().to_string();
+        let id = c.create_reminder("Bins", T0, T0).unwrap();
+        let fired = c.tick(T0).unwrap();
+        c.complete(&fired[0].occurrence_id, T0 + 1).unwrap();
+        c.set_personal_setting("quiet_hours", "22:00-07:00")
+            .unwrap();
+        c.set_device_setting("loudest_style", "alarm").unwrap();
+        c.join("u1", "7").unwrap();
+
+        c.link_account("account-list", "Laptop", T0 + 2).unwrap();
+        assert_eq!(c.personal_list_id(), "account-list");
+        let lists = c.lists();
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[1].id, standalone);
+        assert_eq!(lists[1].name.as_deref(), Some("Laptop"));
+        // Nothing of it is in the account's list; its history is untouched.
+        assert!(c.state().reminders.is_empty());
+        let s = c.state_of(&standalone).unwrap();
+        assert!(s.reminders.contains_key(&id));
+        assert!(!s.occurrences[&fired[0].occurrence_id].is_open());
+        // Every event of it is waiting to be sent, to its own list.
+        let unsent = c.unsent().unwrap();
+        assert_eq!(unsent.len(), 4);
+        assert!(unsent.iter().all(|o| o.list_id == standalone));
+        // The personal setting gave way and the user is told; the device's stayed.
+        assert_eq!(c.personal_setting("quiet_hours").unwrap(), None);
+        assert_eq!(
+            c.device_setting("loudest_style").unwrap().as_deref(),
+            Some("alarm")
+        );
+        assert_eq!(c.snapshot().notices.len(), 1);
+        c.dismiss_notice(SETTINGS_GAVE_WAY).unwrap();
+        assert!(c.snapshot().notices.is_empty());
+        // Running it again changes nothing.
+        c.link_account("account-list", "Laptop", T0 + 3).unwrap();
+        assert_eq!(c.unsent().unwrap().len(), 4);
+        // It survives a restart of the app's database.
+        assert_eq!(c.lists().len(), 2);
+    }
+
+    #[test]
+    fn linking_a_device_with_nothing_made_standalone_adds_no_list_and_no_notice() {
+        let mut c = core();
+        c.set_device_setting("loudest_style", "alarm").unwrap();
+        c.join("u1", "7").unwrap();
+        c.link_account("account-list", "Laptop", T0).unwrap();
+        assert_eq!(c.personal_list_id(), "account-list");
+        assert_eq!(c.lists().len(), 1);
+        assert!(c.snapshot().notices.is_empty());
+        assert!(c.unsent().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_link_interrupted_after_naming_the_list_finishes_without_naming_it_twice() {
+        let mut c = core();
+        c.create_reminder("Bins", T0, T0).unwrap();
+        c.join("u1", "7").unwrap();
+        // The first attempt got as far as naming the list.
+        let standalone = c.personal_list_id().to_string();
+        c.record(
+            T0,
+            Event::ListNamed {
+                name: "Laptop".into(),
+            },
+        )
+        .unwrap();
+        c.link_account("account-list", "Laptop", T0 + 1).unwrap();
+        let names = c
+            .unsent()
+            .unwrap()
+            .into_iter()
+            .filter(|o| {
+                o.list_id == standalone && o.payload.windows(10).any(|w| w == b"list_named")
+            })
+            .count();
+        assert_eq!(names, 1);
+    }
+
+    #[test]
+    fn reminders_in_an_imported_list_fire_and_are_acted_on_where_they_live() {
+        let mut c = core();
+        let standalone = c.personal_list_id().to_string();
+        c.create_reminder("Later", T0 + 100, T0).unwrap();
+        c.join("u1", "7").unwrap();
+        c.link_account("account-list", "Laptop", T0).unwrap();
+        assert_eq!(c.next_fire_at(), Some(T0 + 100));
+        let fired = c.tick(T0 + 100).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert!(c
+            .state_of(&standalone)
+            .unwrap()
+            .occurrences
+            .contains_key(&fired[0].occurrence_id));
+        assert!(c.state().occurrences.is_empty());
+        c.snooze(&fired[0].occurrence_id, T0 + 500, T0 + 101)
+            .unwrap();
+        c.skip(&fired[0].occurrence_id, None, T0 + 102).unwrap();
+        assert!(c.snapshot().due.is_empty());
     }
 }

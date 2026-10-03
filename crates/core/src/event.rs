@@ -55,6 +55,10 @@ pub enum Event {
     OccurrenceSnoozed { occurrence_id: String, until: i64 },
     /// Someone silenced the occurrence's current alert.
     OccurrenceAcknowledged { occurrence_id: String },
+    /// The list is called `name`. A standalone device's reminders come into
+    /// an account as a list named after the device, and say so with this.
+    /// Of several, the latest in the stream counts.
+    ListNamed { name: String },
     /// The device that made this event is called `name`. Device names live
     /// here, in the user's encrypted personal list, so the server never
     /// reads them. The first device says it when it joins.

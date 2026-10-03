@@ -330,7 +330,7 @@ async fn the_list_key_is_stored_sealed_to_each_device_and_only_they_open_it() {
     first.syncer.upload_standalone().await.unwrap();
     let second = rig.second_device().await;
     // The first device seals the key to the device that has since been added.
-    first.syncer.register_personal_list().await.unwrap();
+    first.syncer.register_lists().await.unwrap();
 
     let list_id = first.core.lock().unwrap().personal_list_id().to_string();
     let expected = ListKey::personal(&rig.account.personal, &list_id);

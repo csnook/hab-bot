@@ -30,7 +30,7 @@ use hab_proto::{
     open_list_key, seal_list_key, sign_device, verify_device, DeviceKeys, KeyError, Keys, ListKey,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -72,8 +72,6 @@ pub enum SyncError {
     OwnDevice,
     #[error("there is no such device on this account")]
     UnknownDevice,
-    #[error("this account has a list whose key this device cannot rotate")]
-    CannotRotate,
     #[error("That password is too easy to guess.")]
     WeakPassword,
     #[error("the new password could not be registered: {0}")]
@@ -126,6 +124,9 @@ pub struct Syncer {
     server_name: String,
     username: String,
     display_name: String,
+    /// What this device calls itself, which names the list its standalone
+    /// reminders become when it signs in to an account.
+    device_name: String,
     device_id: i64,
     device: DeviceKeys,
     keys: Keys,
@@ -138,10 +139,10 @@ pub struct Syncer {
     /// Devices that were removed. What they signed still verifies; nothing is
     /// ever sealed to them.
     retired: Mutex<HashMap<i64, DeviceRecord>>,
-    /// The personal list's keys after the first rotation, by version. Version
-    /// 1 is made from the personal key; later ones are random and arrive
-    /// sealed to this device by another of the account's devices.
-    rotated: Mutex<BTreeMap<u32, ListKey>>,
+    /// Each list's keys after the first rotation, by version. Version 1 is
+    /// made from the personal key; later ones are random and arrive sealed
+    /// to this device by another of the account's devices.
+    rotated: Mutex<HashMap<String, BTreeMap<u32, ListKey>>>,
     status: Mutex<SyncStatus>,
     /// A device signed in since the personal list's key was last sealed to
     /// the account's devices.
@@ -180,6 +181,7 @@ impl Syncer {
             server_name: profile.server_name.clone(),
             username: profile.username.clone(),
             display_name: profile.display_name.clone(),
+            device_name: profile.device_name.clone(),
             device_id: profile.device_id,
             device: DeviceKeys::from_bytes(&device)?,
             keys: Keys::from_bytes(&account)?,
@@ -188,7 +190,7 @@ impl Syncer {
             on_change: Box::new(on_change),
             directory: Mutex::new(HashMap::new()),
             retired: Mutex::new(HashMap::new()),
-            rotated: Mutex::new(BTreeMap::new()),
+            rotated: Mutex::new(HashMap::new()),
             status: Mutex::new(SyncStatus::default()),
             reseal: AtomicBool::new(false),
         })
@@ -209,16 +211,18 @@ impl Syncer {
         self.core.lock().unwrap()
     }
 
-    /// The personal list's keys, newest first. Version 1 is made from the
-    /// personal key, so every device of the account has it; a removed device
-    /// has it too, which is why removing one adds a random version that is
-    /// only ever sealed to the devices that remain (ADR 0008).
+    /// A list's keys, newest first. Version 1 is made from the personal key,
+    /// so every device of the account has it; a removed device has it too,
+    /// which is why removing one adds a random version that is only ever
+    /// sealed to the devices that remain (ADR 0008).
     fn keyring(&self, list_id: &str) -> Vec<(u32, ListKey)> {
         let mut ring: Vec<(u32, ListKey)> = self
             .rotated
             .lock()
             .unwrap()
-            .iter()
+            .get(list_id)
+            .into_iter()
+            .flatten()
             .rev()
             .map(|(v, k)| (*v, k.clone()))
             .collect();
@@ -282,37 +286,63 @@ impl Syncer {
             .collect())
     }
 
-    /// Fetch the copies of the personal list's key sealed to this device and
-    /// keep every version sealed by a device the identity key vouches for.
+    /// Every list of the account: those the server has, and those this
+    /// device holds, such as the personal list before it is registered.
+    async fn all_lists(&self) -> Result<Vec<String>, SyncError> {
+        let mut lists: BTreeSet<String> = self.account_lists().await?.into_iter().collect();
+        let held: Vec<String> = self.core().lists().into_iter().map(|l| l.id).collect();
+        lists.extend(held);
+        // The personal list first, as the others follow it.
+        let personal = self.core().personal_list_id().to_string();
+        let mut out = vec![personal.clone()];
+        out.extend(lists.into_iter().filter(|l| *l != personal));
+        Ok(out)
+    }
+
+    /// Fetch the copies of every list's key sealed to this device and keep
+    /// every version sealed by a device the identity key vouches for.
     /// Returns whether a version new to this device arrived.
     async fn load_keys(&self) -> Result<bool, SyncError> {
-        let list_id = self.core().personal_list_id().to_string();
+        let lists = self.all_lists().await?;
         let directory = self.refresh_directory().await?;
-        let sealed: SealedKeys = match self
-            .post(
-                "/api/v1/lists/keys",
-                &ListRef {
-                    list_id: list_id.clone(),
-                },
-            )
-            .await
-        {
-            Ok(sealed) => sealed,
-            // The list isn't on the server yet: there is nothing to load.
-            Err(SyncError::Server(TlsError::Status { status: 404, .. })) => return Ok(false),
-            Err(e) => return Err(e),
-        };
         let mut changed = false;
-        for k in sealed.keys.iter().filter(|k| k.key_version > 1) {
-            let Some(sender) = directory.get(&k.sealed_by) else {
-                continue;
+        for list_id in lists {
+            let sealed: SealedKeys = match self
+                .post(
+                    "/api/v1/lists/keys",
+                    &ListRef {
+                        list_id: list_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(sealed) => sealed,
+                // The list isn't on the server yet: there is nothing to load.
+                Err(SyncError::Server(TlsError::Status { status: 404, .. })) => continue,
+                Err(e) => return Err(e),
             };
-            if self.rotated.lock().unwrap().contains_key(&k.key_version) {
-                continue;
-            }
-            if let Ok(key) = open_list_key(k, &list_id, &self.device, &sender.sealing_public) {
-                self.rotated.lock().unwrap().insert(k.key_version, key);
-                changed = true;
+            for k in sealed.keys.iter().filter(|k| k.key_version > 1) {
+                let Some(sender) = directory.get(&k.sealed_by) else {
+                    continue;
+                };
+                if self
+                    .rotated
+                    .lock()
+                    .unwrap()
+                    .get(&list_id)
+                    .is_some_and(|v| v.contains_key(&k.key_version))
+                {
+                    continue;
+                }
+                if let Ok(key) = open_list_key(k, &list_id, &self.device, &sender.sealing_public) {
+                    self.rotated
+                        .lock()
+                        .unwrap()
+                        .entry(list_id.clone())
+                        .or_default()
+                        .insert(k.key_version, key);
+                    changed = true;
+                }
             }
         }
         Ok(changed)
@@ -328,7 +358,7 @@ impl Syncer {
             return Err(SyncError::OwnDevice);
         }
         let mut attempt = 0;
-        let (new_version, new_key) = loop {
+        let new_keys: Vec<(String, u32, ListKey)> = loop {
             attempt += 1;
             // Start from what the server has now: another device may have
             // rotated, or signed in, since this device last looked.
@@ -337,39 +367,42 @@ impl Syncer {
             if !directory.contains_key(&device_id) {
                 return Err(SyncError::UnknownDevice);
             }
-            let list_id = self.core().personal_list_id().to_string();
-            if self.account_lists().await? != [list_id.clone()] {
-                return Err(SyncError::CannotRotate);
-            }
-            let mut ring = self.keyring(&list_id);
-            let new_version = ring[0].0 + 1;
-            let new_key = ListKey::random();
-            ring.insert(0, (new_version, new_key.clone()));
-            let mut keys = Vec::new();
-            for (id, record) in directory.iter().filter(|(id, _)| **id != device_id) {
-                for (version, key) in &ring {
-                    keys.push(seal_list_key(
-                        key,
-                        &list_id,
-                        *version,
-                        &self.device,
-                        self.device_id,
-                        *id,
-                        &record.sealing_public,
-                    )?);
+            // Every list the server has for the account rotates, the imported ones too.
+            let mut fresh = Vec::new();
+            let mut rotations = Vec::new();
+            for list_id in self.account_lists().await? {
+                let mut ring = self.keyring(&list_id);
+                let new_version = ring[0].0 + 1;
+                let new_key = ListKey::random();
+                ring.insert(0, (new_version, new_key.clone()));
+                let mut keys = Vec::new();
+                for (id, record) in directory.iter().filter(|(id, _)| **id != device_id) {
+                    for (version, key) in &ring {
+                        keys.push(seal_list_key(
+                            key,
+                            &list_id,
+                            *version,
+                            &self.device,
+                            self.device_id,
+                            *id,
+                            &record.sealing_public,
+                        )?);
+                    }
                 }
+                fresh.push((list_id.clone(), new_version, new_key));
+                rotations.push(Rotation { list_id, keys });
             }
             let sent: Result<serde_json::Value, SyncError> = self
                 .post(
                     "/api/v1/devices/remove",
                     &RemoveDevice {
                         device_id,
-                        lists: vec![Rotation { list_id, keys }],
+                        lists: rotations,
                     },
                 )
                 .await;
             match sent {
-                Ok(_) => break (new_version, new_key),
+                Ok(_) => break fresh,
                 Err(SyncError::Server(TlsError::Status { status: 409, .. })) if attempt < 3 => {
                     continue
                 }
@@ -379,7 +412,12 @@ impl Syncer {
                 Err(e) => return Err(e),
             }
         };
-        self.rotated.lock().unwrap().insert(new_version, new_key);
+        {
+            let mut rotated = self.rotated.lock().unwrap();
+            for (list_id, version, key) in new_keys {
+                rotated.entry(list_id).or_default().insert(version, key);
+            }
+        }
         self.refresh_directory().await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -598,7 +636,7 @@ impl Syncer {
         };
         // Every version this device holds, to every device including the new
         // one. It joins knowing only the first version.
-        self.register_personal_list().await?;
+        self.register_lists().await?;
         (self.on_change)();
         Ok(joined.device_id)
     }
@@ -614,10 +652,15 @@ impl Syncer {
     /// A device that has just signed in to an existing account takes the
     /// account's personal list in place of the one it made for itself
     /// ([`Core::use_personal_list`]), before it downloads anything.
+    ///
+    /// If the device was used standalone and has reminders, they are not
+    /// merged into the account's list or overwritten by it: they stay a list
+    /// of their own, named after this device, which is uploaded with their
+    /// history and syncs like any other ([`Core::link_account`]).
     pub async fn adopt_account_list(&self) -> Result<(), SyncError> {
         let lists = self.account_lists().await?;
         let first = lists.first().ok_or(SyncError::NoPersonalList)?;
-        self.core().use_personal_list(first)?;
+        self.core().link_account(first, &self.device_name, now())?;
         Ok(())
     }
 
@@ -650,38 +693,41 @@ impl Syncer {
         )?)
     }
 
-    /// Make the personal list the account's on the server and store its key
-    /// sealed to each of the account's devices.
-    pub async fn register_personal_list(&self) -> Result<(), SyncError> {
-        let list_id = self.core().personal_list_id().to_string();
+    /// Make each of the lists this device holds the account's on the server,
+    /// and store its keys, every version, sealed to each of the account's
+    /// devices. The personal list and any lists that came in from a
+    /// standalone device are all registered this way.
+    pub async fn register_lists(&self) -> Result<(), SyncError> {
         self.reseal.store(false, Ordering::SeqCst);
         // Also refreshes the directory, and finds any key a rotation added.
         self.load_keys().await?;
         let devices = self.directory.lock().unwrap().clone();
-        let ring = self.keyring(&list_id);
-        let mut sealed = Vec::new();
-        for (id, record) in &devices {
-            for (version, key) in &ring {
-                sealed.push(seal_list_key(
-                    key,
-                    &list_id,
-                    *version,
-                    &self.device,
-                    self.device_id,
-                    *id,
-                    &record.sealing_public,
-                )?);
+        for list_id in self.all_lists().await? {
+            let ring = self.keyring(&list_id);
+            let mut sealed = Vec::new();
+            for (id, record) in &devices {
+                for (version, key) in &ring {
+                    sealed.push(seal_list_key(
+                        key,
+                        &list_id,
+                        *version,
+                        &self.device,
+                        self.device_id,
+                        *id,
+                        &record.sealing_public,
+                    )?);
+                }
             }
+            let _: ListRef = self
+                .post(
+                    "/api/v1/lists/register",
+                    &RegisterList {
+                        list_id,
+                        keys: sealed,
+                    },
+                )
+                .await?;
         }
-        let _: ListRef = self
-            .post(
-                "/api/v1/lists/register",
-                &RegisterList {
-                    list_id,
-                    keys: sealed,
-                },
-            )
-            .await?;
         Ok(())
     }
 
@@ -733,30 +779,45 @@ impl Syncer {
         }
     }
 
-    /// Register the personal list and upload the standalone history. Run once
+    /// Register the lists and upload the standalone history. Run once
     /// when joining; the sync loop repeats it harmlessly on every connection.
     pub async fn upload_standalone(&self) -> Result<usize, SyncError> {
-        self.register_personal_list().await?;
+        self.register_lists().await?;
         self.upload_unsent().await
     }
 
     /// Download what the server has numbered since this device last looked,
-    /// over HTTPS. Returns how many events were new to this device.
+    /// over HTTPS, in every list of the account. Returns how many events were
+    /// new to this device.
     pub async fn download(&self) -> Result<usize, SyncError> {
-        let list_id = self.core().personal_list_id().to_string();
+        let mut new = 0;
+        // Every list, so one that another device brought in is found.
+        for list_id in self.all_lists().await? {
+            new += self.download_list(&list_id).await?;
+        }
+        Ok(new)
+    }
+
+    async fn download_list(&self, list_id: &str) -> Result<usize, SyncError> {
         let mut new = 0;
         loop {
-            let after = self.core().cursor()?;
-            let page: EventPage = self
+            let after = self.core().cursor_of(list_id)?;
+            let page: EventPage = match self
                 .post(
                     "/api/v1/sync/events",
                     &FetchEvents {
-                        list_id: list_id.clone(),
+                        list_id: list_id.to_string(),
                         after,
                         limit: PAGE,
                     },
                 )
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                // A list this device holds that the server has not been told of.
+                Err(SyncError::Server(TlsError::Status { status: 404, .. })) => return Ok(new),
+                Err(e) => return Err(e),
+            };
             self.ensure_known(&page.events).await?;
             let mut reloaded = false;
             for n in &page.events {
@@ -765,7 +826,7 @@ impl Syncer {
                 }
             }
             if let Some(last) = page.events.last() {
-                self.core().set_cursor(last.seq)?;
+                self.core().set_cursor_of(list_id, last.seq)?;
             }
             if !page.events.is_empty() {
                 (self.on_change)();
@@ -931,7 +992,7 @@ impl Syncer {
     /// One connection: connect, catch up, send what is waiting, then carry
     /// live events both ways until the connection ends or `stop` is set.
     async fn session(&self, stop: &mut watch::Receiver<bool>) -> Result<(), SyncError> {
-        self.register_personal_list().await?;
+        self.register_lists().await?;
         let mut socket = self.connect_ws().await?;
         // Connected before downloading, so an event can't fall between the two.
         match self.download().await {
@@ -985,7 +1046,7 @@ impl Syncer {
     /// After another device signs in, seal the list key to it as well.
     async fn reseal_if_needed(&self) -> Result<(), SyncError> {
         if self.reseal.load(Ordering::SeqCst) {
-            self.register_personal_list().await?;
+            self.register_lists().await?;
         }
         Ok(())
     }
@@ -1031,7 +1092,8 @@ impl Syncer {
                 received_at,
                 envelope,
             } => {
-                let cursor = self.core().cursor()?;
+                let list_id = envelope.list_id.clone();
+                let cursor = self.core().cursor_of(&list_id)?;
                 if seq <= cursor {
                     return Ok(());
                 }
@@ -1043,7 +1105,7 @@ impl Syncer {
                     };
                     self.ensure_known(std::slice::from_ref(&n)).await?;
                     self.ingest_reloading(&n, &mut false).await?;
-                    self.core().set_cursor(seq)?;
+                    self.core().set_cursor_of(&list_id, seq)?;
                     (self.on_change)();
                 } else {
                     // Missed some: the bulk download fills the gap in order.
@@ -1102,4 +1164,11 @@ fn zeroize_vec(v: &mut [u8]) {
 /// An event that fails a check is dropped, and the others carry on.
 fn tracing_skip(what: &str) {
     eprintln!("sync: dropped {what}");
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

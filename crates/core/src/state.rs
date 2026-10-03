@@ -129,6 +129,8 @@ pub struct Reconciliation {
 /// The current state, built by applying a stream's events in order.
 #[derive(Debug, Default, Clone)]
 pub struct State {
+    /// What the list is called, if it has been named.
+    pub list_name: Option<String>,
     pub reminders: BTreeMap<String, Reminder>,
     pub occurrences: BTreeMap<String, Occurrence>,
     /// What each device (by id) calls itself.
@@ -173,7 +175,8 @@ impl State {
                     let id = self.resolve(occurrence_id).to_string();
                     self.unsent_occurrences.insert(id);
                 }
-                Event::DeviceNamed { .. }
+                Event::ListNamed { .. }
+                | Event::DeviceNamed { .. }
                 | Event::DeviceSignedIn { .. }
                 | Event::DeviceRemoved { .. } => {}
             }
@@ -284,6 +287,9 @@ impl State {
                 if let Some(o) = self.open_occurrence_mut(occurrence_id) {
                     o.acknowledged = true;
                 }
+            }
+            Event::ListNamed { name } => {
+                self.list_name = Some(name.clone());
             }
             Event::DeviceNamed { name } => {
                 self.device_names
