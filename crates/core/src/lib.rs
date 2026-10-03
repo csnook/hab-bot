@@ -14,9 +14,9 @@ mod event;
 mod state;
 mod store;
 
-pub use crate::core::{Core, Fired, Snapshot};
+pub use crate::core::{Core, Fired, SignInNotice, Snapshot};
 pub use event::{Event, Outgoing, Payload, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE};
-pub use state::{DueItem, Occurrence, Reminder, State, UpcomingItem};
+pub use state::{DueItem, Occurrence, Reminder, SignIn, State, UpcomingItem};
 pub use store::{HeldEvent, Store};
 
 /// Errors from the core.

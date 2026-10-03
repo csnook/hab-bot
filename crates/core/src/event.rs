@@ -30,6 +30,13 @@ pub enum Event {
         occurrence_id: String,
         completed_at: i64,
     },
+    /// The device that made this event is called `name`. Device names live
+    /// here, in the user's encrypted personal list, so the server never
+    /// reads them. The first device says it when it joins.
+    DeviceNamed { name: String },
+    /// The device that made this event has just signed in to the account,
+    /// and is called `name`. The user's other devices show it as a notice.
+    DeviceSignedIn { name: String },
 }
 
 /// An event with its place in its list's stream.

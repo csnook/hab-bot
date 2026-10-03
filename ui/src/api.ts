@@ -17,9 +17,19 @@ export interface UpcomingItem {
   not_sent: boolean;
 }
 
+/** Another device of this user signed in. */
+export interface SignInNotice {
+  id: string;
+  device_id: string;
+  device_name: string;
+  /** Unix seconds. */
+  at: number;
+}
+
 export interface Snapshot {
   due: DueItem[];
   upcoming: UpcomingItem[];
+  sign_in_notices: SignInNotice[];
   /** Set while the list holds changes from a newer app. */
   update_notice: string | null;
 }
@@ -29,6 +39,7 @@ export const createReminder = (title: string, fireAt: number) =>
   invoke<void>("create_reminder", { title, fireAt });
 export const completeOccurrence = (occurrenceId: string) =>
   invoke<void>("complete_occurrence", { occurrenceId });
+export const dismissNotice = (id: string) => invoke<void>("dismiss_notice", { id });
 export const onStateChanged = (f: () => void) => listen("state-changed", f);
 
 export interface Profile {
@@ -80,3 +91,32 @@ export const passwordCheck = (password: string, username: string, displayName: s
 export const passphraseSuggestion = () => invoke<string>("passphrase_suggestion");
 export const joinServer = (args: JoinArgs) => invoke<Profile>("join_server", { args });
 export const keyStoreName = () => invoke<string>("key_store_name");
+
+/** What the sign-in screen learned about the server from what was typed. */
+export interface SignInFound {
+  address: string;
+  fingerprint: string;
+  name: string;
+  version: string;
+  /** The fingerprint came from a sign-in code, so it is already pinned. */
+  fromCode: boolean;
+}
+
+export interface SignInArgs {
+  address: string;
+  fingerprint: string;
+  serverName: string;
+  username: string;
+  password: string;
+  portable: boolean;
+}
+
+export const readSignIn = (text: string) => invoke<SignInFound>("read_sign_in", { text });
+export const signInServer = (args: SignInArgs) => invoke<Profile>("sign_in_server", { args });
+
+/** Settings → Account: this server's sign-in code, as a link and a QR code (SVG). */
+export interface SignInCode {
+  link: string;
+  svg: string;
+}
+export const signInCode = () => invoke<SignInCode>("sign_in_code");

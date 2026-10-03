@@ -75,7 +75,7 @@ impl Db {
              CREATE TABLE IF NOT EXISTS devices (
                  id             INTEGER PRIMARY KEY,
                  account_id     INTEGER NOT NULL REFERENCES accounts(id),
-                 name           TEXT NOT NULL,
+                 name           TEXT NOT NULL DEFAULT '',
                  portable       INTEGER NOT NULL,
                  alg            TEXT NOT NULL,
                  signing_public BLOB NOT NULL,
@@ -189,28 +189,63 @@ impl Db {
             ],
         )?;
         let account_id = tx.last_insert_rowid();
-        let d = &new.device;
-        tx.execute(
-            "INSERT INTO devices (account_id, name, portable, alg, signing_public,
-                 sealing_public, signature, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                account_id,
-                d.name,
-                d.portable,
-                d.alg,
-                d.signing_public,
-                d.sealing_public,
-                d.signature,
-                now
-            ],
-        )?;
-        let device_id = tx.last_insert_rowid();
+        let device_id = insert_device(&tx, account_id, &new.device, now)?;
         tx.commit()?;
         Ok(Some(Created {
             account_id,
             device_id,
         }))
+    }
+
+    /// What a sign-in needs to know about an account.
+    pub fn login_account(&self, username: &str) -> Result<Option<LoginAccount>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, display_name, admin, identity_public, opaque_record, kdf_alg,
+                        kdf_memory_kib, kdf_passes, kdf_lanes, bundle_alg, bundle_nonce, bundle
+                 FROM accounts WHERE username = ?1",
+                [username],
+                |r| {
+                    Ok(LoginAccount {
+                        id: r.get(0)?,
+                        display_name: r.get(1)?,
+                        admin: r.get(2)?,
+                        identity_public: r.get(3)?,
+                        opaque_record: r.get(4)?,
+                        kdf_alg: r.get(5)?,
+                        kdf_memory_kib: r.get(6)?,
+                        kdf_passes: r.get(7)?,
+                        kdf_lanes: r.get(8)?,
+                        bundle_alg: r.get(9)?,
+                        bundle_nonce: r.get(10)?,
+                        bundle: r.get(11)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Add a device to an existing account. Returns `None` if the account
+    /// already has [`MAX_DEVICES`].
+    pub fn add_device(
+        &self,
+        account_id: i64,
+        d: &NewDevice,
+        now: i64,
+    ) -> Result<Option<i64>, DbError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM devices WHERE account_id = ?1",
+            [account_id],
+            |r| r.get(0),
+        )?;
+        if count >= MAX_DEVICES {
+            return Ok(None);
+        }
+        let id = insert_device(&tx, account_id, d, now)?;
+        tx.commit()?;
+        Ok(Some(id))
     }
 
     /// A device, with the keys its requests and events are checked against.
@@ -234,19 +269,18 @@ impl Db {
     /// Every device of an account, as the join stored it.
     pub fn devices_of(&self, account_id: i64) -> Result<Vec<DeviceEntry>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, portable, alg, signing_public, sealing_public, signature
+            "SELECT id, portable, alg, signing_public, sealing_public, signature
              FROM devices WHERE account_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([account_id], |r| {
             Ok(DeviceEntry {
                 id: r.get(0)?,
                 record: DeviceRecord {
-                    name: r.get(1)?,
-                    portable: r.get(2)?,
-                    alg: r.get(3)?,
-                    signing_public: r.get(4)?,
-                    sealing_public: r.get(5)?,
-                    signature: r.get(6)?,
+                    portable: r.get(1)?,
+                    alg: r.get(2)?,
+                    signing_public: r.get(3)?,
+                    sealing_public: r.get(4)?,
+                    signature: r.get(5)?,
                 },
             })
         })?;
@@ -497,6 +531,50 @@ impl Db {
     }
 }
 
+/// Most devices one account may have.
+pub const MAX_DEVICES: i64 = 32;
+
+/// The devices table keeps a `name` column from before names moved into the
+/// user's encrypted settings. It is always empty: the server can't read names.
+fn insert_device(
+    tx: &Transaction,
+    account_id: i64,
+    d: &NewDevice,
+    now: i64,
+) -> Result<i64, rusqlite::Error> {
+    tx.execute(
+        "INSERT INTO devices (account_id, name, portable, alg, signing_public,
+             sealing_public, signature, created_at)
+         VALUES (?1, '', ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            account_id,
+            d.portable,
+            d.alg,
+            d.signing_public,
+            d.sealing_public,
+            d.signature,
+            now
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+/// An account as a sign-in sees it.
+pub struct LoginAccount {
+    pub id: i64,
+    pub display_name: String,
+    pub admin: bool,
+    pub identity_public: Vec<u8>,
+    pub opaque_record: Vec<u8>,
+    pub kdf_alg: String,
+    pub kdf_memory_kib: u32,
+    pub kdf_passes: u32,
+    pub kdf_lanes: u32,
+    pub bundle_alg: String,
+    pub bundle_nonce: Vec<u8>,
+    pub bundle: Vec<u8>,
+}
+
 /// A device and the account it belongs to.
 pub struct DeviceRow {
     pub id: i64,
@@ -534,7 +612,6 @@ pub struct NewAccount {
 }
 
 pub struct NewDevice {
-    pub name: String,
     pub portable: bool,
     pub alg: String,
     pub signing_public: Vec<u8>,
@@ -572,7 +649,6 @@ pub(crate) fn test_account(username: &str) -> NewAccount {
         bundle_nonce: vec![3; 24],
         bundle: vec![4; 80],
         device: NewDevice {
-            name: "Desktop".into(),
             portable: false,
             alg: "d".into(),
             signing_public: vec![5; 32],

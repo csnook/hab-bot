@@ -43,11 +43,25 @@ pub struct UpcomingItem {
     pub not_sent: bool,
 }
 
+/// A device that signed in to the account, as announced in the personal list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignIn {
+    pub event_id: String,
+    /// The server's id for the device, as it appears on its events.
+    pub device_id: String,
+    pub name: String,
+    pub at: i64,
+}
+
 /// The current state, built by applying a stream's events in order.
 #[derive(Debug, Default, Clone)]
 pub struct State {
     pub reminders: BTreeMap<String, Reminder>,
     pub occurrences: BTreeMap<String, Occurrence>,
+    /// What each device (by id) calls itself.
+    pub device_names: BTreeMap<String, String>,
+    /// Devices that signed in, in stream order.
+    pub sign_ins: Vec<SignIn>,
     /// Reminders and occurrences with a change the server hasn't numbered.
     unsent_reminders: BTreeSet<String>,
     unsent_occurrences: BTreeSet<String>,
@@ -67,6 +81,7 @@ impl State {
                 | Event::OccurrenceCompleted { occurrence_id, .. } => {
                     self.unsent_occurrences.insert(occurrence_id.clone());
                 }
+                Event::DeviceNamed { .. } | Event::DeviceSignedIn { .. } => {}
             }
         }
         match &stored.event {
@@ -109,6 +124,20 @@ impl State {
                         o.completed = Some((stored.author.clone(), *completed_at));
                     }
                 }
+            }
+            Event::DeviceNamed { name } => {
+                self.device_names
+                    .insert(stored.device_id.clone(), name.clone());
+            }
+            Event::DeviceSignedIn { name } => {
+                self.device_names
+                    .insert(stored.device_id.clone(), name.clone());
+                self.sign_ins.push(SignIn {
+                    event_id: stored.event_id.clone(),
+                    device_id: stored.device_id.clone(),
+                    name: name.clone(),
+                    at: stored.recorded_at,
+                });
             }
         }
     }

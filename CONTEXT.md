@@ -49,6 +49,10 @@ A user's registration on a server. A standalone user has no account, and a user 
 A single-use link or QR code that lets someone create an account on a server. Only server admins make them.
 _Avoid_: Invitation (that is for groups and shares)
 
+**Sign-in code**:
+A link, also shown as a QR code, that any signed-in device can show to let another device of the same user find the server and pin its certificate. It carries the server's name, address and certificate fingerprint and nothing secret: signing in still takes the username and password.
+_Avoid_: Invite (that creates an account), ticket
+
 **Device**:
 A phone, tablet, computer or browser running the app, belonging to exactly one user. Whatever a user does to an occurrence applies on all of their devices.
 

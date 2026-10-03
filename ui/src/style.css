@@ -34,4 +34,8 @@ dd { margin: 0; }
 .sees ul { display: block; padding-left: 16px; list-style: disc; }
 .sees li { display: list-item; border: 0; }
 .not-sent { color: #888; font-size: 0.85rem; font-style: italic; }
+.banner { max-width: 480px; margin: 8px auto; }
 .notice { border: 1px solid #888; border-radius: 4px; padding: 8px; }
+.qr { width: 240px; max-width: 100%; background: #fff; padding: 4px; border-radius: 4px; }
+.qr svg { width: 100%; height: auto; display: block; }
+.notice button { margin-left: 8px; }

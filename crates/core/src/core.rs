@@ -26,6 +26,19 @@ pub struct Snapshot {
     /// Set while the list holds changes from a newer app, which this one keeps
     /// without applying.
     pub update_notice: Option<String>,
+    /// Other devices of this user that signed in, not yet dismissed.
+    pub sign_in_notices: Vec<SignInNotice>,
+}
+
+/// "New device signed in: <name>, just now. Not you? Remove it".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignInNotice {
+    /// Names the notice, for dismissing it.
+    pub id: String,
+    pub device_id: String,
+    pub device_name: String,
+    /// When the device signed in, in Unix seconds.
+    pub at: i64,
 }
 
 /// The core for one device: its storage, its user, and the personal list's state.
@@ -300,8 +313,67 @@ impl Core {
         self.state.next_fire_at()
     }
 
+    /// Records that this device is called `name`, in the personal list.
+    pub fn name_device(&mut self, name: &str, now: i64) -> Result<()> {
+        self.record(
+            now,
+            Event::DeviceNamed {
+                name: name.trim().to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Records that this device has just signed in to the account as `name`,
+    /// so the user's other devices can tell them.
+    pub fn announce_sign_in(&mut self, name: &str, now: i64) -> Result<()> {
+        self.record(
+            now,
+            Event::DeviceSignedIn {
+                name: name.trim().to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// What a device of this account calls itself, if it has said.
+    pub fn device_name(&self, device_id: &str) -> Option<&str> {
+        self.state.device_names.get(device_id).map(String::as_str)
+    }
+
+    /// Sign-ins by other devices since this one signed in, which the user
+    /// hasn't dismissed. A device doesn't announce what happened before it
+    /// came, nor its own sign-in.
+    fn sign_in_notices(&self) -> Vec<SignInNotice> {
+        let sign_ins = &self.state.sign_ins;
+        let own = sign_ins.iter().position(|s| s.device_id == self.device_id);
+        let after = own.map_or(0, |i| i + 1);
+        sign_ins[after..]
+            .iter()
+            .filter(|s| s.device_id != self.device_id)
+            .filter(|s| {
+                !matches!(
+                    self.store.meta(&format!("dismissed:{}", s.event_id)),
+                    Ok(Some(_))
+                )
+            })
+            .map(|s| SignInNotice {
+                id: s.event_id.clone(),
+                device_id: s.device_id.clone(),
+                device_name: s.name.clone(),
+                at: s.at,
+            })
+            .collect()
+    }
+
+    /// The user has seen a sign-in notice.
+    pub fn dismiss_notice(&self, id: &str) -> Result<()> {
+        self.store.set_meta(&format!("dismissed:{id}"), "1")
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            sign_in_notices: self.sign_in_notices(),
             due: self.state.due(),
             upcoming: self.state.upcoming(),
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
@@ -317,6 +389,61 @@ mod tests {
 
     fn core() -> Core {
         Core::open_in_memory().unwrap()
+    }
+
+    /// Deliver `from`'s unsent events to `to` as the server would number them.
+    fn deliver(from: &mut Core, to: &mut [&mut Core], device: &str, first_seq: i64) {
+        for (i, o) in from.unsent().unwrap().into_iter().enumerate() {
+            let seq = first_seq + i as i64;
+            for t in to.iter_mut() {
+                t.receive(&o.list_id, seq, &o.event_id, device, o.format, &o.payload)
+                    .unwrap();
+            }
+            from.mark_sent(&o.event_id, seq).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_device_hears_of_later_sign_ins_but_not_its_own_or_earlier_ones() {
+        // Device 1 is the first; 2 signs in; 3 signs in later.
+        let mut one = core();
+        one.join("u1", "1").unwrap();
+        let list = one.personal_list_id().to_string();
+        one.name_device("Desktop", T0).unwrap();
+        let mut two = core();
+        two.join("u1", "2").unwrap();
+        two.use_personal_list(&list).unwrap();
+        let mut three = core();
+        three.join("u1", "3").unwrap();
+        three.use_personal_list(&list).unwrap();
+
+        // The server numbers them 1, 2, 3 and everyone downloads them.
+        deliver(&mut one, &mut [&mut two, &mut three], "1", 1);
+        two.announce_sign_in("Laptop", T0 + 10).unwrap();
+        deliver(&mut two, &mut [&mut one, &mut three], "2", 2);
+        three.announce_sign_in("Tablet", T0 + 20).unwrap();
+        deliver(&mut three, &mut [&mut one, &mut two], "3", 3);
+
+        // Names come from the user's own settings events.
+        assert_eq!(one.device_name("1"), Some("Desktop"));
+        assert_eq!(one.device_name("2"), Some("Laptop"));
+        assert_eq!(three.device_name("3"), Some("Tablet"));
+
+        let names = |c: &Core| -> Vec<String> {
+            c.snapshot()
+                .sign_in_notices
+                .into_iter()
+                .map(|n| n.device_name)
+                .collect()
+        };
+        assert_eq!(names(&one), vec!["Laptop", "Tablet"]);
+        assert_eq!(names(&two), vec!["Tablet"]);
+        assert!(names(&three).is_empty());
+
+        let notice = one.snapshot().sign_in_notices[0].clone();
+        assert_eq!((notice.device_id.as_str(), notice.at), ("2", T0 + 10));
+        one.dismiss_notice(&notice.id).unwrap();
+        assert_eq!(names(&one), vec!["Tablet"]);
     }
 
     #[test]

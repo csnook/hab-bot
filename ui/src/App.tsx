@@ -2,11 +2,12 @@ import { useEffect, useState } from "preact/hooks";
 import {
   completeOccurrence,
   createReminder,
+  dismissNotice,
   onStateChanged,
   snapshot,
   type Snapshot,
 } from "./api";
-import { formatTime, toUnixSeconds } from "./time";
+import { formatTime, signInNoticeText, toUnixSeconds } from "./time";
 import { setupState, type Setup } from "./api";
 import { Account } from "./Account";
 import { FirstStart } from "./FirstStart";
@@ -28,6 +29,7 @@ export function App() {
         <button aria-pressed={page === "inbox"} onClick={() => setPage("inbox")}>Inbox</button>
         <button aria-pressed={page === "settings"} onClick={() => setPage("settings")}>Settings</button>
       </nav>
+      {setup.mode === "joined" && <SignInNotices onRemove={() => setPage("settings")} />}
       {page === "inbox" ? (
         <Inbox />
       ) : (
@@ -40,8 +42,45 @@ export function App() {
   );
 }
 
+/** "New device signed in: <name>, just now. Not you? Remove it", on every other device. */
+function SignInNotices({ onRemove }: { onRemove: () => void }) {
+  const [notices, setNotices] = useState<Snapshot["sign_in_notices"]>([]);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const refresh = () => {
+      setNow(Math.floor(Date.now() / 1000));
+      snapshot().then((s) => setNotices(s.sign_in_notices)).catch(() => {});
+    };
+    refresh();
+    const unlisten = onStateChanged(refresh);
+    const tick = setInterval(refresh, 30_000);
+    return () => {
+      clearInterval(tick);
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  return (
+    <>
+      {notices.map((n) => (
+        <p class="notice banner" role="status" key={n.id}>
+          {signInNoticeText(n.device_name, n.at, now)} Not you?{" "}
+          <button type="button" onClick={onRemove}>Remove it</button>
+          <button type="button" onClick={() => dismissNotice(n.id).catch(() => {})}>Dismiss</button>
+        </p>
+      ))}
+    </>
+  );
+}
+
 function Inbox() {
-  const [snap, setSnap] = useState<Snapshot>({ due: [], upcoming: [], update_notice: null });
+  const [snap, setSnap] = useState<Snapshot>({
+    due: [],
+    upcoming: [],
+    sign_in_notices: [],
+    update_notice: null,
+  });
   const [error, setError] = useState("");
 
   const refresh = () => snapshot().then(setSnap).catch((e) => setError(String(e)));

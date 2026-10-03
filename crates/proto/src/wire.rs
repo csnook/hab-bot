@@ -70,7 +70,8 @@ pub struct KeyBundle {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DeviceRecord {
     pub alg: String,
-    pub name: String,
+    // The device's name is not here: the server can't read it. It is kept in
+    // the user's encrypted settings, as an event in the personal list.
     pub portable: bool,
     #[serde(with = "b64")]
     pub signing_public: Vec<u8>,
@@ -95,6 +96,52 @@ pub struct JoinFinish {
     pub identity_public: Vec<u8>,
     pub kdf: Kdf,
     pub bundle: KeyBundle,
+    pub device: DeviceRecord,
+}
+
+/// Signing in, step 1: the first OPAQUE message for a username.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginStart {
+    pub username: String,
+    #[serde(with = "b64")]
+    pub credential_request: Vec<u8>,
+}
+
+/// The server's answer. For a username it doesn't know it answers the same
+/// way, so the answer doesn't say which usernames exist.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginStarted {
+    /// Names this sign-in attempt in the next two calls.
+    pub login_id: String,
+    #[serde(with = "b64")]
+    pub credential_response: Vec<u8>,
+    /// The Argon2id cost the account's password was registered with.
+    pub kdf: Kdf,
+}
+
+/// Step 2: the last OPAQUE message. If it checks out, the server releases the
+/// key bundle.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginFinish {
+    pub login_id: String,
+    #[serde(with = "b64")]
+    pub credential_finalization: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginFinished {
+    pub display_name: String,
+    pub admin: bool,
+    #[serde(with = "b64")]
+    pub identity_public: Vec<u8>,
+    pub bundle: KeyBundle,
+}
+
+/// Step 3: the new device, signed by the identity key it unlocked. Only a
+/// sign-in that passed step 2 may add one, once.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginDevice {
+    pub login_id: String,
     pub device: DeviceRecord,
 }
 

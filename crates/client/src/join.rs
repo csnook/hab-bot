@@ -95,7 +95,7 @@ pub async fn join(req: JoinRequest, store: &KeyStore) -> Result<Joined, JoinErro
     let keys = Keys::generate();
     let device_keys = DeviceKeys::generate();
     let bundle = keys.seal(finished.export_key.as_slice(), &req.username);
-    let device = device_keys.record(&keys.identity, &req.device_name, req.portable);
+    let device = device_keys.record(&keys.identity, req.portable);
 
     let account_id = KeyId {
         server_fingerprint: req.fingerprint.clone(),

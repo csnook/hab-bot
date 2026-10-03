@@ -143,11 +143,12 @@ impl Rig {
         rusqlite::Connection::open(self.server_dir.path().join(db::FILE_NAME)).unwrap()
     }
 
-    /// There is no way yet to add a device through the server (a later ticket),
-    /// so the second device is vouched for by the identity key and inserted.
+    /// A second device for tests that only need one to exist: vouched for by
+    /// the identity key and inserted directly. Signing in for real is tested
+    /// in `signin.rs`.
     async fn second_device(&self) -> Device {
         let keys = DeviceKeys::generate();
-        let record = keys.record(&self.account.identity, "Phone", true);
+        let record = keys.record(&self.account.identity, true);
         let id = {
             let conn = self.conn();
             conn.execute(

@@ -10,13 +10,15 @@ use crate::keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};
 use crate::profile::Profile;
 use crate::tls::{self, parse_address, Pinned, TlsError};
 use futures_util::{SinkExt, StreamExt};
-use hab_core::Core;
+use hab_core::{Core, Payload};
+use hab_proto::wire::SealedKeys;
 use hab_proto::wire::{
     AppendBatch, AppendResults, ClientMessage, DeviceList, DeviceRecord, Envelope, EventPage,
     FetchEvents, ListRef, ListRefs, Numbered, NumberedEnvelope, RegisterList, ServerMessage,
 };
-use hab_proto::{seal_list_key, verify_device, DeviceKeys, KeyError, Keys, ListKey};
+use hab_proto::{open_list_key, seal_list_key, verify_device, DeviceKeys, KeyError, Keys, ListKey};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{watch, Notify};
@@ -45,6 +47,12 @@ pub enum SyncError {
     Rejected(String),
     #[error("the connection failed: {0}")]
     Connection(String),
+    #[error(
+        "the account has no personal list on the server yet; open the app on another device first"
+    )]
+    NoPersonalList,
+    #[error("no list key sealed to this device by one of the account's devices")]
+    NoSealedKey,
 }
 
 /// How syncing is going, for Settings.
@@ -68,6 +76,9 @@ pub struct Syncer {
     /// The account's devices that its identity key vouches for.
     directory: Mutex<HashMap<i64, DeviceRecord>>,
     status: Mutex<SyncStatus>,
+    /// A device signed in since the personal list's key was last sealed to
+    /// the account's devices.
+    reseal: AtomicBool,
 }
 
 type Socket =
@@ -107,6 +118,7 @@ impl Syncer {
             on_change: Box::new(on_change),
             directory: Mutex::new(HashMap::new()),
             status: Mutex::new(SyncStatus::default()),
+            reseal: AtomicBool::new(false),
         })
     }
 
@@ -164,11 +176,51 @@ impl Syncer {
         Ok(lists.lists.into_iter().map(|l| l.list_id).collect())
     }
 
+    /// A device that has just signed in to an existing account takes the
+    /// account's personal list in place of the one it made for itself
+    /// ([`Core::use_personal_list`]), before it downloads anything.
+    pub async fn adopt_account_list(&self) -> Result<(), SyncError> {
+        let lists = self.account_lists().await?;
+        let first = lists.first().ok_or(SyncError::NoPersonalList)?;
+        self.core().use_personal_list(first)?;
+        Ok(())
+    }
+
+    /// The personal list's key as sealed to this device by one of the
+    /// account's other (or its own) devices, opened here. The device that
+    /// sealed it has to be one the identity key vouches for.
+    pub async fn sealed_list_key(&self) -> Result<ListKey, SyncError> {
+        let list_id = self.core().personal_list_id().to_string();
+        let directory = self.refresh_directory().await?;
+        let sealed: SealedKeys = self
+            .post(
+                "/api/v1/lists/keys",
+                &ListRef {
+                    list_id: list_id.clone(),
+                },
+            )
+            .await?;
+        let newest = sealed
+            .keys
+            .iter()
+            .filter(|k| directory.contains_key(&k.sealed_by))
+            .max_by_key(|k| k.key_version)
+            .ok_or(SyncError::NoSealedKey)?;
+        let sender = &directory[&newest.sealed_by];
+        Ok(open_list_key(
+            newest,
+            &list_id,
+            &self.device,
+            &sender.sealing_public,
+        )?)
+    }
+
     /// Make the personal list the account's on the server and store its key
     /// sealed to each of the account's devices.
     pub async fn register_personal_list(&self) -> Result<(), SyncError> {
         let list_id = self.core().personal_list_id().to_string();
         let key = self.list_key(&list_id);
+        self.reseal.store(false, Ordering::SeqCst);
         let devices = self.refresh_directory().await?;
         let mut sealed = Vec::new();
         for (id, record) in &devices {
@@ -320,6 +372,11 @@ impl Syncer {
             tracing_skip("an event that could not be opened");
             return false;
         };
+        let signed_in = e.format <= hab_core::FORMAT_VERSION
+            && e.device_id != self.device_id
+            && serde_json::from_slice::<Payload>(&payload)
+                .map(|p| p.event.get("type").and_then(|t| t.as_str()) == Some("device_signed_in"))
+                .unwrap_or(false);
         match self.core().receive(
             &e.list_id,
             n.seq,
@@ -328,7 +385,13 @@ impl Syncer {
             e.format,
             &payload,
         ) {
-            Ok(new) => new,
+            Ok(new) => {
+                if new && signed_in {
+                    // The new device needs the list key sealed to it.
+                    self.reseal.store(true, Ordering::SeqCst);
+                }
+                new
+            }
             Err(_) => {
                 tracing_skip("an event that could not be read");
                 false
@@ -393,6 +456,7 @@ impl Syncer {
         let mut socket = self.connect_ws().await?;
         // Connected before downloading, so an event can't fall between the two.
         self.download().await?;
+        self.reseal_if_needed().await?;
         self.set_status(true, None);
         let mut in_flight = HashSet::new();
         self.flush(&mut socket, &mut in_flight).await?;
@@ -423,9 +487,18 @@ impl Syncer {
                     };
                     let Ok(msg) = serde_json::from_str::<ServerMessage>(&text) else { continue };
                     self.handle(msg, &mut in_flight).await?;
+                    self.reseal_if_needed().await?;
                 }
             }
         }
+    }
+
+    /// After another device signs in, seal the list key to it as well.
+    async fn reseal_if_needed(&self) -> Result<(), SyncError> {
+        if self.reseal.load(Ordering::SeqCst) {
+            self.register_personal_list().await?;
+        }
+        Ok(())
     }
 
     async fn handle(

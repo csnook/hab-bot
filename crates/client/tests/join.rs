@@ -236,6 +236,6 @@ fn our_fingerprint_matches_the_servers() {
 #[test]
 fn a_device_record_from_join_verifies_against_the_identity() {
     let keys = Keys::generate();
-    let record = DeviceKeys::generate().record(&keys.identity, "Desktop", true);
+    let record = DeviceKeys::generate().record(&keys.identity, true);
     verify_device(&keys.identity_public(), &record).unwrap();
 }

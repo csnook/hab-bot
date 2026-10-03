@@ -174,7 +174,7 @@ impl DeviceKeys {
     }
 
     /// This device's public keys, signed by the identity key.
-    pub fn record(&self, identity: &SigningKey, name: &str, portable: bool) -> DeviceRecord {
+    pub fn record(&self, identity: &SigningKey, portable: bool) -> DeviceRecord {
         let signing_public = self.signing.verifying_key().to_bytes();
         let sealing_public = self.sealing_public();
         let signature = identity
@@ -182,7 +182,6 @@ impl DeviceKeys {
             .to_bytes();
         DeviceRecord {
             alg: Algs::DEVICE.into(),
-            name: name.into(),
             portable,
             signing_public: signing_public.to_vec(),
             sealing_public: sealing_public.to_vec(),
@@ -249,7 +248,7 @@ mod tests {
     #[test]
     fn a_device_is_vouched_for_by_the_identity_that_signed_it() {
         let keys = Keys::generate();
-        let device = DeviceKeys::generate().record(&keys.identity, "Desktop", false);
+        let device = DeviceKeys::generate().record(&keys.identity, false);
         verify_device(&keys.identity_public(), &device).unwrap();
 
         let other = Keys::generate();

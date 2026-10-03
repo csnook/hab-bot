@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { keyStoreName, type Setup } from "./api";
 import { ServerSees } from "./ServerSees";
+import { SignInCodeBox } from "./SignInCode";
 
 /** Settings → Account. */
 export function Account({ setup }: { setup: Setup }) {
@@ -45,6 +46,7 @@ export function Account({ setup }: { setup: Setup }) {
           </>
         )}
       </dl>
+      <SignInCodeBox />
       <ServerSees />
     </section>
   );

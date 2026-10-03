@@ -3,7 +3,7 @@
 use crate::backup::{self, BackupError};
 use crate::cert::{self, CertError};
 use crate::config::{Config, DEFAULT_NAME};
-use crate::db::{Db, DbError, NewAccount, NewDevice, SyncError};
+use crate::db::{Db, DbError, LoginAccount, NewAccount, NewDevice, SyncError};
 use crate::peers::Peers;
 use crate::setup::SetupCode;
 use crate::trusted::{self, TrustedError};
@@ -18,21 +18,24 @@ use hab_proto::auth::{
     verify_request, HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME, MAX_REQUEST_AGE_SECS,
 };
 use hab_proto::opaque_ke::{
-    self, RegistrationRequest, RegistrationUpload, ServerRegistration, ServerSetup,
+    self, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
+    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use hab_proto::wire::{
     valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ClientMessage,
     DeviceList, Envelope, ErrorBody, EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted,
-    Joined, ListRef, ListRefs, Numbered, RegisterList, Rejected, SealedKeys, ServerMessage,
+    Joined, Kdf, KeyBundle, ListRef, ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart,
+    LoginStarted, Numbered, RegisterList, Rejected, SealedKeys, ServerMessage,
     MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
 };
 use hab_proto::{verify_device, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -96,7 +99,27 @@ const MAX_PAGE: u32 = 100;
 const MAX_BATCH: usize = 100;
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
+/// How long a sign-in may take between its steps.
+const LOGIN_TTL: Duration = Duration::from_secs(300);
+/// Sign-ins in progress at once, so strangers can't fill the memory.
+const MAX_LOGINS: usize = 1000;
+
+/// Where a sign-in is. Kept in memory only: a restart ends it.
+enum Login {
+    /// The client has been answered; waiting for its proof of the password.
+    /// Holds the account if there is one: for an unknown username the
+    /// exchange runs on a made-up record and can't succeed.
+    Started(Box<ServerLogin<Suite>>, Option<Box<LoginAccount>>),
+    /// The password was proven and the bundle released; one device may be added.
+    Verified {
+        account_id: i64,
+        admin: bool,
+        identity_public: Vec<u8>,
+    },
+}
+
 struct State {
+    logins: Mutex<HashMap<String, (Instant, Login)>>,
     push: broadcast::Sender<Arc<Pushed>>,
     db: Mutex<Db>,
     opaque: ServerSetup<Suite>,
@@ -156,6 +179,7 @@ impl Server {
             .map_err(|e| StartError::Bind(config.listen, e))?;
 
         let state = Arc::new(State {
+            logins: Mutex::new(HashMap::new()),
             opaque,
             db: Mutex::new(db),
             setup: SetupCode::generate(Instant::now()),
@@ -181,6 +205,9 @@ impl Server {
             )
             .route("/api/v1/join/start", post(join_start))
             .route("/api/v1/join/finish", post(join_finish))
+            .route("/api/v1/login/start", post(login_start))
+            .route("/api/v1/login/finish", post(login_finish))
+            .route("/api/v1/login/device", post(login_device))
             .route("/api/v1/devices", post(devices))
             .route("/api/v1/lists", post(lists))
             .route("/api/v1/lists/register", post(register_list))
@@ -336,6 +363,9 @@ enum ApiError {
     Unauthorized,
     NotFound,
     Conflict(&'static str),
+    /// The same answer for a wrong password, an unknown username and a sign-in
+    /// that expired, so none of them can be told apart.
+    BadLogin,
     Internal,
 }
 
@@ -350,6 +380,10 @@ impl IntoResponse for ApiError {
             ),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "there is no such list"),
             ApiError::Conflict(why) => (StatusCode::CONFLICT, why),
+            ApiError::BadLogin => (
+                StatusCode::UNAUTHORIZED,
+                "the username or password is wrong",
+            ),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "something went wrong"),
         };
         (
@@ -517,7 +551,7 @@ fn reject_reason(e: &ApiError) -> &'static str {
         ApiError::Conflict(why) => why,
         ApiError::NotFound => "there is no such list",
         ApiError::Forbidden => "not allowed",
-        ApiError::Unauthorized => "the request is not signed by a device",
+        ApiError::Unauthorized | ApiError::BadLogin => "the request is not signed by a device",
         ApiError::Internal => "something went wrong",
     }
 }
@@ -738,10 +772,7 @@ async fn join_finish(
     {
         return Err(ApiError::Bad("the key bundle is not valid"));
     }
-    if req.device.name.trim().is_empty()
-        || req.device.name.chars().count() > 64
-        || verify_device(&req.identity_public, &req.device).is_err()
-    {
+    if verify_device(&req.identity_public, &req.device).is_err() {
         return Err(ApiError::Bad(
             "the device is not signed by the identity key",
         ));
@@ -767,7 +798,6 @@ async fn join_finish(
         bundle_nonce: req.bundle.nonce,
         bundle: req.bundle.ciphertext,
         device: NewDevice {
-            name: d.name.trim().to_string(),
             portable: d.portable,
             alg: d.alg,
             signing_public: d.signing_public,
@@ -792,6 +822,167 @@ async fn join_finish(
             }))
         }
         None => Err(ApiError::Forbidden),
+    }
+}
+
+fn new_login_id() -> String {
+    use opaque_ke::rand::RngCore;
+    let mut bytes = [0u8; 16];
+    opaque_ke::rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Sign in, step 1: answer OPAQUE's first message. A username the server
+/// doesn't know gets an answer of the same shape, from a made-up record.
+async fn login_start(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<LoginStart>,
+) -> Result<Json<LoginStarted>, ApiError> {
+    check_names(&req.username)?;
+    let request = CredentialRequest::<Suite>::deserialize(&req.credential_request)
+        .map_err(|_| ApiError::Bad("the sign-in request is not valid"))?;
+    let account = state.db.lock().unwrap().login_account(&req.username)?;
+    let record = account
+        .as_ref()
+        .and_then(|a| ServerRegistration::<Suite>::deserialize(&a.opaque_record).ok());
+    let started = ServerLogin::start(
+        &mut opaque_ke::rand::rngs::OsRng,
+        &state.opaque,
+        record,
+        request,
+        req.username.as_bytes(),
+        ServerLoginParameters::default(),
+    )
+    .map_err(|_| ApiError::Bad("the sign-in request is not valid"))?;
+    let kdf = match &account {
+        Some(a) => Kdf {
+            alg: a.kdf_alg.clone(),
+            memory_kib: a.kdf_memory_kib,
+            passes: a.kdf_passes,
+            lanes: a.kdf_lanes,
+        },
+        None => Kdf {
+            alg: "argon2id".into(),
+            memory_kib: ARGON_MEMORY_KIB,
+            passes: ARGON_PASSES,
+            lanes: ARGON_LANES,
+        },
+    };
+    let login_id = new_login_id();
+    {
+        let mut logins = state.logins.lock().unwrap();
+        logins.retain(|_, (at, _)| at.elapsed() < LOGIN_TTL);
+        if logins.len() >= MAX_LOGINS {
+            return Err(ApiError::Conflict("too many sign-ins at once, try again"));
+        }
+        logins.insert(
+            login_id.clone(),
+            (
+                Instant::now(),
+                Login::Started(Box::new(started.state), account.map(Box::new)),
+            ),
+        );
+    }
+    Ok(Json(LoginStarted {
+        login_id,
+        credential_response: started.message.serialize().to_vec(),
+        kdf,
+    }))
+}
+
+/// Sign in, step 2: check the client's proof of the password. Only then is the
+/// key bundle released. One try per sign-in.
+async fn login_finish(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<LoginFinish>,
+) -> Result<Json<LoginFinished>, ApiError> {
+    let taken = state.logins.lock().unwrap().remove(&req.login_id);
+    let Some((at, Login::Started(login, account))) = taken else {
+        return Err(ApiError::BadLogin);
+    };
+    if at.elapsed() >= LOGIN_TTL {
+        return Err(ApiError::BadLogin);
+    }
+    let finalization = CredentialFinalization::<Suite>::deserialize(&req.credential_finalization)
+        .map_err(|_| ApiError::BadLogin)?;
+    login
+        .finish(finalization, ServerLoginParameters::default())
+        .map_err(|_| ApiError::BadLogin)?;
+    // A made-up record can't pass the proof, so there is an account here.
+    let a = account.ok_or(ApiError::BadLogin)?;
+    state.logins.lock().unwrap().insert(
+        req.login_id,
+        (
+            Instant::now(),
+            Login::Verified {
+                account_id: a.id,
+                admin: a.admin,
+                identity_public: a.identity_public.clone(),
+            },
+        ),
+    );
+    Ok(Json(LoginFinished {
+        display_name: a.display_name,
+        admin: a.admin,
+        identity_public: a.identity_public,
+        bundle: KeyBundle {
+            alg: a.bundle_alg,
+            nonce: a.bundle_nonce,
+            ciphertext: a.bundle,
+        },
+    }))
+}
+
+/// Sign in, step 3: add the device the identity key has signed. The server
+/// checks the signature against the account's identity key, so a device can
+/// only be added by someone who unlocked that key.
+async fn login_device(
+    AxumState(state): AxumState<Arc<State>>,
+    Json(req): Json<LoginDevice>,
+) -> Result<Json<Joined>, ApiError> {
+    let taken = state.logins.lock().unwrap().remove(&req.login_id);
+    let Some((
+        at,
+        Login::Verified {
+            account_id,
+            admin,
+            identity_public,
+        },
+    )) = taken
+    else {
+        return Err(ApiError::BadLogin);
+    };
+    if at.elapsed() >= LOGIN_TTL {
+        return Err(ApiError::BadLogin);
+    }
+    if verify_device(&identity_public, &req.device).is_err() {
+        return Err(ApiError::Bad(
+            "the device is not signed by the identity key",
+        ));
+    }
+    let d = req.device;
+    let new = NewDevice {
+        portable: d.portable,
+        alg: d.alg,
+        signing_public: d.signing_public,
+        sealing_public: d.sealing_public,
+        signature: d.signature,
+    };
+    let added = state
+        .db
+        .lock()
+        .unwrap()
+        .add_device(account_id, &new, now())?;
+    match added {
+        Some(device_id) => {
+            tracing::info!("a device signed in");
+            Ok(Json(Joined {
+                account_id,
+                device_id,
+                admin,
+            }))
+        }
+        None => Err(ApiError::Conflict("this account has too many devices")),
     }
 }
 

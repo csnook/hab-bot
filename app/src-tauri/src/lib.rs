@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hab_client::{
-    check_password, join, suggest_passphrase, tls, JoinRequest, KeyStore, PasswordCheck, Pinned,
-    Profile, Setup, SetupFile, Syncer,
+    check_password, join, parse_target, sign_in, suggest_passphrase, tls, JoinRequest, KeyStore,
+    PasswordCheck, Pinned, Profile, Setup, SetupFile, SignInCode, SignInRequest, SignInTarget,
+    Syncer,
 };
 use hab_core::{Core, Snapshot};
 use serde::Serialize;
@@ -180,10 +181,23 @@ struct JoinArgs {
     portable: bool,
 }
 
+/// How this device comes to sync.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// It was set up before and the app has restarted.
+    Resume,
+    /// It has just created the account. What it made while standalone is
+    /// uploaded first, history included, and it names itself.
+    FirstDevice,
+    /// It has just signed in to an existing account: it takes the account's
+    /// personal list, announces itself to the user's other devices, and
+    /// downloads everything.
+    SignedIn,
+}
+
 /// Sync this device's personal list with its server until the app quits.
-/// What the device made while standalone is uploaded first, history included;
-/// the loop then carries on from the same place after every restart, and
-/// uploads anything made offline when the server can be reached again.
+/// The loop carries on from the same place after every restart, and uploads
+/// anything made offline when the server can be reached again.
 async fn start_sync(
     handle: AppHandle,
     profile: Profile,
@@ -191,11 +205,13 @@ async fn start_sync(
     core: Arc<Mutex<Core>>,
     wake: Arc<Notify>,
     stop: watch::Receiver<bool>,
-    upload_first: bool,
+    start: Start,
 ) -> Result<(), String> {
     {
         let mut core = core.lock().unwrap();
-        if !core.is_joined().map_err(|e| e.to_string())? {
+        // A sign-in always takes the id the server just gave this device, even
+        // if an earlier attempt that failed halfway left another.
+        if start == Start::SignedIn || !core.is_joined().map_err(|e| e.to_string())? {
             core.join(
                 &format!("u{}", profile.account_id),
                 &profile.device_id.to_string(),
@@ -205,19 +221,36 @@ async fn start_sync(
     }
     let store = KeyStore::open(&data_dir).await;
     let notify = handle.clone();
-    let syncer = Syncer::new(&profile, &store, core, wake, move || {
+    let syncer = Syncer::new(&profile, &store, core.clone(), wake, move || {
         let _ = notify.emit(STATE_CHANGED, ());
     })
     .await
     .map_err(|e| e.to_string())?;
-    let _ = handle.emit(STATE_CHANGED, ());
-    if upload_first {
-        // If this fails the loop below does it again when it connects.
-        if let Err(e) = syncer.upload_standalone().await {
-            eprintln!("uploading the standalone history failed: {e}");
+    match start {
+        Start::Resume => {}
+        Start::FirstDevice => {
+            core.lock()
+                .unwrap()
+                .name_device(&profile.device_name, now())
+                .map_err(|e| e.to_string())?;
+            let _ = handle.emit(STATE_CHANGED, ());
+            // If this fails the loop below does it again when it connects.
+            if let Err(e) = syncer.upload_standalone().await {
+                eprintln!("uploading the standalone history failed: {e}");
+            }
         }
-        let _ = handle.emit(STATE_CHANGED, ());
+        Start::SignedIn => {
+            syncer
+                .adopt_account_list()
+                .await
+                .map_err(|e| e.to_string())?;
+            core.lock()
+                .unwrap()
+                .announce_sign_in(&profile.device_name, now())
+                .map_err(|e| e.to_string())?;
+        }
     }
+    let _ = handle.emit(STATE_CHANGED, ());
     tauri::async_runtime::spawn(async move { syncer.run(stop).await });
     Ok(())
 }
@@ -258,10 +291,152 @@ async fn join_server(
         app.core.clone(),
         app.sync_wake.clone(),
         app.sync_stop.subscribe(),
-        true,
+        Start::FirstDevice,
     )
     .await?;
     Ok(joined.profile)
+}
+
+/// What the sign-in screen found out about the server from what was typed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignInFound {
+    address: String,
+    fingerprint: String,
+    name: String,
+    version: String,
+    /// The fingerprint came from a sign-in code, so there is nothing to
+    /// compare by eye.
+    from_code: bool,
+}
+
+/// Read what the user typed into the sign-in screen: a sign-in code, or a
+/// server address. A code's fingerprint is pinned straight away, and the
+/// server has to present it. An address is probed, and the user confirms the
+/// fingerprint it shows.
+#[tauri::command]
+async fn read_sign_in(text: String) -> Result<SignInFound, String> {
+    match parse_target(&text).map_err(|e| e.to_string())? {
+        SignInTarget::Code(code) => {
+            let info = Pinned::new(&code.address, &code.fingerprint)
+                .info()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(SignInFound {
+                address: code.address,
+                fingerprint: code.fingerprint,
+                // What the code said, which is what the user knows it by.
+                name: if code.server_name.is_empty() {
+                    info.name
+                } else {
+                    code.server_name
+                },
+                version: info.version,
+                from_code: true,
+            })
+        }
+        SignInTarget::Address(address) => {
+            let fingerprint = tls::probe(&address).await.map_err(|e| e.to_string())?;
+            let info = Pinned::new(&address, &fingerprint)
+                .info()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(SignInFound {
+                address,
+                fingerprint,
+                name: info.name,
+                version: info.version,
+                from_code: false,
+            })
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignInArgs {
+    address: String,
+    fingerprint: String,
+    server_name: String,
+    username: String,
+    password: String,
+    portable: bool,
+}
+
+/// Sign in on this device with the username and password. On success the pin
+/// and profile are remembered and the device starts syncing.
+#[tauri::command]
+async fn sign_in_server(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    args: SignInArgs,
+) -> Result<Profile, String> {
+    let store = KeyStore::open(&app.data_dir).await;
+    let signed = sign_in(
+        SignInRequest {
+            address: args.address,
+            fingerprint: args.fingerprint,
+            server_name: args.server_name,
+            username: args.username,
+            password: args.password,
+            device_name: device_name(),
+            portable: args.portable,
+        },
+        &store,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    // Taking the account's list can fail, such as when no other device has
+    // synced yet. Only when it works is this device remembered as signed in.
+    start_sync(
+        handle,
+        signed.profile.clone(),
+        app.data_dir.clone(),
+        app.core.clone(),
+        app.sync_wake.clone(),
+        app.sync_stop.subscribe(),
+        Start::SignedIn,
+    )
+    .await?;
+    let setup = Setup::Joined(signed.profile.clone());
+    SetupFile::in_dir(&app.data_dir)
+        .save(&setup)
+        .map_err(|e| e.to_string())?;
+    *app.setup.lock().unwrap() = Some(setup);
+    Ok(signed.profile)
+}
+
+/// The sign-in code for Settings → Account, as a link and a QR code.
+#[derive(Serialize)]
+struct SignInCodeView {
+    link: String,
+    svg: String,
+}
+
+#[tauri::command]
+fn sign_in_code(app: tauri::State<'_, App>) -> Result<SignInCodeView, String> {
+    match app.setup.lock().unwrap().as_ref() {
+        Some(Setup::Joined(p)) => {
+            let code = SignInCode::for_profile(p);
+            Ok(SignInCodeView {
+                link: code.link(),
+                svg: code.qr_svg(),
+            })
+        }
+        _ => Err("This device is not signed in to a server.".into()),
+    }
+}
+
+/// The user has seen a "New device signed in" notice.
+#[tauri::command]
+fn dismiss_notice(app: tauri::State<'_, App>, handle: AppHandle, id: String) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .dismiss_notice(&id)
+        .map_err(|e| e.to_string())?;
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
 }
 
 /// For Settings → Account and This device: where the keys are kept.
@@ -329,6 +504,10 @@ pub fn run() {
             password_check,
             passphrase_suggestion,
             join_server,
+            read_sign_in,
+            sign_in_server,
+            sign_in_code,
+            dismiss_notice,
             key_store_name
         ])
         .setup(|app| {
@@ -345,8 +524,16 @@ pub fn run() {
                     (handle.clone(), profile.clone(), data_dir.clone());
                 let (core, sync_wake) = (core.clone(), sync_wake.clone());
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) =
-                        start_sync(handle, profile, data_dir, core, sync_wake, stop, false).await
+                    if let Err(e) = start_sync(
+                        handle,
+                        profile,
+                        data_dir,
+                        core,
+                        sync_wake,
+                        stop,
+                        Start::Resume,
+                    )
+                    .await
                     {
                         eprintln!("sync did not start: {e}");
                     }

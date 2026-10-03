@@ -20,6 +20,7 @@ import {
   type Step,
 } from "./join";
 import { ServerSees } from "./ServerSees";
+import { SignIn } from "./SignIn";
 
 type Screen = "choice" | "join" | "signin" | "done";
 
@@ -65,11 +66,10 @@ export function FirstStart({ onDone }: { onDone: (s: Setup) => void }) {
 
   if (screen === "signin") {
     return (
-      <main>
-        <h1>Sign in</h1>
-        <p>Signing in to an account you already have comes in a later update.</p>
-        <button onClick={() => setScreen("choice")}>Back</button>
-      </main>
+      <SignIn
+        onCancel={() => setScreen("choice")}
+        onSignedIn={(p) => onDone({ mode: "joined", ...p })}
+      />
     );
   }
 
