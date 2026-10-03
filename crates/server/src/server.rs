@@ -4,6 +4,7 @@ use crate::backup::{self, BackupError};
 use crate::cert::{self, CertError};
 use crate::config::{Config, DEFAULT_NAME};
 use crate::db::{Db, DbError, LoginAccount, NewAccount, NewDevice, RemoveError, SyncError};
+use crate::guard::{self, Clock, Guard};
 use crate::peers::Peers;
 use crate::setup::SetupCode;
 use crate::trusted::{self, TrustedError};
@@ -12,6 +13,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State as AxumState};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use axum::{routing::get, routing::post, Json, Router};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hab_proto::auth::{
@@ -25,17 +27,18 @@ use hab_proto::wire::{
     valid_display_name, valid_id, valid_username, Algs, AppendBatch, AppendResults, ApprovalBlob,
     ApprovalCollect, ApprovalCollected, ApprovalFetched, ApprovalGrant, ApprovalGranted,
     ApprovalOpen, ApprovalRef, ApprovalRequest, ClientMessage, DeviceList, Envelope, ErrorBody,
-    EventPage, FetchEvents, JoinFinish, JoinStart, JoinStarted, Joined, Kdf, KeyBundle, ListRef,
-    ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart, LoginStarted, Numbered,
-    RegisterList, Rejected, RemoveDevice, SealedKeys, ServerMessage, MAX_APPROVAL_BLOB,
-    MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
+    EventPage, FetchEvents, FetchNotices, JoinFinish, JoinStart, JoinStarted, Joined, Kdf,
+    KeyBundle, ListRef, ListRefs, LoginDevice, LoginFinish, LoginFinished, LoginStart,
+    LoginStarted, NoticeKinds, Notices, Numbered, PasswordFinish, PasswordStart, PasswordStarted,
+    RegisterList, Rejected, RemoveDevice, SealedKeys, ServerMessage, ServerNotice,
+    MAX_APPROVAL_BLOB, MAX_CLOCK_AHEAD_SECS, MAX_EVENT_BYTES,
 };
 use hab_proto::{verify_device, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -95,6 +98,11 @@ struct Pushed {
     envelope: Envelope,
 }
 
+/// The address a request came from, put on each connection's requests. It
+/// is only ever used for limits, held in memory.
+#[derive(Clone, Copy)]
+struct PeerIp(IpAddr);
+
 /// A device was taken off an account, and the account's keys rotated.
 #[derive(Clone, Copy)]
 struct Removal {
@@ -153,6 +161,11 @@ struct State {
     approvals: Mutex<HashMap<String, Approval>>,
     push: broadcast::Sender<Arc<Pushed>>,
     removals: broadcast::Sender<Removal>,
+    /// Notices for an account's devices, as (account id, notice).
+    notices: broadcast::Sender<(i64, ServerNotice)>,
+    /// Failed sign-in protection and per-address limits (see `guard`).
+    guard: Mutex<Guard>,
+    clock: Clock,
     db: Mutex<Db>,
     opaque: ServerSetup<Suite>,
     setup: SetupCode,
@@ -177,6 +190,12 @@ impl Server {
     /// Open the database, load or make the certificate and setup code, bind,
     /// and start serving in the background.
     pub async fn start(config: &Config) -> Result<Server, StartError> {
+        Server::start_with_clock(config, guard::system_clock()).await
+    }
+
+    /// [`Server::start`] with the clock that the sign-in backoff and the
+    /// per-address limits run on, so a test can move it.
+    pub async fn start_with_clock(config: &Config, clock: Clock) -> Result<Server, StartError> {
         let db = Db::open(&config.data_dir)?;
         let identity = cert::load_or_create(&db, &config.cert_names)?;
         if let Some(name) = &config.name {
@@ -219,6 +238,9 @@ impl Server {
             peers: Arc::new(Peers::default()),
             push: broadcast::channel(256).0,
             removals: broadcast::channel(64).0,
+            notices: broadcast::channel(64).0,
+            guard: Mutex::new(Guard::default()),
+            clock,
         });
         let info = Arc::new(Info {
             name: name.clone(),
@@ -248,6 +270,9 @@ impl Server {
             .route("/api/v1/approvals/fetch", post(approval_fetch))
             .route("/api/v1/approvals/grant", post(approval_grant))
             .route("/api/v1/approvals/collect", post(approval_collect))
+            .route("/api/v1/password/start", post(password_start))
+            .route("/api/v1/password/finish", post(password_finish))
+            .route("/api/v1/notices", post(notices))
             .route("/api/v1/devices", post(devices))
             .route("/api/v1/devices/remove", post(remove_device))
             .route("/api/v1/lists", post(lists))
@@ -268,6 +293,20 @@ impl Server {
             stop,
         ));
         let mut background = Vec::new();
+        {
+            // Failed sign-ins are only known once an attempt has gone
+            // unfinished for a while, so look for them as time passes.
+            let (state, mut stop) = (state.clone(), shutdown.subscribe());
+            background.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        _ = stop.changed() => break,
+                    }
+                    settle_failures(&state);
+                }
+            }));
+        }
         if let Some(mut files) = trusted_files.take() {
             let (poll, mut stop) = (config.tls_poll, shutdown.subscribe());
             let resolver = resolver.clone();
@@ -410,6 +449,9 @@ enum ApiError {
     /// The same answer for a wrong password, an unknown username and a sign-in
     /// that expired, so none of them can be told apart.
     BadLogin,
+    /// An address made too many calls in a minute. Says nothing about any
+    /// account.
+    TooMany,
     Internal,
 }
 
@@ -431,6 +473,10 @@ impl IntoResponse for ApiError {
             ApiError::BadLogin => (
                 StatusCode::UNAUTHORIZED,
                 "the username or password is wrong",
+            ),
+            ApiError::TooMany => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many requests from this address, try again in a minute",
             ),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "something went wrong"),
         };
@@ -663,6 +709,7 @@ fn reject_reason(e: &ApiError) -> &'static str {
         ApiError::NotFound | ApiError::NoApproval => "there is no such list",
         ApiError::Forbidden => "not allowed",
         ApiError::Unauthorized | ApiError::BadLogin => "the request is not signed by a device",
+        ApiError::TooMany => "too many requests",
         ApiError::Internal => "something went wrong",
     }
 }
@@ -763,9 +810,10 @@ async fn sync_ws(
     // Subscribe before the upgrade finishes, so nothing is missed after it.
     let pushes = state.push.subscribe();
     let removals = state.removals.subscribe();
+    let notices = state.notices.subscribe();
     Ok(ws
         .max_message_size(MAX_EVENT_BYTES * 2)
-        .on_upgrade(move |socket| ws_session(state, who, pushes, removals, socket)))
+        .on_upgrade(move |socket| ws_session(state, who, pushes, removals, notices, socket)))
 }
 
 async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> bool {
@@ -780,6 +828,7 @@ async fn ws_session(
     who: Authed,
     mut pushes: broadcast::Receiver<Arc<Pushed>>,
     mut removals: broadcast::Receiver<Removal>,
+    mut notices: broadcast::Receiver<(i64, ServerNotice)>,
     mut socket: WebSocket,
 ) {
     loop {
@@ -829,6 +878,21 @@ async fn ws_session(
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             },
+            noticed = notices.recv() => match noticed {
+                Ok((account_id, _)) if account_id != who.account_id => continue,
+                Ok((_, notice)) => {
+                    if !send(&mut socket, &ServerMessage::Notice(notice)).await {
+                        return;
+                    }
+                }
+                // Missed some: the device fetches the ones it lacks.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if !send(&mut socket, &ServerMessage::Resync).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
             pushed = pushes.recv() => {
                 // Once a device is off the account it hears nothing more, even
                 // before its connection is closed.
@@ -861,6 +925,29 @@ fn still_on_account(state: &State, who: Authed) -> bool {
         state.db.lock().unwrap().device(who.device_id),
         Ok(Some(d)) if d.account_id == who.account_id
     )
+}
+
+/// A password's hardening must be at least what this release does, and not
+/// so much that signing in becomes a way to exhaust a device.
+fn check_kdf(kdf: &Kdf) -> Result<(), ApiError> {
+    if kdf.alg != "argon2id"
+        || kdf.memory_kib < ARGON_MEMORY_KIB
+        || kdf.passes < ARGON_PASSES
+        || kdf.lanes < ARGON_LANES
+        || kdf.memory_kib > 4 * ARGON_MEMORY_KIB
+        || kdf.passes > 10
+        || kdf.lanes > 16
+    {
+        return Err(ApiError::Bad("the password hardening is too weak"));
+    }
+    Ok(())
+}
+
+fn check_bundle(bundle: &KeyBundle) -> Result<(), ApiError> {
+    if bundle.alg != Algs::BUNDLE || bundle.nonce.len() != 24 || bundle.ciphertext.len() > 1024 {
+        return Err(ApiError::Bad("the key bundle is not valid"));
+    }
+    Ok(())
 }
 
 fn check_names(username: &str) -> Result<(), ApiError> {
@@ -905,22 +992,8 @@ async fn join_finish(
     if req.identity_alg != Algs::IDENTITY || req.identity_public.len() != 32 {
         return Err(ApiError::Bad("the identity key is not valid"));
     }
-    if req.kdf.alg != "argon2id"
-        || req.kdf.memory_kib < ARGON_MEMORY_KIB
-        || req.kdf.passes < ARGON_PASSES
-        || req.kdf.lanes < ARGON_LANES
-        || req.kdf.memory_kib > 4 * ARGON_MEMORY_KIB
-        || req.kdf.passes > 10
-        || req.kdf.lanes > 16
-    {
-        return Err(ApiError::Bad("the password hardening is too weak"));
-    }
-    if req.bundle.alg != Algs::BUNDLE
-        || req.bundle.nonce.len() != 24
-        || req.bundle.ciphertext.len() > 1024
-    {
-        return Err(ApiError::Bad("the key bundle is not valid"));
-    }
+    check_kdf(&req.kdf)?;
+    check_bundle(&req.bundle)?;
     if verify_device(&req.identity_public, &req.device).is_err() {
         return Err(ApiError::Bad(
             "the device is not signed by the identity key",
@@ -983,14 +1056,30 @@ fn new_login_id() -> String {
 
 /// Sign in, step 1: answer OPAQUE's first message. A username the server
 /// doesn't know gets an answer of the same shape, from a made-up record.
+///
+/// Every start is a password attempt. The password is checked on the client,
+/// which sees a wrong one fail and never sends the last message, so the server
+/// can't wait to be told. It counts each start for the account and for the
+/// address, and an account that is waiting out its backoff is answered like an
+/// unknown username: with nothing a password could be tried against.
 async fn login_start(
     AxumState(state): AxumState<Arc<State>>,
+    Extension(PeerIp(ip)): Extension<PeerIp>,
     Json(req): Json<LoginStart>,
 ) -> Result<Json<LoginStarted>, ApiError> {
+    let now = (state.clock)();
+    if !state.guard.lock().unwrap().password_attempt_from(ip, now) {
+        return Err(ApiError::TooMany);
+    }
     check_names(&req.username)?;
     let request = CredentialRequest::<Suite>::deserialize(&req.credential_request)
         .map_err(|_| ApiError::Bad("the sign-in request is not valid"))?;
-    let account = state.db.lock().unwrap().login_account(&req.username)?;
+    let mut account = state.db.lock().unwrap().login_account(&req.username)?;
+    if let Some(a) = &account {
+        if !state.guard.lock().unwrap().start_attempt(a.id, now) {
+            account = None;
+        }
+    }
     let record = account
         .as_ref()
         .and_then(|a| ServerRegistration::<Suite>::deserialize(&a.opaque_record).ok());
@@ -1018,6 +1107,8 @@ async fn login_start(
         },
     };
     let login_id = new_login_id();
+    // Notices come due as time passes; this is as good a moment as the tick.
+    settle_failures(&state);
     {
         let mut logins = state.logins.lock().unwrap();
         logins.retain(|_, (at, _)| at.elapsed() < LOGIN_TTL);
@@ -1059,6 +1150,9 @@ async fn login_finish(
         .map_err(|_| ApiError::BadLogin)?;
     // A made-up record can't pass the proof, so there is an account here.
     let a = account.ok_or(ApiError::BadLogin)?;
+    // The password was proven, so the attempts that came before were not
+    // failures of a stranger's.
+    state.guard.lock().unwrap().succeeded(a.id);
     state.logins.lock().unwrap().insert(
         req.login_id,
         (
@@ -1135,7 +1229,128 @@ async fn login_device(
     }
 }
 
+/// Notices that have come due for failed sign-ins: keep each and offer it to
+/// the account's connected devices.
+fn settle_failures(state: &State) {
+    let due = state.guard.lock().unwrap().settle((state.clock)());
+    for (account_id, count) in due {
+        let kept = state.db.lock().unwrap().add_notice(
+            account_id,
+            NoticeKinds::FAILED_SIGN_INS,
+            count,
+            now(),
+        );
+        match kept {
+            // Nobody listening is fine: devices fetch what they missed.
+            Ok(notice) => {
+                let _ = state.notices.send((account_id, notice));
+            }
+            Err(e) => tracing::error!("cannot keep a notice: {e}"),
+        }
+    }
+}
+
+// ---- Changing the password ----
+
+/// Changing the password, step 1: answer OPAQUE's first registration message
+/// for the caller's own account. The caller is a device of the account, which
+/// is all that a forgotten password needs, and the old password is not asked
+/// for. This is not a password attempt and nothing here counts as a failed
+/// sign-in.
+async fn password_start(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<PasswordStarted>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/password/start", &body)?;
+    let req: PasswordStart = parse(&body)?;
+    let username = state
+        .db
+        .lock()
+        .unwrap()
+        .username_of(who.account_id)?
+        .ok_or(ApiError::Internal)?;
+    let request = RegistrationRequest::<Suite>::deserialize(&req.registration_request)
+        .map_err(|_| ApiError::Bad("the registration request is not valid"))?;
+    let started = ServerRegistration::<Suite>::start(&state.opaque, request, username.as_bytes())
+        .map_err(|_| ApiError::Bad("the registration request is not valid"))?;
+    Ok(Json(PasswordStarted {
+        registration_response: started.message.serialize().to_vec(),
+    }))
+}
+
+/// Step 2: store the new OPAQUE record and the keys sealed under the new
+/// password, in one update. The identity key, the devices and their sealed
+/// list keys stay as they are, and devices sign requests with their own keys,
+/// so none of them notices. A sign-in that is under way is ended, so the old
+/// password can't finish it, and the account's failed attempts are forgotten:
+/// whoever was guessing the old password has nothing to go on now.
+async fn password_finish(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/password/finish", &body)?;
+    let req: PasswordFinish = parse(&body)?;
+    check_kdf(&req.kdf)?;
+    check_bundle(&req.bundle)?;
+    let upload = RegistrationUpload::<Suite>::deserialize(&req.registration_upload)
+        .map_err(|_| ApiError::Bad("the registration is not valid"))?;
+    let record = ServerRegistration::<Suite>::finish(upload)
+        .serialize()
+        .to_vec();
+    {
+        // Held across the swap, so a sign-in can't begin on the old record
+        // after the logins were cleared.
+        let mut logins = state.logins.lock().unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .set_password(who.account_id, &record, &req.kdf, &req.bundle)?;
+        logins.retain(|_, (_, login)| match login {
+            Login::Started(_, Some(a)) => a.id != who.account_id,
+            Login::Verified { account_id, .. } => *account_id != who.account_id,
+            Login::Started(_, None) => true,
+        });
+    }
+    state.guard.lock().unwrap().forget(who.account_id);
+    tracing::info!("a password was changed");
+    Ok(Json(serde_json::json!({})))
+}
+
+/// The account's notices after the caller's last, and the newest number.
+async fn notices(
+    AxumState(state): AxumState<Arc<State>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Notices>, ApiError> {
+    let who = authenticate(&state, &headers, "POST", "/api/v1/notices", &body)?;
+    let req: FetchNotices = parse(&body)?;
+    let db = state.db.lock().unwrap();
+    Ok(Json(Notices {
+        notices: db.notices_after(who.account_id, req.after.max(0))?,
+        latest: db.latest_notice(who.account_id)?,
+    }))
+}
+
 // ---- Approving a new device from an existing one (ADR 0004) ----
+
+/// Count a call to an approval route that no password guards against its
+/// address's limit. Approval failures are not failed sign-ins and never touch
+/// an account's count.
+fn approval_call(state: &State, ip: IpAddr) -> Result<(), ApiError> {
+    if state
+        .guard
+        .lock()
+        .unwrap()
+        .approval_call_from(ip, (state.clock)())
+    {
+        Ok(())
+    } else {
+        Err(ApiError::TooMany)
+    }
+}
 
 fn new_approval_id() -> String {
     use opaque_ke::rand::RngCore;
@@ -1197,9 +1412,11 @@ fn live<'a>(
 /// A signed-in device offers to approve a new device that will scan its code.
 async fn approval_create(
     AxumState(state): AxumState<Arc<State>>,
+    Extension(PeerIp(ip)): Extension<PeerIp>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ApprovalRef>, ApiError> {
+    approval_call(&state, ip)?;
     let who = authenticate(&state, &headers, "POST", "/api/v1/approvals/create", &body)?;
     let mut approvals = state.approvals.lock().unwrap();
     make_room(&mut approvals)?;
@@ -1230,8 +1447,10 @@ async fn approval_create(
 /// collect the answer.
 async fn approval_open(
     AxumState(state): AxumState<Arc<State>>,
+    Extension(PeerIp(ip)): Extension<PeerIp>,
     Json(req): Json<ApprovalOpen>,
 ) -> Result<Json<ApprovalRef>, ApiError> {
+    approval_call(&state, ip)?;
     let id = req.approval_id;
     let id_ok = id.len() == 32 && id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
     if !id_ok || !blob_ok(&req.request) || !token_ok(&req.collect_token) {
@@ -1257,8 +1476,10 @@ async fn approval_open(
 /// A new device that scanned an existing device's code sends its request.
 async fn approval_request(
     AxumState(state): AxumState<Arc<State>>,
+    Extension(PeerIp(ip)): Extension<PeerIp>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    approval_call(&state, ip)?;
     if !blob_ok(&req.request) || !token_ok(&req.collect_token) {
         return Err(ApiError::Bad("the approval is not valid"));
     }
@@ -1340,8 +1561,10 @@ async fn approval_grant(
 /// The new device collects the answer, once.
 async fn approval_collect(
     AxumState(state): AxumState<Arc<State>>,
+    Extension(PeerIp(ip)): Extension<PeerIp>,
     Json(req): Json<ApprovalCollect>,
 ) -> Result<Json<ApprovalCollected>, ApiError> {
+    approval_call(&state, ip)?;
     let mut approvals = state.approvals.lock().unwrap();
     let a = live(&mut approvals, &req.approval_id, None)?;
     match &a.request {
@@ -1399,7 +1622,8 @@ async fn accept_loop(
         let guard = peers.enter(peer.ip());
         tracing::debug!(%peer, "connection opened");
         let acceptor = acceptor.clone();
-        let service = TowerToHyperService::new(router.clone());
+        // The address goes on the connection's requests for the limits.
+        let service = TowerToHyperService::new(router.clone().layer(Extension(PeerIp(peer.ip()))));
         tokio::spawn(async move {
             let _guard = guard;
             match acceptor.accept(stream).await {

@@ -172,7 +172,16 @@ impl Db {
                  signature      BLOB NOT NULL,
                  removed_at     INTEGER NOT NULL
              );
-             PRAGMA user_version = 3;",
+             -- What the server tells an account's devices itself, such as repeated
+             -- failed sign-ins. A kind, a number and a time: never an address.
+             CREATE TABLE IF NOT EXISTS notices (
+                 id         INTEGER PRIMARY KEY,
+                 account_id INTEGER NOT NULL REFERENCES accounts(id),
+                 kind       TEXT    NOT NULL,
+                 count      INTEGER NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             PRAGMA user_version = 4;",
         )?;
         Ok(Db { conn })
     }
@@ -277,6 +286,17 @@ impl Db {
             .optional()?)
     }
 
+    pub fn username_of(&self, account_id: i64) -> Result<Option<String>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT username FROM accounts WHERE id = ?1",
+                [account_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// An account's identity key, and whether it is a server admin.
     pub fn identity_of(&self, account_id: i64) -> Result<Option<(Vec<u8>, bool)>, DbError> {
         Ok(self
@@ -287,6 +307,94 @@ impl Db {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
+    }
+
+    /// Replace an account's password: the OPAQUE record, the hardening cost
+    /// and the key bundle sealed under the new password. The identity key, the
+    /// devices and everything else stay as they are.
+    pub fn set_password(
+        &self,
+        account_id: i64,
+        opaque_record: &[u8],
+        kdf: &hab_proto::wire::Kdf,
+        bundle: &hab_proto::wire::KeyBundle,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE accounts SET opaque_record = ?2, kdf_alg = ?3, kdf_memory_kib = ?4,
+                 kdf_passes = ?5, kdf_lanes = ?6, bundle_alg = ?7, bundle_nonce = ?8, bundle = ?9
+             WHERE id = ?1",
+            params![
+                account_id,
+                opaque_record,
+                kdf.alg,
+                kdf.memory_kib,
+                kdf.passes,
+                kdf.lanes,
+                bundle.alg,
+                bundle.nonce,
+                bundle.ciphertext,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Keep a notice for the account's devices and return it. Old ones go:
+    /// at most [`MAX_NOTICES`] an account, none older than [`NOTICE_KEEP_SECS`].
+    pub fn add_notice(
+        &self,
+        account_id: i64,
+        kind: &str,
+        count: u32,
+        now: i64,
+    ) -> Result<hab_proto::wire::ServerNotice, DbError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO notices (account_id, kind, count, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, kind, count, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "DELETE FROM notices WHERE account_id = ?1 AND (created_at < ?2 OR id NOT IN
+                 (SELECT id FROM notices WHERE account_id = ?1 ORDER BY id DESC LIMIT ?3))",
+            params![account_id, now - NOTICE_KEEP_SECS, MAX_NOTICES],
+        )?;
+        tx.commit()?;
+        Ok(hab_proto::wire::ServerNotice {
+            id,
+            kind: kind.into(),
+            count,
+            at: now,
+        })
+    }
+
+    /// The account's notices numbered after `after`, oldest first.
+    pub fn notices_after(
+        &self,
+        account_id: i64,
+        after: i64,
+    ) -> Result<Vec<hab_proto::wire::ServerNotice>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, count, created_at FROM notices
+             WHERE account_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![account_id, after, MAX_NOTICES], |r| {
+            Ok(hab_proto::wire::ServerNotice {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                count: r.get(2)?,
+                at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest notice's number, or 0.
+    pub fn latest_notice(&self, account_id: i64) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM notices WHERE account_id = ?1",
+            [account_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Add a device to an existing account. Returns `None` if the account
@@ -767,6 +875,9 @@ pub enum RemoveError {
 
 /// Most devices one account may have.
 pub const MAX_DEVICES: i64 = 32;
+/// Notices kept for an account, and for how long.
+pub const MAX_NOTICES: i64 = 50;
+pub const NOTICE_KEEP_SECS: i64 = 30 * 24 * 3600;
 
 /// The devices table keeps a `name` column from before names moved into the
 /// user's encrypted settings. It is always empty: the server can't read names.
@@ -904,6 +1015,38 @@ pub(crate) fn test_account(username: &str) -> NewAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_are_numbered_per_account_and_old_ones_go() {
+        let db = Db::in_memory().unwrap();
+        let a = db
+            .create_first_account(|_| true, &test_account("chris"), 0)
+            .unwrap()
+            .unwrap()
+            .account_id;
+        assert_eq!(db.latest_notice(a).unwrap(), 0);
+        let n1 = db.add_notice(a, "failed_sign_ins", 5, 100).unwrap();
+        let n2 = db.add_notice(a, "failed_sign_ins", 10, 200).unwrap();
+        assert!(n2.id > n1.id);
+        assert_eq!((n2.count, n2.at), (10, 200));
+        assert_eq!(db.notices_after(a, 0).unwrap(), [n1.clone(), n2.clone()]);
+        assert_eq!(
+            db.notices_after(a, n1.id).unwrap(),
+            std::slice::from_ref(&n2)
+        );
+        assert_eq!(db.latest_notice(a).unwrap(), n2.id);
+        // A month on, the old ones are dropped.
+        let n3 = db
+            .add_notice(a, "failed_sign_ins", 5, 200 + NOTICE_KEEP_SECS + 1)
+            .unwrap();
+        assert_eq!(db.notices_after(a, 0).unwrap(), [n3]);
+        // And no more than the most recent are kept.
+        for i in 0..MAX_NOTICES + 5 {
+            db.add_notice(a, "failed_sign_ins", 5, 300_000_000 + i)
+                .unwrap();
+        }
+        assert_eq!(db.notices_after(a, 0).unwrap().len() as i64, MAX_NOTICES);
+    }
 
     #[test]
     fn settings_round_trip_and_overwrite() {

@@ -33,7 +33,26 @@ pub struct Snapshot {
     pub sign_in_notices: Vec<SignInNotice>,
     /// Actions of this user's devices that lost to a completion on another.
     pub reconciliations: Vec<ReconciliationNotice>,
+    /// Things the server told this user's devices, such as failed sign-ins,
+    /// not yet dismissed.
+    pub security_notices: Vec<SecurityNotice>,
 }
+
+/// "5 failed sign-ins to your account", from the server. The server has no
+/// device to author an event, so these are not in the list's stream: each
+/// device keeps what the server told it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecurityNotice {
+    /// Names the notice, for dismissing it.
+    pub id: String,
+    pub text: String,
+    pub count: u32,
+    /// When the server raised it, in Unix seconds.
+    pub at: i64,
+}
+
+const SERVER_NOTICE: &str = "server_notice:";
+const FAILED_SIGN_INS: &str = "failed_sign_ins";
 
 /// "Your phone skipped “Bins”. It counts as completed."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -527,6 +546,66 @@ impl Core {
             .collect()
     }
 
+    /// The newest server notice this device has dealt with, if it has asked
+    /// the server before.
+    pub fn server_notice_cursor(&self) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .meta("server_notice_cursor")?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    pub fn set_server_notice_cursor(&self, id: i64) -> Result<()> {
+        self.store.set_meta("server_notice_cursor", &id.to_string())
+    }
+
+    /// Keep a notice the server sent. Kinds this app doesn't know are left
+    /// out, as an update will bring them. Returns whether it is new.
+    pub fn receive_server_notice(&self, id: i64, kind: &str, count: u32, at: i64) -> Result<bool> {
+        if kind != FAILED_SIGN_INS {
+            return Ok(false);
+        }
+        let key = format!("{SERVER_NOTICE}{id}");
+        if self.store.meta(&key)?.is_some() {
+            return Ok(false);
+        }
+        self.store.set_meta(&key, &format!("{kind}:{count}:{at}"))?;
+        Ok(true)
+    }
+
+    fn security_notices(&self) -> Vec<SecurityNotice> {
+        let Ok(rows) = self.store.meta_prefix(SERVER_NOTICE) else {
+            return Vec::new();
+        };
+        let mut notices: Vec<(i64, SecurityNotice)> = rows
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let n: i64 = key.strip_prefix(SERVER_NOTICE)?.parse().ok()?;
+                let mut parts = value.splitn(3, ':');
+                let (kind, count, at) = (parts.next()?, parts.next()?, parts.next()?);
+                if kind != FAILED_SIGN_INS {
+                    return None;
+                }
+                let id = format!("server-notice-{n}");
+                if matches!(self.store.meta(&format!("dismissed:{id}")), Ok(Some(_))) {
+                    return None;
+                }
+                let count: u32 = count.parse().ok()?;
+                Some((
+                    n,
+                    SecurityNotice {
+                        text: format!("{count} failed sign-ins to your account"),
+                        id,
+                        count,
+                        at: at.parse().ok()?,
+                    },
+                ))
+            })
+            .collect();
+        notices.sort_by_key(|(n, _)| *n);
+        notices.into_iter().map(|(_, n)| n).collect()
+    }
+
     /// The user has seen a sign-in notice.
     pub fn dismiss_notice(&self, id: &str) -> Result<()> {
         self.store.set_meta(&format!("dismissed:{id}"), "1")
@@ -571,6 +650,7 @@ impl Core {
         Snapshot {
             reconciliations: self.reconciliation_notices(),
             sign_in_notices: self.sign_in_notices(),
+            security_notices: self.security_notices(),
             due: self.state.due(),
             upcoming: self.state.upcoming(),
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
@@ -641,6 +721,40 @@ mod tests {
         assert_eq!((notice.device_id.as_str(), notice.at), ("2", T0 + 10));
         one.dismiss_notice(&notice.id).unwrap();
         assert_eq!(names(&one), vec!["Tablet"]);
+    }
+
+    #[test]
+    fn a_server_notice_shows_until_dismissed_and_is_kept_once() {
+        let c = core();
+        assert_eq!(c.server_notice_cursor().unwrap(), None);
+        assert!(c
+            .receive_server_notice(3, "failed_sign_ins", 5, T0)
+            .unwrap());
+        assert!(!c
+            .receive_server_notice(3, "failed_sign_ins", 5, T0)
+            .unwrap());
+        assert!(c
+            .receive_server_notice(12, "failed_sign_ins", 10, T0 + 9)
+            .unwrap());
+        // A kind from a newer server is left out.
+        assert!(!c.receive_server_notice(13, "something_new", 1, T0).unwrap());
+        c.set_server_notice_cursor(13).unwrap();
+        assert_eq!(c.server_notice_cursor().unwrap(), Some(13));
+
+        let shown = c.snapshot().security_notices;
+        let texts: Vec<_> = shown.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "5 failed sign-ins to your account",
+                "10 failed sign-ins to your account"
+            ]
+        );
+        assert_eq!((shown[0].count, shown[0].at), (5, T0));
+        c.dismiss_notice(&shown[0].id).unwrap();
+        let left = c.snapshot().security_notices;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].count, 10);
     }
 
     #[test]

@@ -12,6 +12,9 @@ use crate::profile::Profile;
 use crate::tls::{self, parse_address, Pinned, TlsError};
 use futures_util::{SinkExt, StreamExt};
 use hab_core::{Core, Payload};
+use hab_proto::opaque_ke::{
+    ClientRegistration, ClientRegistrationFinishParameters, Identifiers, RegistrationResponse,
+};
 use hab_proto::wire::SealedKeys;
 use hab_proto::wire::{
     AppendBatch, AppendResults, ClientMessage, DeviceList, DeviceRecord, Envelope, EventPage,
@@ -21,6 +24,8 @@ use hab_proto::wire::{
 use hab_proto::wire::{
     ApprovalFetched, ApprovalGrant, ApprovalGrantPlain, ApprovalRef, ApprovalRequestPlain, Joined,
 };
+use hab_proto::wire::{FetchNotices, Notices, PasswordFinish, PasswordStart, PasswordStarted};
+use hab_proto::{argon2, Suite, ARGON_LANES, ARGON_MEMORY_KIB, ARGON_PASSES};
 use hab_proto::{
     open_list_key, seal_list_key, sign_device, verify_device, DeviceKeys, KeyError, Keys, ListKey,
 };
@@ -69,6 +74,10 @@ pub enum SyncError {
     UnknownDevice,
     #[error("this account has a list whose key this device cannot rotate")]
     CannotRotate,
+    #[error("That password is too easy to guess.")]
+    WeakPassword,
+    #[error("the new password could not be registered: {0}")]
+    Password(String),
     #[error("This approval has expired or was already used. Start again.")]
     ApprovalExpired,
     #[error("The approval did not check out: {0}")]
@@ -381,6 +390,106 @@ impl Syncer {
         self.wake.notify_one();
         (self.on_change)();
         Ok(())
+    }
+
+    /// Change the account's password from this signed-in device, which is also
+    /// how a forgotten password is replaced while a device is still signed in.
+    /// The old password isn't asked for: this device's own signature is the
+    /// proof (on Android the app asks for the screen lock first; on Linux an
+    /// unlocked session is enough).
+    ///
+    /// The keys are sealed again under the new password and the server stores
+    /// that bundle with a new OPAQUE record. Nothing else changes: devices
+    /// authenticate with their own keys, and the list keys are not touched.
+    /// The new password has to pass the same strength check as when joining.
+    pub async fn change_password(&self, new_password: &str) -> Result<(), SyncError> {
+        if !crate::strength::check_password(new_password, &[&self.username, &self.display_name]).ok
+        {
+            return Err(SyncError::WeakPassword);
+        }
+        let mut rng = hab_proto::opaque_ke::rand::rngs::OsRng;
+        let started = ClientRegistration::<Suite>::start(&mut rng, new_password.as_bytes())
+            .map_err(|e| SyncError::Password(e.to_string()))?;
+        let reply: PasswordStarted = self
+            .post(
+                "/api/v1/password/start",
+                &PasswordStart {
+                    registration_request: started.message.serialize().to_vec(),
+                },
+            )
+            .await?;
+        let response = RegistrationResponse::<Suite>::deserialize(&reply.registration_response)
+            .map_err(|e| SyncError::Password(e.to_string()))?;
+        // Argon2id at 64 MiB takes a moment, so keep it off the async threads.
+        let (password, state) = (new_password.to_string(), started.state);
+        let finished = tokio::task::spawn_blocking(move || {
+            let ksf = argon2();
+            let mut rng = hab_proto::opaque_ke::rand::rngs::OsRng;
+            state.finish(
+                &mut rng,
+                password.as_bytes(),
+                response,
+                ClientRegistrationFinishParameters::new(Identifiers::default(), Some(&ksf)),
+            )
+        })
+        .await
+        .map_err(|e| SyncError::Password(e.to_string()))?
+        .map_err(|e| SyncError::Password(e.to_string()))?;
+        let bundle = self
+            .keys
+            .seal(finished.export_key.as_slice(), &self.username);
+        let _: serde_json::Value = self
+            .post(
+                "/api/v1/password/finish",
+                &PasswordFinish {
+                    registration_upload: finished.message.serialize().to_vec(),
+                    kdf: hab_proto::wire::Kdf {
+                        alg: "argon2id".into(),
+                        memory_kib: ARGON_MEMORY_KIB,
+                        passes: ARGON_PASSES,
+                        lanes: ARGON_LANES,
+                    },
+                    bundle,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Ask the server for the notices this device hasn't seen, such as
+    /// "5 failed sign-ins to your account", and keep them in the core. The
+    /// first time a device asks it starts after what came before it, as for
+    /// the sign-in notices.
+    pub async fn fetch_notices(&self) -> Result<usize, SyncError> {
+        let cursor = self.core().server_notice_cursor()?;
+        let page: Notices = self
+            .post(
+                "/api/v1/notices",
+                &FetchNotices {
+                    after: cursor.unwrap_or(0),
+                },
+            )
+            .await?;
+        if cursor.is_none() {
+            self.core().set_server_notice_cursor(page.latest)?;
+            return Ok(0);
+        }
+        let mut new = 0;
+        for n in &page.notices {
+            if self
+                .core()
+                .receive_server_notice(n.id, &n.kind, n.count, n.at)?
+            {
+                new += 1;
+            }
+        }
+        // Past kinds this app doesn't know too: an update shows nothing old.
+        self.core()
+            .set_server_notice_cursor(page.latest.max(cursor.unwrap_or(0)))?;
+        if new > 0 {
+            (self.on_change)();
+        }
+        Ok(new)
     }
 
     /// Offer to approve a new device that will scan the returned link (or be
@@ -836,6 +945,7 @@ impl Syncer {
             Err(e) => return Err(e),
         }
         self.reseal_if_needed().await?;
+        self.fetch_notices().await?;
         self.set_status(true, None);
         let mut in_flight = HashSet::new();
         self.flush(&mut socket, &mut in_flight).await?;
@@ -899,6 +1009,18 @@ impl Syncer {
             }
             ServerMessage::Resync => {
                 self.download().await?;
+                self.fetch_notices().await?;
+            }
+            ServerMessage::Notice(n) => {
+                if self
+                    .core()
+                    .receive_server_notice(n.id, &n.kind, n.count, n.at)?
+                {
+                    (self.on_change)();
+                }
+                // Behind the newest it has seen, in case a smaller one is late.
+                let cursor = self.core().server_notice_cursor()?.unwrap_or(0);
+                self.core().set_server_notice_cursor(cursor.max(n.id))?;
             }
             ServerMessage::KeysChanged => {
                 // A device was removed: the directory and the key changed.

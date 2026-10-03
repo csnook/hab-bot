@@ -686,6 +686,18 @@ async fn remove_device(app: tauri::State<'_, App>, device_id: i64) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// Settings → Account → Change password. A device that is still signed in
+/// can set a new password without the old one, so this is also what a
+/// forgotten password needs. The new password has to pass the strength check.
+#[tauri::command]
+async fn change_password(app: tauri::State<'_, App>, password: String) -> Result<(), String> {
+    let syncer = running_sync(&app)?;
+    syncer
+        .change_password(&password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// For Settings → Account and This device: where the keys are kept.
 #[tauri::command]
 async fn key_store_name(app: tauri::State<'_, App>) -> Result<String, String> {
@@ -765,6 +777,7 @@ pub fn run() {
             dismiss_notice,
             list_devices,
             remove_device,
+            change_password,
             key_store_name
         ])
         .setup(|app| {

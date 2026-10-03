@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { keyStoreName, type Setup } from "./api";
 import { ApproveDevice } from "./ApproveDevice";
+import { ChangePassword } from "./ChangePassword";
 import { Devices } from "./Devices";
 import { ServerSees } from "./ServerSees";
 import { SignInCodeBox } from "./SignInCode";
@@ -51,6 +52,7 @@ export function Account({ setup, removing }: { setup: Setup; removing?: string |
       <Devices removing={removing ?? null} />
       <SignInCodeBox />
       <ApproveDevice />
+      <ChangePassword setup={setup} />
       <ServerSees />
     </section>
   );

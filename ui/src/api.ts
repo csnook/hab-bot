@@ -38,11 +38,21 @@ export interface ReconciliationNotice {
   text: string;
 }
 
+/** "5 failed sign-ins to your account", told by the server. */
+export interface SecurityNotice {
+  id: string;
+  text: string;
+  count: number;
+  /** Unix seconds. */
+  at: number;
+}
+
 export interface Snapshot {
   due: DueItem[];
   upcoming: UpcomingItem[];
   sign_in_notices: SignInNotice[];
   reconciliations: ReconciliationNotice[];
+  security_notices: SecurityNotice[];
   /** Set while the list holds changes from a newer app. */
   update_notice: string | null;
 }
@@ -105,6 +115,8 @@ export const passwordCheck = (password: string, username: string, displayName: s
   invoke<PasswordCheck>("password_check", { password, username, displayName });
 export const passphraseSuggestion = () => invoke<string>("passphrase_suggestion");
 export const joinServer = (args: JoinArgs) => invoke<Profile>("join_server", { args });
+export const changePassword = (password: string) =>
+  invoke<void>("change_password", { password });
 export const keyStoreName = () => invoke<string>("key_store_name");
 
 /** What the sign-in screen learned about the server from what was typed. */

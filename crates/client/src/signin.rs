@@ -25,6 +25,8 @@ pub enum SignInError {
     WrongLogin,
     #[error(transparent)]
     Server(#[from] TlsError),
+    #[error("Too many sign-in attempts from this network. Wait a minute and try again.")]
+    TooManyAttempts,
     #[error("signing in failed: {0}")]
     Opaque(String),
     #[error("the account's keys could not be opened: {0}")]
@@ -74,7 +76,7 @@ pub async fn sign_in(req: SignInRequest, store: &KeyStore) -> Result<SignedIn, S
     let mut rng = hab_proto::opaque_ke::rand::rngs::OsRng;
     let started = ClientLogin::<Suite>::start(&mut rng, req.password.as_bytes())
         .map_err(|e| SignInError::Opaque(e.to_string()))?;
-    let reply: LoginStarted = server
+    let reply: LoginStarted = match server
         .post(
             "/api/v1/login/start",
             &LoginStart {
@@ -82,7 +84,12 @@ pub async fn sign_in(req: SignInRequest, store: &KeyStore) -> Result<SignedIn, S
                 credential_request: started.message.serialize().to_vec(),
             },
         )
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(TlsError::Status { status: 429, .. }) => return Err(SignInError::TooManyAttempts),
+        Err(e) => return Err(e.into()),
+    };
     if !kdf_in_bounds(&reply.kdf) {
         return Err(SignInError::Opaque(
             "the server asked for password hardening this app won't do".into(),

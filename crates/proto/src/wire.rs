@@ -160,6 +160,70 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+// ---- Changing the password, and notices from the server (#63) ----
+
+/// Changing the password, step 1, signed by a device of the account: the
+/// first OPAQUE registration message for the new password. The device's
+/// signature is what proves the caller is signed in, so a forgotten password
+/// can be replaced from any device that still is.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PasswordStart {
+    #[serde(with = "b64")]
+    pub registration_request: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PasswordStarted {
+    #[serde(with = "b64")]
+    pub registration_response: Vec<u8>,
+}
+
+/// Step 2: the new OPAQUE record and the same keys sealed under the new
+/// password's export key. Nothing else about the account changes.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PasswordFinish {
+    #[serde(with = "b64")]
+    pub registration_upload: Vec<u8>,
+    pub kdf: Kdf,
+    pub bundle: KeyBundle,
+}
+
+/// What a server notice says happened.
+pub struct NoticeKinds;
+
+impl NoticeKinds {
+    /// `count` password attempts for the account have failed, in a row.
+    pub const FAILED_SIGN_INS: &'static str = "failed_sign_ins";
+}
+
+/// Something the server itself tells an account's devices. It has no device to
+/// author an event, so it is not part of any list's stream, and it holds only
+/// what the server already knows: a kind, a number and a time. Never an IP
+/// address.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ServerNotice {
+    /// Numbered per server, rising.
+    pub id: i64,
+    pub kind: String,
+    pub count: u32,
+    /// Unix seconds.
+    pub at: i64,
+}
+
+/// Ask for the account's notices numbered after `after`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FetchNotices {
+    pub after: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Notices {
+    pub notices: Vec<ServerNotice>,
+    /// The newest notice's number, whether or not it is in `notices`, so a
+    /// device that has just signed in can start after what came before it.
+    pub latest: i64,
+}
+
 // ---- Approving a new device from an existing one (ADR 0004) ----
 
 /// Something sealed under the approval key, which only the two devices have:
@@ -466,6 +530,9 @@ pub enum ServerMessage {
     /// Another device was removed and the lists' keys were rotated: fetch the
     /// device list and the new keys.
     KeysChanged,
+    /// The server has a notice for the account, such as repeated failed
+    /// sign-ins.
+    Notice(ServerNotice),
 }
 
 #[cfg(test)]

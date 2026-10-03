@@ -83,13 +83,18 @@ function SignInNotices({ onRemove }: { onRemove: (deviceId: string) => void }) {
   );
 }
 
-/** "Your phone skipped… It counts as completed.", when two devices disagreed. */
+/**
+ * "Your phone skipped… It counts as completed.", when two devices disagreed,
+ * and "5 failed sign-ins to your account", from the server.
+ */
 function ReconciliationBanners() {
-  const [notices, setNotices] = useState<Snapshot["reconciliations"]>([]);
+  const [notices, setNotices] = useState<Array<{ id: string; text: string }>>([]);
 
   useEffect(() => {
     const refresh = () => {
-      snapshot().then((s) => setNotices(s.reconciliations)).catch(() => {});
+      snapshot()
+        .then((s) => setNotices([...s.security_notices, ...s.reconciliations]))
+        .catch(() => {});
     };
     refresh();
     const unlisten = onStateChanged(refresh);
@@ -116,6 +121,7 @@ function Inbox() {
     upcoming: [],
     sign_in_notices: [],
     reconciliations: [],
+    security_notices: [],
     update_notice: null,
   });
   const [error, setError] = useState("");

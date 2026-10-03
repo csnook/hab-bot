@@ -15,7 +15,9 @@ mod hlc;
 mod state;
 mod store;
 
-pub use crate::core::{Core, EditReminder, Fired, ReconciliationNotice, SignInNotice, Snapshot};
+pub use crate::core::{
+    Core, EditReminder, Fired, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
+};
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };

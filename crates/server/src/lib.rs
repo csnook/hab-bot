@@ -7,6 +7,7 @@ pub mod backup;
 pub mod cert;
 pub mod config;
 pub mod db;
+pub mod guard;
 pub mod peers;
 pub mod server;
 pub mod setup;
