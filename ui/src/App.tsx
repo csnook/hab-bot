@@ -1,0 +1,101 @@
+import { useEffect, useState } from "preact/hooks";
+import {
+  completeOccurrence,
+  createReminder,
+  onStateChanged,
+  snapshot,
+  type Snapshot,
+} from "./api";
+import { formatTime, toUnixSeconds } from "./time";
+
+export function App() {
+  const [snap, setSnap] = useState<Snapshot>({ due: [], upcoming: [] });
+  const [error, setError] = useState("");
+
+  const refresh = () => snapshot().then(setSnap).catch((e) => setError(String(e)));
+
+  useEffect(() => {
+    refresh();
+    const unlisten = onStateChanged(refresh);
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  const done = (id: string) =>
+    completeOccurrence(id).catch((e) => setError(String(e)));
+
+  return (
+    <main>
+      <h1>Inbox</h1>
+      {error && <p class="error" role="alert">{error}</p>}
+
+      <section aria-labelledby="due">
+        <h2 id="due">Due</h2>
+        {snap.due.length === 0 && <p class="empty">Nothing due.</p>}
+        <ul>
+          {snap.due.map((d) => (
+            <li key={d.occurrence_id}>
+              <span class="title">{d.title}</span>
+              <span class="when">{formatTime(d.scheduled_at)}</span>
+              <button onClick={() => done(d.occurrence_id)}>Done</button>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section aria-labelledby="upcoming">
+        <h2 id="upcoming">Later</h2>
+        {snap.upcoming.length === 0 && <p class="empty">No reminders waiting.</p>}
+        <ul>
+          {snap.upcoming.map((u) => (
+            <li key={u.reminder_id}>
+              <span class="title">{u.title}</span>
+              <span class="when">{formatTime(u.fire_at)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <NewReminder onError={setError} />
+    </main>
+  );
+}
+
+function NewReminder({ onError }: { onError: (e: string) => void }) {
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    const fireAt = toUnixSeconds(date, time);
+    if (fireAt === null) return onError("Pick a date and time.");
+    try {
+      await createReminder(title, fireAt);
+      setTitle("");
+      onError("");
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  return (
+    <form onSubmit={submit} aria-label="New reminder">
+      <h2>New reminder</h2>
+      <label>
+        Title
+        <input value={title} onInput={(e) => setTitle(e.currentTarget.value)} required />
+      </label>
+      <label>
+        Date
+        <input type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} required />
+      </label>
+      <label>
+        Time
+        <input type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} required />
+      </label>
+      <button type="submit">Create</button>
+    </form>
+  );
+}
