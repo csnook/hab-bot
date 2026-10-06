@@ -12,7 +12,9 @@ use crate::event::{
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::{self, Schedule};
-use crate::state::{ClosingKind, DueItem, Reminder, State, UpcomingItem};
+use crate::state::{
+    last_chance_at, ClosingKind, DueItem, Reminder, SnoozeView, State, UpcomingItem,
+};
 use crate::store::Store;
 use crate::{Error, Result};
 
@@ -77,7 +79,53 @@ pub struct OccurrenceView {
     pub overdue_at: i64,
     pub snoozed_until: Option<i64>,
     pub acknowledged_at: Option<i64>,
+    /// When it is missed for want of action, if it has such an expiry.
+    pub expires_at: Option<i64>,
 }
+
+/// One of the snooze menu's timed choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnoozeKind {
+    /// The priority's current interval.
+    Interval,
+    /// One hour (left out when the interval is one hour).
+    Hour,
+    /// 08:00 the next day.
+    TomorrowMorning,
+}
+
+/// A choice in the snooze menu and when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SnoozeOption {
+    pub kind: SnoozeKind,
+    pub until: i64,
+    /// The length of an interval or hour, in seconds.
+    pub seconds: Option<i64>,
+    /// A last-chance alert would come inside this snooze, before the expiry.
+    pub last_chance: bool,
+}
+
+/// What the snooze menu shows for an open or expected occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnoozePicker {
+    /// The priority's interval, 1 hour and tomorrow morning. "Until a time"
+    /// and "pick a time" take a time of the user's choosing, which the menu
+    /// checks against `expires_at` (see [`last_chance_at`]).
+    pub options: Vec<SnoozeOption>,
+    /// "Expires at 23:59": a known expiry, if the occurrence has one.
+    pub expires_at: Option<i64>,
+    /// When the last-chance alert comes before it.
+    pub last_chance_at: Option<i64>,
+    /// An expected occurrence: the choices count from its time, which is
+    /// `from`; it still fires then, quietly.
+    pub ahead: bool,
+    /// What the choices count from: now, or an expected occurrence's time.
+    pub from: i64,
+}
+
+/// The hour tomorrow morning means, in the device's time zone.
+const TOMORROW_MORNING_HOUR: i8 = 8;
 
 /// A reminder list this device holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -157,6 +205,10 @@ pub struct ExpectedItem {
     pub reminder_id: String,
     pub title: String,
     pub scheduled_at: i64,
+    /// Snoozed ahead of time until then: it fires at its time, quietly.
+    pub snoozed_until: Option<i64>,
+    /// When it would be missed for want of action, if it has such an expiry.
+    pub expires_at: Option<i64>,
 }
 
 /// A closed occurrence for the Inbox's Earlier today section.
@@ -1076,8 +1128,14 @@ impl Core {
         Ok(())
     }
 
-    /// Quiets an open occurrence's alerts until `until`.
+    /// Quiets an open occurrence's alerts until `until`. The occurrence stays
+    /// open and goes overdue on schedule, quietly. A snooze while one holds
+    /// replaces it; there is no limit on repeated snoozes, and each is
+    /// recorded ([`snooze_history`](Self::snooze_history)).
     pub fn snooze(&mut self, occurrence_id: &str, until: i64, now: i64) -> Result<()> {
+        if until <= now {
+            return Err(Error::SnoozeInThePast);
+        }
         let (list_id, id) = self.open_id(occurrence_id)?;
         self.record_in(
             &list_id,
@@ -1108,6 +1166,122 @@ impl Core {
         Ok(until)
     }
 
+    /// Snoozes an expected occurrence ahead of time until `until`: it still
+    /// fires at `scheduled_at`, quietly, into the lists, and alerts when the
+    /// snooze ends. Its overdue time and expiry still count from
+    /// `scheduled_at`. Nothing is opened now: the snooze is an event of its
+    /// own that the occurrence picks up when it opens, on any device. If it
+    /// has fired already, this snoozes the open occurrence. Returns the
+    /// occurrence's id.
+    pub fn snooze_expected(
+        &mut self,
+        reminder_id: &str,
+        scheduled_at: i64,
+        until: i64,
+        now: i64,
+    ) -> Result<String> {
+        if until <= now {
+            return Err(Error::SnoozeInThePast);
+        }
+        let id = format!("{reminder_id}@{scheduled_at}");
+        if self.open_id(&id).is_ok() {
+            self.snooze(&id, until, now)?;
+            return Ok(id);
+        }
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let listed = scheduled_at > now
+            && self
+                .expected(now, scheduled_at)
+                .iter()
+                .any(|e| e.reminder_id == reminder_id && e.scheduled_at == scheduled_at);
+        if !listed {
+            return Err(Error::NotExpected(id));
+        }
+        self.record_in(
+            &list_id,
+            now,
+            Event::ExpectedOccurrenceSnoozed {
+                reminder_id: reminder_id.to_string(),
+                scheduled_at,
+                until,
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// Every snooze of an occurrence, oldest first: what each was set to end
+    /// on and how it actually ended (ran out, was replaced by another, or the
+    /// occurrence closed first).
+    pub fn snooze_history(&self, occurrence_id: &str, now: i64) -> Vec<SnoozeView> {
+        self.states()
+            .find(|(_, s)| {
+                let id = s.resolve(occurrence_id);
+                s.snoozes.iter().any(|z| z.occurrence_id == id)
+            })
+            .map(|(_, s)| s.snoozes_of(occurrence_id, now))
+            .unwrap_or_default()
+    }
+
+    /// The snooze menu for an open occurrence: the priority's current
+    /// interval, 1 hour and tomorrow morning, with its expiry if it has one.
+    pub fn snooze_picker(&self, occurrence_id: &str, now: i64) -> Result<SnoozePicker> {
+        let (list_id, id) = self.open_id(occurrence_id)?;
+        let item = self
+            .state_of(&list_id)
+            .and_then(|s| s.due().into_iter().find(|d| d.occurrence_id == id))
+            .ok_or_else(|| Error::NotOpen(occurrence_id.to_string()))?;
+        let length = item
+            .priority
+            .settings()
+            .snooze_length(item.overdue_at <= now);
+        Ok(self.picker(length, now, item.expires_at, false, now))
+    }
+
+    /// The snooze menu for an expected occurrence ("snooze ahead"): the
+    /// choices count from its scheduled time, since it fires then, quietly.
+    pub fn snooze_picker_expected(
+        &self,
+        reminder_id: &str,
+        scheduled_at: i64,
+        now: i64,
+    ) -> Result<SnoozePicker> {
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let r = &self.state_of(&list_id).expect("the list is held").reminders[reminder_id];
+        let length = r.priority.settings().snooze_length(false);
+        Ok(self.picker(length, scheduled_at, r.expires_at(scheduled_at), true, now))
+    }
+
+    fn picker(
+        &self,
+        length: i64,
+        from: i64,
+        expires_at: Option<i64>,
+        ahead: bool,
+        now: i64,
+    ) -> SnoozePicker {
+        let zone = schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC);
+        let option = |kind, until: i64, seconds| SnoozeOption {
+            kind,
+            until,
+            seconds,
+            last_chance: expires_at.is_some_and(|e| last_chance_at(e, Some(now), until).is_some()),
+        };
+        let mut options = vec![option(SnoozeKind::Interval, from + length, Some(length))];
+        if length != 3_600 {
+            options.push(option(SnoozeKind::Hour, from + 3_600, Some(3_600)));
+        }
+        if let Some(t) = schedule::tomorrow_at(&zone, from, TOMORROW_MORNING_HOUR) {
+            options.push(option(SnoozeKind::TomorrowMorning, t, None));
+        }
+        SnoozePicker {
+            options,
+            expires_at,
+            last_chance_at: expires_at.map(|e| e - crate::state::LAST_CHANCE_LEAD),
+            ahead,
+            from,
+        }
+    }
+
     /// What the alarm window shows about an occurrence, or `None` once it is
     /// closed (or unknown).
     pub fn occurrence_view(&self, occurrence_id: &str) -> Option<OccurrenceView> {
@@ -1128,6 +1302,7 @@ impl Core {
                     overdue_at: d.overdue_at,
                     snoozed_until: d.snoozed_until,
                     acknowledged_at: d.acknowledged_at,
+                    expires_at: d.expires_at,
                 });
             }
         }
@@ -1364,6 +1539,8 @@ impl Core {
                     reminder_id: r.id.clone(),
                     title: r.title.clone(),
                     scheduled_at: t,
+                    snoozed_until: s.expected_snooze(&r.id, t),
+                    expires_at: r.expires_at(t),
                 }));
             }
         }

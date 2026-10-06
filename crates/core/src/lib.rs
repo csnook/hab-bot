@@ -22,6 +22,7 @@ mod store;
 pub use crate::core::{
     Core, CountdownItem, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox,
     ListInfo, OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
+    SnoozeKind, SnoozeOption, SnoozePicker,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
@@ -35,10 +36,11 @@ pub use hlc::{Hlc, MAX_AHEAD_MS};
 pub use priority::{
     built_in_priorities, AlertStyle, EscalationStep, Priority, PriorityInfo, PrioritySettings,
 };
-pub use schedule::{day_bounds, system_zone_name, zone, Pattern, Schedule};
+pub use schedule::{clock_time, day_bounds, system_zone_name, zone, Pattern, Schedule};
 pub use state::{
-    AlertRecord, Closing, ClosingKind, DueItem, Occurrence, Reconciliation, Reminder,
-    SettingVersion, SignIn, State, UpcomingItem,
+    last_chance_at, AlertRecord, Closing, ClosingKind, DueItem, Occurrence, Reconciliation,
+    Reminder, SettingVersion, SignIn, SnoozeEnd, SnoozeRecord, SnoozeView, State, UpcomingItem,
+    LAST_CHANCE_LEAD,
 };
 pub use store::{HeldEvent, Store};
 
@@ -67,6 +69,10 @@ pub enum Error {
     NoReminder(String),
     #[error("that value was never one of the setting's")]
     NoSuchVersion,
+    #[error("a snooze has to end in the future")]
+    SnoozeInThePast,
+    #[error("{0} is neither open nor expected, so it can't be snoozed")]
+    NotExpected(String),
     #[error("there is no open occurrence {0}")]
     NotOpen(String),
     #[error("an event from the server could not be read: {0}")]

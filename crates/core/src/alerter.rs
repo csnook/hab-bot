@@ -39,6 +39,13 @@
 //! with no server wait (Maximum) alert at once and ask for the check anyway.
 //! With the server out of reach the alert goes ahead without waiting.
 //!
+//! Snoozing: a snoozed occurrence is quiet while it goes overdue on schedule
+//! and alerts at its current level when the snooze ends. If a known expiry
+//! falls inside the snooze, a last-chance alert comes 10 minutes before it
+//! (see [`last_chance_at`]): in the priority's due style, never quieter than
+//! gentle, titled "Last chance: ..." with "Expires at 23:59". An occurrence
+//! snoozed ahead of time opens already snoozed, so it fires quietly.
+//!
 //! Acknowledging quiets the occurrence: while due, until it goes overdue;
 //! once overdue, for one overdue interval, after which alerts resume. The
 //! time of the acknowledgement is the one recorded on its event.
@@ -47,6 +54,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::Core;
 use crate::priority::{AlertStyle, Priority, PrioritySettings};
+use crate::schedule;
+use crate::state::{last_chance_at, DueItem};
 use crate::Result;
 
 /// The key of the Done button.
@@ -179,6 +188,16 @@ impl Notification {
     }
 }
 
+impl Notification {
+    /// "Last chance: Call the plumber · Expires at 23:59".
+    fn last_chance(d: &DueItem, style: AlertStyle, expires: &str) -> Self {
+        let mut n = Notification::new(&d.occurrence_id, &d.title, style, d.overdue_at <= 0);
+        n.title = format!("Last chance: {}", d.title);
+        n.body = format!("Expires at {expires}");
+        n
+    }
+}
+
 /// What one pass decided.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Pass {
@@ -202,6 +221,9 @@ struct Tracked {
     recorded: Option<AlertStyle>,
     /// An alert that is due but waits for the server's check.
     waiting: Option<Waiting>,
+    /// The last-chance alert already given, as when it was due and which
+    /// snooze it was in, so each snooze gets one.
+    last_chance: Option<(i64, Option<i64>)>,
 }
 
 /// The per-device alert planner. It remembers only what it has alerted
@@ -298,6 +320,48 @@ impl Alerter {
             let unmeasured = d.acknowledged && d.acknowledged_at.is_none();
             if snoozed.is_some() || acknowledged.is_some() || unmeasured {
                 tracked.waiting = None;
+                // A snooze can't silently turn into a miss: the last-chance
+                // alert comes through it. An acknowledgement quiets it too.
+                let chance = if acknowledged.is_none() && !unmeasured {
+                    snoozed.and_then(|u| last_chance_at(d.expires_at?, d.snoozed_at, u))
+                } else {
+                    None
+                };
+                if let Some(at) = chance {
+                    let expires_at = d.expires_at.unwrap_or(at);
+                    let key = (at, d.snoozed_at);
+                    if now < at {
+                        soonest(at, &mut out);
+                    } else if now < expires_at && tracked.last_chance != Some(key) {
+                        let style = settings.due_style.max(AlertStyle::Gentle);
+                        let style = if inhibited && !settings.breaks_do_not_disturb {
+                            AlertStyle::Silent
+                        } else {
+                            style
+                        };
+                        if tracked.recorded != Some(style) {
+                            core.record_alert(&d.occurrence_id, style, now)?;
+                            tracked.recorded = Some(style);
+                        }
+                        tracked.last_chance = Some(key);
+                        tracked.standing = Some(style);
+                        tracked.last_at = now;
+                        tracked.stopped = false;
+                        let zone =
+                            schedule::zone(&core.device_zone()).unwrap_or(jiff::tz::TimeZone::UTC);
+                        out.commands.push(Command::Show(Notification::last_chance(
+                            d,
+                            style,
+                            &schedule::clock_time(&zone, expires_at),
+                        )));
+                    }
+                    // The last-chance alert stays up until the occurrence is
+                    // acted on or closes.
+                    if tracked.last_chance == Some(key) && tracked.standing.is_some() {
+                        soonest(snoozed.unwrap_or(now), &mut out);
+                        continue;
+                    }
+                }
                 if tracked.standing.take().is_some() {
                     out.commands.push(Command::Close {
                         occurrence_id: d.occurrence_id.clone(),

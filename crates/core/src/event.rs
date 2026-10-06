@@ -7,7 +7,7 @@ use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -76,6 +76,16 @@ pub enum Event {
     },
     /// Someone quieted the occurrence's alerts until `until`.
     OccurrenceSnoozed { occurrence_id: String, until: i64 },
+    /// Someone snoozed an expected occurrence ahead of time: it opens at
+    /// `scheduled_at` as usual, quietly, and alerts when the snooze ends. Its
+    /// id is the reminder plus the scheduled time, as for any occurrence.
+    /// Format 6: an app that can't read it keeps it without applying it,
+    /// rather than alerting at once.
+    ExpectedOccurrenceSnoozed {
+        reminder_id: String,
+        scheduled_at: i64,
+        until: i64,
+    },
     /// Someone silenced the occurrence's current alert.
     OccurrenceAcknowledged { occurrence_id: String },
     /// The device that made this event alerted its user about the occurrence
@@ -182,6 +192,8 @@ impl Event {
                 change: Change::Countdown(_),
                 ..
             } => 5,
+            // Snoozing ahead of time arrived in format 6.
+            Event::ExpectedOccurrenceSnoozed { .. } => 6,
             _ => 1,
         }
     }

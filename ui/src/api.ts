@@ -9,12 +9,15 @@ export interface DueItem {
   /** The server hasn't received a change to it yet. */
   not_sent: boolean;
   snoozed_until: number | null;
+  snoozed_at: number | null;
   acknowledged: boolean;
   /** When it was last acknowledged, in unix seconds. */
   acknowledged_at: number | null;
   priority: PriorityName;
   /** When it goes (or went) overdue, in unix seconds. */
   overdue_at: number;
+  /** When it is missed for want of action, if it has such an expiry. */
+  expires_at: number | null;
 }
 
 export type PriorityName = "minimum" | "low" | "medium" | "high" | "maximum";
@@ -103,6 +106,9 @@ export interface ExpectedItem {
   reminder_id: string;
   title: string;
   scheduled_at: number;
+  /** Snoozed ahead of time until then: it fires at its time, quietly. */
+  snoozed_until: number | null;
+  expires_at: number | null;
 }
 
 export interface EarlierItem {
@@ -179,9 +185,54 @@ export const skipOccurrence = (occurrenceId: string, note?: string) =>
 /** Silences the current alert on all devices without closing the occurrence. */
 export const acknowledgeOccurrence = (occurrenceId: string) =>
   invoke<void>("acknowledge_occurrence", { occurrenceId });
-/** Snoozes for `minutes`, or for the priority's snooze length without them. */
-export const snoozeOccurrence = (occurrenceId: string, minutes?: number) =>
-  invoke<void>("snooze_occurrence", { occurrenceId, minutes });
+/**
+ * Snoozes for `minutes` or until `until` (unix seconds), or for the
+ * priority's snooze length without either.
+ */
+export const snoozeOccurrence = (occurrenceId: string, minutes?: number, until?: number) =>
+  invoke<void>("snooze_occurrence", { occurrenceId, minutes, until });
+/** Snoozes an expected occurrence ahead of time. */
+export const snoozeExpected = (reminderId: string, scheduledAt: number, until: number) =>
+  invoke<void>("snooze_expected", { reminderId, scheduledAt, until });
+
+export type SnoozeKind = "interval" | "hour" | "tomorrow_morning";
+/** One of the menu's timed choices. */
+export interface SnoozeOption {
+  kind: SnoozeKind;
+  /** When it ends, in unix seconds. */
+  until: number;
+  /** The length of an interval or an hour, in seconds. */
+  seconds: number | null;
+  /** A last-chance alert would come inside it, before the expiry. */
+  last_chance: boolean;
+}
+/** What the snooze menu shows. */
+export interface SnoozePicker {
+  options: SnoozeOption[];
+  /** "Expires at 23:59", if the occurrence has a known expiry. */
+  expires_at: number | null;
+  /** When the last-chance alert comes before it. */
+  last_chance_at: number | null;
+  /** An expected occurrence: the choices count from `from`, when it fires. */
+  ahead: boolean;
+  from: number;
+}
+export const snoozePicker = (occurrenceId: string) =>
+  invoke<SnoozePicker>("snooze_picker", { occurrenceId });
+export const snoozePickerExpected = (reminderId: string, scheduledAt: number) =>
+  invoke<SnoozePicker>("snooze_picker_expected", { reminderId, scheduledAt });
+
+/** One snooze in the history: what it was set to end on and how it ended. */
+export interface SnoozeView {
+  occurrence_id: string;
+  set_at: number;
+  until: number;
+  ahead: boolean;
+  ended_at: number | null;
+  ended: "elapsed" | "replaced" | "closed" | null;
+}
+export const snoozeHistory = (occurrenceId: string) =>
+  invoke<SnoozeView[]>("snooze_history", { occurrenceId });
 
 /** What the alarm window shows. */
 export interface OccurrenceView {
@@ -195,6 +246,7 @@ export interface OccurrenceView {
   overdue_at: number;
   snoozed_until: number | null;
   acknowledged_at: number | null;
+  expires_at: number | null;
 }
 /** Null once the occurrence has closed. */
 export const alarmView = (occurrenceId: string) =>

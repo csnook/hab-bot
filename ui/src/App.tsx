@@ -30,6 +30,7 @@ import {
 } from "./countdown";
 import { DAYS, patternFor, REPEATS, type Repeat } from "./repeat";
 import { Settings } from "./Settings";
+import { SnoozeMenu } from "./SnoozeMenu";
 import { FirstStart } from "./FirstStart";
 
 /** The first start asks how to use this device, then the app opens. */
@@ -193,7 +194,7 @@ function Inbox() {
         {sections.overdue.length === 0 && <p class="empty">Nothing overdue.</p>}
         <ul>
           {sections.overdue.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} opened={opened === d.occurrence_id} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} />
           ))}
         </ul>
       </section>
@@ -203,7 +204,7 @@ function Inbox() {
         {sections.due.length === 0 && <p class="empty">Nothing due.</p>}
         <ul>
           {sections.due.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} opened={opened === d.occurrence_id} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} />
           ))}
         </ul>
       </section>
@@ -216,6 +217,14 @@ function Inbox() {
             <li key={`${e.reminder_id}@${e.scheduled_at}`}>
               <span class="title">{e.title}</span>
               <span class="when">{formatTime(e.scheduled_at)}</span>
+              {e.snoozed_until !== null && (
+                <span class="snoozed">snoozed until {formatTime(e.snoozed_until)}</span>
+              )}
+              <SnoozeMenu
+                target={{ reminderId: e.reminder_id, scheduledAt: e.scheduled_at }}
+                label="Snooze ahead"
+                onError={setError}
+              />
             </li>
           ))}
         </ul>
@@ -289,11 +298,13 @@ function OpenItem({
   item: d,
   done,
   skip,
+  onError,
   opened,
 }: {
   item: DueItem;
   done: (id: string, doneAt?: number) => void;
   skip: (id: string) => void;
+  onError: (message: string) => void;
   opened: boolean;
 }) {
   const row = useRef<HTMLLIElement>(null);
@@ -309,6 +320,9 @@ function OpenItem({
       <span class="priority">{d.priority}</span>
       {d.not_sent && <NotSent />}
       <span class="when">{formatTime(d.scheduled_at)}</span>
+      {d.snoozed_until !== null && d.snoozed_until * 1000 > Date.now() && (
+        <span class="snoozed">snoozed until {formatTime(d.snoozed_until)}</span>
+      )}
       <input
         type="datetime-local"
         aria-label="Done at (if earlier than now)"
@@ -323,6 +337,7 @@ function OpenItem({
       >
         Done
       </button>
+      <SnoozeMenu target={{ occurrenceId: d.occurrence_id }} onError={onError} />
       <button onClick={() => skip(d.occurrence_id)}>Skip</button>
     </li>
   );

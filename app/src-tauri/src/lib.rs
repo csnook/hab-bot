@@ -301,24 +301,81 @@ fn acknowledge_occurrence(
     Ok(())
 }
 
-/// Snoozes for `minutes`, or, with none, for the priority's snooze length.
+/// Snoozes until `until` (unix seconds) or for `minutes`, or, with neither,
+/// for the priority's snooze length.
 #[tauri::command]
 fn snooze_occurrence(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     occurrence_id: String,
     minutes: Option<i64>,
+    until: Option<i64>,
 ) -> Result<(), String> {
     {
         let mut core = app.core.lock().unwrap();
-        let result = match minutes {
-            Some(m) if m > 0 => core.snooze(&occurrence_id, now() + m * 60, now()),
-            _ => core.snooze_for_interval(&occurrence_id, now()).map(|_| ()),
+        let now = now();
+        let result = match (until, minutes) {
+            (Some(u), _) => core.snooze(&occurrence_id, u, now),
+            (None, Some(m)) if m > 0 => core.snooze(&occurrence_id, now + m * 60, now),
+            _ => core.snooze_for_interval(&occurrence_id, now).map(|_| ()),
         };
         result.map_err(|e| e.to_string())?;
     }
     changed(&app, &handle);
     Ok(())
+}
+
+/// Snoozes an expected occurrence ahead of time: it still fires at its time,
+/// quietly, and alerts when the snooze ends.
+#[tauri::command]
+fn snooze_expected(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    scheduled_at: i64,
+    until: i64,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .snooze_expected(&reminder_id, scheduled_at, until, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// The snooze menu for an open occurrence.
+#[tauri::command]
+fn snooze_picker(
+    app: tauri::State<'_, App>,
+    occurrence_id: String,
+) -> Result<hab_core::SnoozePicker, String> {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.snooze_picker(&occurrence_id, now())
+        .map_err(|e| e.to_string())
+}
+
+/// The snooze menu for an expected occurrence (snooze ahead).
+#[tauri::command]
+fn snooze_picker_expected(
+    app: tauri::State<'_, App>,
+    reminder_id: String,
+    scheduled_at: i64,
+) -> Result<hab_core::SnoozePicker, String> {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.snooze_picker_expected(&reminder_id, scheduled_at, now())
+        .map_err(|e| e.to_string())
+}
+
+/// Every snooze of an occurrence: what it was set to end on and how it ended.
+#[tauri::command]
+fn snooze_history(app: tauri::State<'_, App>, occurrence_id: String) -> Vec<hab_core::SnoozeView> {
+    app.core
+        .lock()
+        .unwrap()
+        .snooze_history(&occurrence_id, now())
 }
 
 /// What the alarm window shows; `None` once the occurrence has closed.
@@ -1063,6 +1120,10 @@ pub fn run() {
             skip_occurrence,
             acknowledge_occurrence,
             snooze_occurrence,
+            snooze_expected,
+            snooze_picker,
+            snooze_picker_expected,
+            snooze_history,
             alarm_view,
             setup_state,
             choose_standalone,

@@ -9,6 +9,7 @@ import {
   type OccurrenceView,
 } from "./api";
 import { dueLine, ringingHeading, SNOOZE_MINUTES } from "./alarm";
+import { expiryNote, expiryWarning, nextTimeOfDay, clock } from "./snooze";
 
 /** The alarm window: what is ringing, with a large Done. Closing the window
  * silences the alarm; the Rust side closes it when the occurrence is acted on. */
@@ -18,6 +19,7 @@ export function AlarmWindow({ occurrenceId }: { occurrenceId: string }) {
   const [skipping, setSkipping] = useState(false);
   const [note, setNote] = useState("");
   const [snoozing, setSnoozing] = useState(false);
+  const [until, setUntil] = useState("");
 
   useEffect(() => {
     const load = () => alarmView(occurrenceId).then(setView).catch((e) => setError(String(e)));
@@ -65,6 +67,25 @@ export function AlarmWindow({ occurrenceId }: { occurrenceId: string }) {
           ))}
         </div>
       )}
+      {snoozing && (
+        <form
+          class="alarm-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const t = nextTimeOfDay(until, Math.floor(Date.now() / 1000));
+            if (t !== null) act(() => snoozeOccurrence(occurrenceId, undefined, t));
+          }}
+        >
+          <label>
+            Until…
+            <input type="time" value={until} onInput={(e) => setUntil((e.target as HTMLInputElement).value)} />
+          </label>
+          <button type="submit" disabled={nextTimeOfDay(until, Math.floor(Date.now() / 1000)) === null}>
+            Snooze until {until || "…"}
+          </button>
+        </form>
+      )}
+      {snoozing && <ExpiryNote expiresAt={view.expires_at} until={until} />}
       {skipping && (
         <form
           onSubmit={(e) => {
@@ -81,4 +102,14 @@ export function AlarmWindow({ occurrenceId }: { occurrenceId: string }) {
       )}
     </main>
   );
+}
+
+/** "Expires at 23:59" for what is ringing, and what the chosen time does about it. */
+function ExpiryNote({ expiresAt, until }: { expiresAt: number | null; until: string }) {
+  const now = Math.floor(Date.now() / 1000);
+  const chosen = nextTimeOfDay(until, now);
+  const warning = chosen === null ? null : expiryWarning(expiresAt, now, chosen);
+  const note = expiryNote(expiresAt);
+  if (!note) return null;
+  return <p class="expiry">{warning ?? note}{chosen !== null && !warning ? ` (until ${clock(chosen)})` : ""}</p>;
 }

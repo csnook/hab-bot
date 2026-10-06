@@ -127,6 +127,28 @@ pub fn day_bounds(zone: &TimeZone, at: i64) -> (i64, i64) {
     (start, next)
 }
 
+/// The instant of `hour`:00 on the day after the one `at` falls in, in `zone`.
+pub fn tomorrow_at(zone: &TimeZone, at: i64, hour: i8) -> Option<i64> {
+    let ts = Timestamp::from_second(at).ok()?;
+    let tomorrow = zone
+        .to_datetime(ts)
+        .date()
+        .checked_add(Span::new().days(1))
+        .ok()?;
+    to_instant(zone, tomorrow.at(hour, 0, 0, 0))
+}
+
+/// The time of day `at` is in `zone`, as "23:59".
+pub fn clock_time(zone: &TimeZone, at: i64) -> String {
+    match Timestamp::from_second(at) {
+        Ok(ts) => {
+            let t = zone.to_datetime(ts).time();
+            format!("{:02}:{:02}", t.hour(), t.minute())
+        }
+        Err(_) => String::new(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Freq {
     Daily,

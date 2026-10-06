@@ -8,6 +8,19 @@ use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
+/// How long before a known expiry the last-chance alert comes: 10 minutes.
+pub const LAST_CHANCE_LEAD: i64 = 600;
+
+/// When the last-chance alert comes for a snooze made at `set_at` (`None`
+/// if unknown) to end at `until`, for an occurrence that expires at
+/// `expires_at`: 10 minutes before the expiry, if that moment falls inside
+/// the snooze. A snooze made after that moment has no last-chance alert, the
+/// picker having shown the expiry; the snooze then holds as chosen.
+pub fn last_chance_at(expires_at: i64, set_at: Option<i64>, until: i64) -> Option<i64> {
+    let at = expires_at.saturating_sub(LAST_CHANCE_LEAD);
+    (until > at && set_at.is_none_or(|s| s < at)).then_some(at)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reminder {
     pub id: String,
@@ -108,6 +121,8 @@ pub struct Occurrence {
     pub closing: Option<Closing>,
     /// Alerts are quiet until then. Closing the occurrence ends a snooze.
     pub snoozed_until: Option<i64>,
+    /// When that snooze was made: the time recorded on its event.
+    pub snoozed_at: Option<i64>,
     /// The current alert was silenced. Closing the occurrence ends it.
     pub acknowledged: bool,
     /// When it was last acknowledged: the time recorded on the
@@ -140,12 +155,17 @@ pub struct DueItem {
     /// A change to it hasn't been received by the server yet.
     pub not_sent: bool,
     pub snoozed_until: Option<i64>,
+    /// When that snooze was made.
+    pub snoozed_at: Option<i64>,
     pub acknowledged: bool,
     /// When it was last acknowledged, for the quiet period that follows.
     pub acknowledged_at: Option<i64>,
     pub priority: Priority,
     /// When it goes (or went) overdue, counted from `scheduled_at`.
     pub overdue_at: i64,
+    /// When it is missed for want of action, if the reminder has such an
+    /// expiry, counted from `scheduled_at`.
+    pub expires_at: Option<i64>,
 }
 
 /// A reminder that has not fired yet.
@@ -156,6 +176,50 @@ pub struct UpcomingItem {
     pub fire_at: i64,
     /// A change to it hasn't been received by the server yet.
     pub not_sent: bool,
+}
+
+/// How a snooze actually ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnoozeEnd {
+    /// Its time came and alerts resumed.
+    Elapsed,
+    /// Another snooze took its place.
+    Replaced,
+    /// The occurrence was closed first.
+    Closed,
+}
+
+/// One snooze, in the history: what it was set to end on and, once it has,
+/// how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnoozeRecord {
+    pub event_id: String,
+    pub occurrence_id: String,
+    /// The user who snoozed.
+    pub user: String,
+    /// The device that did, as it appears on its events.
+    pub device_id: String,
+    pub set_at: i64,
+    /// What it was set to end on.
+    pub until: i64,
+    /// Made before the occurrence opened.
+    pub ahead: bool,
+    /// How and when it was cut short: replaced or closed over. A snooze that
+    /// simply runs out has no entry here; see [`State::snoozes_of`].
+    pub ended: Option<(i64, SnoozeEnd)>,
+}
+
+/// A snooze as the history shows it at a given moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnoozeView {
+    pub occurrence_id: String,
+    pub set_at: i64,
+    pub until: i64,
+    pub ahead: bool,
+    /// `None` while it still holds.
+    pub ended_at: Option<i64>,
+    pub ended: Option<SnoozeEnd>,
 }
 
 /// A device that signed in to the account, as announced in the personal list.
@@ -228,6 +292,9 @@ pub struct State {
     /// Alerts, in stream order: the first and each change of style, per user
     /// and device. Repeats aren't recorded.
     pub alerts: Vec<AlertRecord>,
+    /// Every snooze, in stream order, each with what it was set to end on and
+    /// how it ended. There is no limit on repeated snoozes.
+    pub snoozes: Vec<SnoozeRecord>,
     /// Every value each reminder setting has had.
     versions: BTreeMap<(String, Setting), Vec<SettingVersion>>,
     /// Occurrences opened for a reminder that already had one (it fired on
@@ -263,6 +330,14 @@ impl State {
                 | Event::OccurrenceAcknowledged { occurrence_id } => {
                     let id = self.resolve(occurrence_id).to_string();
                     self.unsent_occurrences.insert(id);
+                }
+                Event::ExpectedOccurrenceSnoozed {
+                    reminder_id,
+                    scheduled_at,
+                    ..
+                } => {
+                    self.unsent_occurrences
+                        .insert(format!("{reminder_id}@{scheduled_at}"));
                 }
                 // An alert is history only: it isn't a change the user waits on.
                 Event::OccurrenceAlerted { .. }
@@ -424,10 +499,24 @@ impl State {
                         fired_at: *fired_at,
                         closing: None,
                         snoozed_until: None,
+                        snoozed_at: None,
                         acknowledged: false,
                         acknowledged_at: None,
                     },
                 );
+                // Snoozed ahead of time: it opens quietly.
+                let ahead = self
+                    .snoozes
+                    .iter()
+                    .rev()
+                    .find(|s| &s.occurrence_id == occurrence_id && s.ended.is_none())
+                    .map(|s| (s.until, s.set_at));
+                if let (Some((until, at)), Some(o)) =
+                    (ahead, self.occurrences.get_mut(occurrence_id))
+                {
+                    o.snoozed_until = Some(until);
+                    o.snoozed_at = Some(at);
+                }
                 if !one_off {
                     self.expire_superseded(reminder_id);
                 }
@@ -460,12 +549,17 @@ impl State {
             Event::OccurrenceSnoozed {
                 occurrence_id,
                 until,
-            } => {
-                // Closing beats snoozing, whichever arrives first.
-                if let Some(o) = self.open_occurrence_mut(occurrence_id) {
-                    o.snoozed_until = Some(*until);
-                }
-            }
+            } => self.snooze(occurrence_id, *until, false, stored),
+            Event::ExpectedOccurrenceSnoozed {
+                reminder_id,
+                scheduled_at,
+                until,
+            } => self.snooze(
+                &format!("{reminder_id}@{scheduled_at}"),
+                *until,
+                true,
+                stored,
+            ),
             Event::OccurrenceAcknowledged { occurrence_id } => {
                 if let Some(o) = self.open_occurrence_mut(occurrence_id) {
                     o.acknowledged = true;
@@ -509,6 +603,93 @@ impl State {
                 });
             }
         }
+    }
+
+    /// Records a snooze and, if the occurrence is open, applies it. Closing
+    /// beats snoozing, whichever arrives first. An occurrence that doesn't
+    /// exist yet takes a snooze made ahead of time when it opens; any other
+    /// snooze of an unknown occurrence is ignored.
+    fn snooze(&mut self, occurrence_id: &str, until: i64, ahead: bool, stored: &StoredEvent) {
+        let id = self.resolve(occurrence_id).to_string();
+        if self.snoozes.iter().any(|s| s.event_id == stored.event_id) {
+            return;
+        }
+        let set_at = stored.recorded_at;
+        let mut ended = None;
+        match self.occurrences.get_mut(&id) {
+            Some(o) => match &o.closing {
+                Some(c) => ended = Some((c.at, SnoozeEnd::Closed)),
+                None => {
+                    o.snoozed_until = Some(until);
+                    o.snoozed_at = Some(set_at);
+                }
+            },
+            None if ahead => {}
+            None => return,
+        }
+        if ended.is_none() {
+            // Another snooze takes the place of the one holding.
+            for s in &mut self.snoozes {
+                if s.occurrence_id == id && s.ended.is_none() {
+                    s.ended = Some((set_at, SnoozeEnd::Replaced));
+                }
+            }
+        }
+        self.snoozes.push(SnoozeRecord {
+            event_id: stored.event_id.clone(),
+            occurrence_id: id,
+            user: stored.author.clone(),
+            device_id: stored.device_id.clone(),
+            set_at,
+            until,
+            ahead,
+            ended,
+        });
+    }
+
+    /// Ends the snoozes holding on an occurrence that closed at `at`.
+    fn end_snoozes(&mut self, occurrence_id: &str, at: i64) {
+        for s in &mut self.snoozes {
+            if s.occurrence_id == occurrence_id && s.ended.is_none() {
+                s.ended = Some((at, SnoozeEnd::Closed));
+            }
+        }
+    }
+
+    /// The occurrence's snoozes, oldest first, as they stand at `now`: one
+    /// whose time has come without being replaced or closed over has ended
+    /// by elapsing, at that time.
+    pub fn snoozes_of(&self, occurrence_id: &str, now: i64) -> Vec<SnoozeView> {
+        let id = self.resolve(occurrence_id);
+        self.snoozes
+            .iter()
+            .filter(|s| s.occurrence_id == id)
+            .map(|s| {
+                let (ended_at, ended) = match s.ended {
+                    Some((at, how)) => (Some(at), Some(how)),
+                    None if s.until <= now => (Some(s.until), Some(SnoozeEnd::Elapsed)),
+                    None => (None, None),
+                };
+                SnoozeView {
+                    occurrence_id: s.occurrence_id.clone(),
+                    set_at: s.set_at,
+                    until: s.until,
+                    ahead: s.ahead,
+                    ended_at,
+                    ended,
+                }
+            })
+            .collect()
+    }
+
+    /// Until when an expected occurrence has been snoozed ahead of time.
+    pub fn expected_snooze(&self, reminder_id: &str, scheduled_at: i64) -> Option<i64> {
+        let id = format!("{reminder_id}@{scheduled_at}");
+        self.snoozes
+            .iter()
+            .rev()
+            .find(|s| s.occurrence_id == id && s.ended.is_none())
+            .map(|s| s.until)
     }
 
     /// The style `device_id` last recorded an alert in for the occurrence.
@@ -561,9 +742,11 @@ impl State {
         let (winner, loser) = match o.closing.take() {
             None => {
                 o.snoozed_until = None;
+                o.snoozed_at = None;
                 o.acknowledged = false;
                 o.acknowledged_at = None;
                 o.closing = Some(new);
+                self.end_snoozes(&id, at);
                 return;
             }
             Some(old) if old.kind == new.kind => {
@@ -602,9 +785,12 @@ impl State {
         else {
             return;
         };
+        let mut ended = Vec::new();
         for o in self.occurrences.values_mut() {
             if o.reminder_id == reminder_id && o.id != newest.1 && o.closing.is_none() {
+                ended.push((o.id.clone(), newest.0.max(o.scheduled_at)));
                 o.snoozed_until = None;
+                o.snoozed_at = None;
                 o.acknowledged = false;
                 o.acknowledged_at = None;
                 o.closing = Some(Closing {
@@ -616,6 +802,9 @@ impl State {
                     event_id: format!("expired:{}", o.id),
                 });
             }
+        }
+        for (id, at) in ended {
+            self.end_snoozes(&id, at);
         }
     }
 
@@ -772,10 +961,12 @@ impl State {
                     not_sent: self.unsent_occurrences.contains(&o.id)
                         || self.unsent_reminders.contains(&r.id),
                     snoozed_until: o.snoozed_until,
+                    snoozed_at: o.snoozed_at,
                     acknowledged: o.acknowledged,
                     acknowledged_at: o.acknowledged_at,
                     priority: r.priority,
                     overdue_at: r.overdue_at(o.scheduled_at),
+                    expires_at: r.expires_at(o.scheduled_at),
                 })
             })
             .collect();
