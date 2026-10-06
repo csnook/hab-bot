@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::countdown::Countdown;
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -30,6 +31,16 @@ pub enum Event {
         title: String,
         schedules: Vec<Schedule>,
         zone: Option<String>,
+    },
+    /// A countdown reminder was created: it fires `countdown` after its last
+    /// occurrence closed. `last_done` is when it was last done, which starts
+    /// the first countdown; `None` ("never") makes it fire at once. Format 5.
+    CountdownReminderCreated {
+        reminder_id: String,
+        title: String,
+        countdown: Countdown,
+        zone: Option<String>,
+        last_done: Option<i64>,
     },
     /// A reminder fired: an occurrence is open. Its id is the reminder plus
     /// the scheduled time, so firings on several devices merge.
@@ -110,6 +121,8 @@ pub enum Setting {
     /// How long after its scheduled time an open occurrence is missed, if the
     /// reminder has such an expiry.
     Expiry,
+    /// The countdown trigger of a countdown reminder.
+    Countdown,
 }
 
 /// A new value for one setting.
@@ -127,6 +140,7 @@ pub enum Change {
     Overdue(Option<i64>),
     /// Seconds after the scheduled time. `None` is no delay-based expiry.
     Expiry(Option<i64>),
+    Countdown(Countdown),
 }
 
 impl Change {
@@ -140,6 +154,7 @@ impl Change {
             Change::Priority(_) => Setting::Priority,
             Change::Overdue(_) => Setting::Overdue,
             Change::Expiry(_) => Setting::Expiry,
+            Change::Countdown(_) => Setting::Countdown,
         }
     }
 }
@@ -161,6 +176,12 @@ impl Event {
             } => 3,
             // Alerts arrived in format 4.
             Event::OccurrenceAlerted { .. } => 4,
+            // Countdowns arrived in format 5.
+            Event::CountdownReminderCreated { .. }
+            | Event::ReminderEdited {
+                change: Change::Countdown(_),
+                ..
+            } => 5,
             _ => 1,
         }
     }

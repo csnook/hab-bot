@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::countdown::Countdown;
 use crate::event::{Change, Event, Setting, StoredEvent};
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
@@ -33,6 +34,12 @@ pub struct Reminder {
     /// Seconds after the scheduled time that an open occurrence is missed.
     /// Firing again always expires it too (ADR 0001).
     pub expiry_after: Option<i64>,
+    /// What fires it, if it is a countdown: a set time after its last
+    /// occurrence closed. A countdown reminder has no schedules.
+    pub countdown: Option<Countdown>,
+    /// When it was last done, as given when the countdown reminder was made,
+    /// which starts its first countdown. `None` is "never": it fires at once.
+    pub countdown_from: Option<i64>,
 }
 
 impl Reminder {
@@ -54,8 +61,17 @@ impl Reminder {
         self.expiry_after.map(|d| scheduled_at.saturating_add(d))
     }
 
+    /// Fires again and again, on schedules or a countdown.
     pub fn repeats(&self) -> bool {
+        self.has_schedules() || self.counts_down()
+    }
+
+    pub fn has_schedules(&self) -> bool {
         !self.schedules.is_empty()
+    }
+
+    pub fn counts_down(&self) -> bool {
+        self.countdown.is_some()
     }
 }
 
@@ -235,6 +251,7 @@ impl State {
             match &stored.event {
                 Event::ReminderCreated { reminder_id, .. }
                 | Event::RecurringReminderCreated { reminder_id, .. }
+                | Event::CountdownReminderCreated { reminder_id, .. }
                 | Event::ReminderEdited { reminder_id, .. } => {
                     self.unsent_reminders.insert(reminder_id.clone());
                 }
@@ -282,6 +299,8 @@ impl State {
                             priority: Priority::default(),
                             overdue_override: None,
                             expiry_after: None,
+                            countdown: None,
+                            countdown_from: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -316,6 +335,45 @@ impl State {
                             priority: Priority::default(),
                             overdue_override: None,
                             expiry_after: None,
+                            countdown: None,
+                            countdown_from: None,
+                        },
+                    );
+                    self.refresh(reminder_id);
+                }
+            }
+            Event::CountdownReminderCreated {
+                reminder_id,
+                title,
+                countdown,
+                zone,
+                last_done,
+            } => {
+                if !self.reminders.contains_key(reminder_id) {
+                    for change in [
+                        Change::Title(title.clone()),
+                        Change::Countdown(countdown.clone()),
+                        Change::Zone(zone.clone()),
+                    ] {
+                        self.add_version(reminder_id, Hlc::default(), change, stored);
+                    }
+                    self.reminders.insert(
+                        reminder_id.clone(),
+                        Reminder {
+                            id: reminder_id.clone(),
+                            list_id: stored.list_id.clone(),
+                            title: title.clone(),
+                            fire_at: 0,
+                            note: String::new(),
+                            schedules: Vec::new(),
+                            zone: zone.clone(),
+                            created_at: stored.recorded_at,
+                            active_from: stored.recorded_at,
+                            priority: Priority::default(),
+                            overdue_override: None,
+                            expiry_after: None,
+                            countdown: Some(countdown.clone()),
+                            countdown_from: *last_done,
                         },
                     );
                     self.refresh(reminder_id);
@@ -561,6 +619,14 @@ impl State {
         }
     }
 
+    /// The reminder's latest occurrence: the one a countdown restarts from.
+    pub fn latest_occurrence(&self, reminder_id: &str) -> Option<&Occurrence> {
+        self.occurrences
+            .values()
+            .filter(|o| o.reminder_id == reminder_id)
+            .max_by(|a, b| (a.scheduled_at, &a.id).cmp(&(b.scheduled_at, &b.id)))
+    }
+
     /// The scheduled time of the reminder's latest occurrence.
     pub fn last_scheduled(&self, reminder_id: &str) -> Option<i64> {
         self.occurrences
@@ -607,6 +673,7 @@ impl State {
             Setting::Priority,
             Setting::Overdue,
             Setting::Expiry,
+            Setting::Countdown,
         ] {
             let latest = self
                 .versions
@@ -630,6 +697,7 @@ impl State {
                 Some(Change::Priority(p)) => r.priority = p,
                 Some(Change::Overdue(o)) => r.overdue_override = o,
                 Some(Change::Expiry(e)) => r.expiry_after = e,
+                Some(Change::Countdown(c)) => r.countdown = Some(c),
                 None => {}
             }
         }

@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
+  completeCountdown,
   completeOccurrence,
+  createCountdownReminder,
+  skipCountdown,
+  type CountdownUnit,
   type DueItem,
   type PriorityName,
   createRecurringReminder,
@@ -16,6 +20,14 @@ import {
 } from "./api";
 import { formatTime, signInNoticeText, toUnixSeconds } from "./time";
 import { setupState, type Setup } from "./api";
+import {
+  countdownFor,
+  describeCountdown,
+  hasTimeOfDay,
+  lastDoneSeconds,
+  type LastDone,
+  UNITS,
+} from "./countdown";
 import { DAYS, patternFor, REPEATS, type Repeat } from "./repeat";
 import { Settings } from "./Settings";
 import { FirstStart } from "./FirstStart";
@@ -129,6 +141,7 @@ function Inbox() {
   const [snap, setSnap] = useState<Snapshot>({
     due: [],
     upcoming: [],
+    countdowns: [],
     sign_in_notices: [],
     reconciliations: [],
     security_notices: [],
@@ -164,8 +177,8 @@ function Inbox() {
     };
   }, []);
 
-  const done = (id: string) =>
-    completeOccurrence(id).catch((e) => setError(String(e)));
+  const done = (id: string, doneAt?: number) =>
+    completeOccurrence(id, doneAt).catch((e) => setError(String(e)));
   const skip = (id: string) =>
     skipOccurrence(id).catch((e) => setError(String(e)));
 
@@ -237,6 +250,36 @@ function Inbox() {
         </ul>
       </section>
 
+      <section aria-labelledby="counting-down">
+        <h2 id="counting-down">Counting down</h2>
+        {snap.countdowns.length === 0 && <p class="empty">No countdowns.</p>}
+        <ul>
+          {snap.countdowns.map((c) => (
+            <li key={c.reminder_id}>
+              <span class="title">{c.title}</span>
+              <span class="priority">{describeCountdown(c.countdown)}</span>
+              <span class="when">
+                {c.next_at === null ? "waiting for you" : formatTime(c.next_at)}
+              </span>
+              {c.next_at !== null && (
+                <>
+                  <button
+                    onClick={() => completeCountdown(c.reminder_id).catch((e) => setError(String(e)))}
+                  >
+                    Done now
+                  </button>
+                  <button
+                    onClick={() => skipCountdown(c.reminder_id).catch((e) => setError(String(e)))}
+                  >
+                    Skip
+                  </button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
+
       <NewReminder onError={setError} />
     </main>
   );
@@ -249,11 +292,13 @@ function OpenItem({
   opened,
 }: {
   item: DueItem;
-  done: (id: string) => void;
+  done: (id: string, doneAt?: number) => void;
   skip: (id: string) => void;
   opened: boolean;
 }) {
   const row = useRef<HTMLLIElement>(null);
+  // When it was really done, if earlier than now: a countdown restarts from it.
+  const [doneAt, setDoneAt] = useState("");
   // A clicked notification brings its occurrence into view.
   useEffect(() => {
     if (opened) row.current?.scrollIntoView?.({ block: "center" });
@@ -264,7 +309,20 @@ function OpenItem({
       <span class="priority">{d.priority}</span>
       {d.not_sent && <NotSent />}
       <span class="when">{formatTime(d.scheduled_at)}</span>
-      <button onClick={() => done(d.occurrence_id)}>Done</button>
+      <input
+        type="datetime-local"
+        aria-label="Done at (if earlier than now)"
+        value={doneAt}
+        onInput={(e) => setDoneAt(e.currentTarget.value)}
+      />
+      <button
+        onClick={() => {
+          const t = doneAt ? Math.floor(new Date(doneAt).getTime() / 1000) : undefined;
+          done(d.occurrence_id, t !== undefined && !Number.isNaN(t) ? t : undefined);
+        }}
+      >
+        Done
+      </button>
       <button onClick={() => skip(d.occurrence_id)}>Skip</button>
     </li>
   );
@@ -292,9 +350,32 @@ function NewReminder({ onError }: { onError: (e: string) => void }) {
   // Floating (the same local time wherever the device is) unless pinned.
   const [pinned, setPinned] = useState(false);
   const [priority, setPriority] = useState<PriorityName>("medium");
+  // A countdown: how long after it was last done, and when that was.
+  const [amount, setAmount] = useState(3);
+  const [unit, setUnit] = useState<CountdownUnit>("days");
+  const [timeOfDay, setTimeOfDay] = useState("");
+  const [lastDone, setLastDone] = useState<LastDone>("now");
+  const [lastDoneAt, setLastDoneAt] = useState("");
+  const counting = repeat === "countdown";
 
   const submit = async (e: Event) => {
     e.preventDefault();
+    if (counting) {
+      const countdown = countdownFor(amount, unit, timeOfDay);
+      if (!countdown.ok) return onError(countdown.error);
+      const done = lastDoneSeconds(lastDone, Math.floor(Date.now() / 1000), lastDoneAt);
+      if (!done.ok) return onError(done.error);
+      // Elapsed countdowns have no zone; a time of day is pinned or floating.
+      const zone = pinned && countdown.value.at ? Intl.DateTimeFormat().resolvedOptions().timeZone : null;
+      try {
+        await createCountdownReminder(title, countdown.value, done.value, zone, priority);
+        setTitle("");
+        onError("");
+      } catch (err) {
+        onError(String(err));
+      }
+      return;
+    }
     const fireAt = toUnixSeconds(date, time);
     if (fireAt === null) return onError("Pick a date and time.");
     try {
@@ -320,14 +401,18 @@ function NewReminder({ onError }: { onError: (e: string) => void }) {
         Title
         <input value={title} onInput={(e) => setTitle(e.currentTarget.value)} required />
       </label>
-      <label>
-        Date
-        <input type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} required />
-      </label>
-      <label>
-        Time
-        <input type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} required />
-      </label>
+      {!counting && (
+        <>
+          <label>
+            Date
+            <input type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} required />
+          </label>
+          <label>
+            Time
+            <input type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} required />
+          </label>
+        </>
+      )}
       <label>
         Priority
         <select
@@ -364,7 +449,59 @@ function NewReminder({ onError }: { onError: (e: string) => void }) {
           ))}
         </fieldset>
       )}
-      {repeat !== "once" && (
+      {counting && (
+        <>
+          <label>
+            Fires after
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={amount}
+              onInput={(e) => setAmount(Number(e.currentTarget.value))}
+            />
+          </label>
+          <label>
+            Unit
+            <select value={unit} onChange={(e) => setUnit(e.currentTarget.value as CountdownUnit)}>
+              {UNITS.map(([value, label]) => (
+                <option value={value} key={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          {hasTimeOfDay(unit) && (
+            <label>
+              At this time of day (or leave empty to keep the time it was done)
+              <input type="time" value={timeOfDay} onInput={(e) => setTimeOfDay(e.currentTarget.value)} />
+            </label>
+          )}
+          <fieldset>
+            <legend>When was this last done?</legend>
+            {([["now", "Just now"], ["never", "Never (fire at once)"], ["at", "At…"]] as Array<[LastDone, string]>).map(
+              ([value, label]) => (
+                <label key={value}>
+                  <input
+                    type="radio"
+                    name="last-done"
+                    checked={lastDone === value}
+                    onChange={() => setLastDone(value)}
+                  />
+                  {label}
+                </label>
+              ),
+            )}
+            {lastDone === "at" && (
+              <input
+                type="datetime-local"
+                aria-label="Last done at"
+                value={lastDoneAt}
+                onInput={(e) => setLastDoneAt(e.currentTarget.value)}
+              />
+            )}
+          </fieldset>
+        </>
+      )}
+      {(counting ? hasTimeOfDay(unit) && timeOfDay !== "" : repeat !== "once") && (
         <label>
           <input
             type="checkbox"

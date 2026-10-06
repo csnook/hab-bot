@@ -313,7 +313,7 @@ fn alert_events_need_a_reader_of_format_4() {
         style: AlertStyle::Gentle,
     };
     assert_eq!(e.format(), 4);
-    assert_eq!(hab_core::FORMAT_VERSION, 4);
+    assert_eq!(hab_core::FORMAT_VERSION, 5);
 }
 
 // --- The alarm (#42) ---
@@ -540,7 +540,7 @@ fn acknowledgements_are_recorded_with_who_and_when_and_need_no_new_format() {
         ("u1", T0 + 5)
     );
     assert_eq!(ack.format, 1, "no new format: the time is the event's own");
-    assert_eq!(hab_core::FORMAT_VERSION, 4);
+    assert_eq!(hab_core::FORMAT_VERSION, 5);
 }
 
 #[test]

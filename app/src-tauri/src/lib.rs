@@ -168,6 +168,71 @@ fn create_recurring_reminder(
     Ok(())
 }
 
+/// A reminder that fires a set time after its last occurrence closed.
+/// `last_done` is when it was last done in Unix seconds (the window sends now
+/// by default); none means never, and it fires at once. `at` is a time of day
+/// for countdowns of days or weeks.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_countdown_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    title: String,
+    amount: u32,
+    unit: hab_core::CountdownUnit,
+    at: Option<String>,
+    last_done: Option<i64>,
+    zone: Option<String>,
+    priority: Option<hab_core::Priority>,
+) -> Result<(), String> {
+    {
+        let mut core = app.core.lock().unwrap();
+        let _ = core.use_system_zone();
+        let countdown = hab_core::Countdown { amount, unit, at };
+        let id = core
+            .create_countdown_reminder(&title, countdown, zone.as_deref(), last_done, now())
+            .map_err(|e| e.to_string())?;
+        set_priority(&mut core, &id, priority)?;
+    }
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Completes a countdown reminder before it fires, as done at `done_at`
+/// (now if none): it restarts from then and the pending firing is cancelled.
+#[tauri::command]
+fn complete_countdown(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    done_at: Option<i64>,
+) -> Result<(), String> {
+    let now = now();
+    app.core
+        .lock()
+        .unwrap()
+        .complete_expected(&reminder_id, done_at.unwrap_or(now), now)
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Skips a countdown reminder's coming occurrence: it restarts from now.
+#[tauri::command]
+fn skip_countdown(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .skip_expected(&reminder_id, None, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
 /// Overdue, Due, Later today and Earlier today.
 #[tauri::command]
 fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
@@ -190,11 +255,13 @@ fn complete_occurrence(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     occurrence_id: String,
+    done_at: Option<i64>,
 ) -> Result<(), String> {
+    let now = now();
     app.core
         .lock()
         .unwrap()
-        .complete(&occurrence_id, now())
+        .complete_at(&occurrence_id, done_at.unwrap_or(now), now)
         .map_err(|e| e.to_string())?;
     changed(&app, &handle);
     Ok(())
@@ -986,6 +1053,9 @@ pub fn run() {
             snapshot,
             create_reminder,
             create_recurring_reminder,
+            create_countdown_reminder,
+            complete_countdown,
+            skip_countdown,
             priorities,
             app_version,
             inbox,

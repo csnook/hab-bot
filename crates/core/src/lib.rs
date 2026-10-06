@@ -11,6 +11,7 @@
 
 mod alerter;
 mod core;
+mod countdown;
 mod event;
 mod hlc;
 mod priority;
@@ -19,13 +20,14 @@ mod state;
 mod store;
 
 pub use crate::core::{
-    Core, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox, ListInfo,
-    OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
+    Core, CountdownItem, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox,
+    ListInfo, OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
     ACTION_DONE, ACTION_OPEN, ACTION_SKIP, ACTION_SNOOZE,
 };
+pub use countdown::{Countdown, CountdownUnit};
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
@@ -53,6 +55,12 @@ pub enum Error {
     BadSchedule(String),
     #[error("{0} is not a time zone this device knows")]
     BadZone(String),
+    #[error("the countdown can't be used: {0}")]
+    BadCountdown(String),
+    #[error("{0} is not a countdown reminder")]
+    NotCountdown(String),
+    #[error("that time hasn't come yet")]
+    InTheFuture,
     #[error("a duration can't be negative")]
     BadDuration,
     #[error("there is no reminder {0}")]

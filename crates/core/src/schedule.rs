@@ -535,7 +535,7 @@ impl Parsed {
 
 /// The instant a local time means in `zone`: the first of two, and for a time
 /// that doesn't exist the moment the clocks jump.
-fn to_instant(zone: &TimeZone, dt: DateTime) -> Option<i64> {
+pub(crate) fn to_instant(zone: &TimeZone, dt: DateTime) -> Option<i64> {
     let ambiguous = zone.to_ambiguous_timestamp(dt);
     match ambiguous.offset() {
         AmbiguousOffset::Unambiguous { .. } | AmbiguousOffset::Fold { .. } => {

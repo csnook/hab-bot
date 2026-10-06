@@ -5,6 +5,7 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::countdown::Countdown;
 use crate::event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
@@ -30,6 +31,8 @@ pub struct Snapshot {
     pub due: Vec<DueItem>,
     /// Reminders that haven't fired yet.
     pub upcoming: Vec<UpcomingItem>,
+    /// Countdown reminders and when each fires next.
+    pub countdowns: Vec<CountdownItem>,
     /// Set while the list holds changes from a newer app, which this one keeps
     /// without applying.
     pub update_notice: Option<String>,
@@ -114,6 +117,17 @@ pub struct ReconciliationNotice {
     pub text: String,
 }
 
+/// A countdown reminder, for the list of what is counting down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CountdownItem {
+    pub reminder_id: String,
+    pub title: String,
+    pub countdown: Countdown,
+    /// When it fires next. `None` while an occurrence is open: it restarts
+    /// when that closes.
+    pub next_at: Option<i64>,
+}
+
 /// New values for a reminder's settings; `None` leaves a setting alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditReminder {
@@ -132,6 +146,8 @@ pub struct EditReminder {
     /// Seconds after the scheduled time that an open occurrence is missed,
     /// or with `Some(None)` no such expiry.
     pub expiry: Option<Option<i64>>,
+    /// A new countdown, for a countdown reminder.
+    pub countdown: Option<Countdown>,
 }
 
 /// An occurrence predicted to come due: it becomes an occurrence only if the
@@ -593,6 +609,42 @@ impl Core {
         Ok(reminder_id)
     }
 
+    /// Creates a reminder in the personal list that fires `countdown` after
+    /// its last occurrence closed. `last_done` is when it was last done, which
+    /// starts the first countdown (the caller defaults it to now); `None`
+    /// means never, and it fires at once. `zone` pins a countdown with a time
+    /// of day to a time zone; `None` follows the device's.
+    pub fn create_countdown_reminder(
+        &mut self,
+        title: &str,
+        countdown: Countdown,
+        zone: Option<&str>,
+        last_done: Option<i64>,
+        now: i64,
+    ) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(Error::EmptyTitle);
+        }
+        countdown.validate().map_err(Error::BadCountdown)?;
+        check_schedules(&[], zone)?;
+        if last_done.is_some_and(|t| t > now) {
+            return Err(Error::InTheFuture);
+        }
+        let reminder_id = Uuid::new_v4().to_string();
+        self.record(
+            now,
+            Event::CountdownReminderCreated {
+                reminder_id: reminder_id.clone(),
+                title: title.to_string(),
+                countdown,
+                zone: zone.map(str::to_string),
+                last_done,
+            },
+        )?;
+        Ok(reminder_id)
+    }
+
     /// The time zone floating reminders follow on this device. Until the app
     /// says (from the system's setting), UTC.
     pub fn device_zone(&self) -> String {
@@ -687,6 +739,7 @@ impl Core {
             });
         }
         fired.extend(self.fire_schedules(now)?);
+        fired.extend(self.fire_countdowns(now)?);
         let expired = self.expire_open(now)?;
         fired.retain(|f| !expired.contains(&f.occurrence_id));
         Ok(fired)
@@ -743,6 +796,63 @@ impl Core {
             .min()
     }
 
+    /// When a countdown reminder fires next: a set time after its latest
+    /// occurrence closed (the closing's own time, so a completion recorded as
+    /// 9:40 counts from 9:40), or after it was last done if it hasn't fired
+    /// yet, or at once if it never was. `None` while an occurrence is open,
+    /// which restarts the countdown when it closes (ADR 0001), and for a
+    /// reminder that isn't a countdown.
+    fn countdown_next(&self, state: &State, r: &Reminder) -> Option<i64> {
+        let countdown = r.countdown.as_ref()?;
+        let zone = self.zone_of(r);
+        match state.latest_occurrence(&r.id) {
+            Some(o) => {
+                let closed = o.closing.as_ref()?.at;
+                let next = countdown.next_after(&zone, closed)?;
+                // Never the id of an occurrence it already had.
+                Some(next.max(o.scheduled_at.saturating_add(1)))
+            }
+            None => match r.countdown_from {
+                Some(done) => countdown.next_after(&zone, done),
+                None => Some(r.created_at),
+            },
+        }
+    }
+
+    /// Fires the countdowns that have run out. Like a schedule it fires late
+    /// on waking, with its scheduled time unchanged so what is overdue and
+    /// what has expired count from it.
+    fn fire_countdowns(&mut self, now: i64) -> Result<Vec<Fired>> {
+        let mut due = Vec::new();
+        for (list_id, state) in self.states() {
+            for r in state.reminders.values().filter(|r| r.counts_down()) {
+                if let Some(at) = self.countdown_next(state, r).filter(|at| *at <= now) {
+                    due.push((list_id.to_string(), r.id.clone(), r.title.clone(), at));
+                }
+            }
+        }
+        let mut fired = Vec::new();
+        for (list_id, reminder_id, title, at) in due {
+            let occurrence_id = format!("{reminder_id}@{at}");
+            self.record_in(
+                &list_id,
+                now,
+                Event::OccurrenceOpened {
+                    occurrence_id: occurrence_id.clone(),
+                    reminder_id: reminder_id.clone(),
+                    scheduled_at: at,
+                    fired_at: now,
+                },
+            )?;
+            fired.push(Fired {
+                occurrence_id,
+                reminder_id,
+                title,
+            });
+        }
+        Ok(fired)
+    }
+
     /// Fires the schedules whose instants have come. A device that was off or
     /// asleep fires late, on waking: the latest instance fires, with its
     /// scheduled time unchanged so what is overdue and what has expired count
@@ -757,7 +867,7 @@ impl Core {
         }
         let mut work = Vec::new();
         for (list_id, state) in self.states() {
-            for r in state.reminders.values().filter(|r| r.repeats()) {
+            for r in state.reminders.values().filter(|r| r.has_schedules()) {
                 let after = state
                     .last_scheduled(&r.id)
                     .unwrap_or(i64::MIN)
@@ -841,16 +951,99 @@ impl Core {
     /// Completes an open occurrence, recording who and when. The one-off
     /// reminder is then finished.
     pub fn complete(&mut self, occurrence_id: &str, now: i64) -> Result<()> {
+        self.complete_at(occurrence_id, now, now)
+    }
+
+    /// Completes an open occurrence as done at `completed_at`, which may be
+    /// earlier than `now` ("I did it at 9:40"). A countdown restarts from it.
+    pub fn complete_at(&mut self, occurrence_id: &str, completed_at: i64, now: i64) -> Result<()> {
+        if completed_at > now {
+            return Err(Error::InTheFuture);
+        }
         let (list_id, id) = self.open_id(occurrence_id)?;
         self.record_in(
             &list_id,
             now,
             Event::OccurrenceCompleted {
                 occurrence_id: id,
-                completed_at: now,
+                completed_at,
             },
         )?;
         Ok(())
+    }
+
+    /// Closes a countdown reminder's coming occurrence before it fires: it
+    /// is opened and closed at once, as of `closed_at`, so the countdown
+    /// restarts from there and the pending firing is cancelled, on every
+    /// device. Returns the occurrence's id.
+    fn close_expected(
+        &mut self,
+        reminder_id: &str,
+        closed_at: i64,
+        now: i64,
+        close: impl FnOnce(String) -> Event,
+    ) -> Result<String> {
+        if closed_at > now {
+            return Err(Error::InTheFuture);
+        }
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let state = self.state_of(&list_id).expect("the list is held");
+        let r = &state.reminders[reminder_id];
+        if !r.counts_down() {
+            return Err(Error::NotCountdown(reminder_id.to_string()));
+        }
+        // An open occurrence is completed or skipped as itself.
+        let scheduled_at = self
+            .countdown_next(state, r)
+            .ok_or_else(|| Error::NotCountdown(reminder_id.to_string()))?;
+        let occurrence_id = format!("{reminder_id}@{scheduled_at}");
+        self.record_in(
+            &list_id,
+            now,
+            Event::OccurrenceOpened {
+                occurrence_id: occurrence_id.clone(),
+                reminder_id: reminder_id.to_string(),
+                scheduled_at,
+                fired_at: now,
+            },
+        )?;
+        self.record_in(&list_id, now, close(occurrence_id.clone()))?;
+        Ok(occurrence_id)
+    }
+
+    /// Completes a countdown reminder ahead of time, as done at
+    /// `completed_at`: it restarts from then and the pending firing is
+    /// cancelled. If it has fired, complete the open occurrence instead.
+    pub fn complete_expected(
+        &mut self,
+        reminder_id: &str,
+        completed_at: i64,
+        now: i64,
+    ) -> Result<String> {
+        self.close_expected(reminder_id, completed_at, now, |id| {
+            Event::OccurrenceCompleted {
+                occurrence_id: id,
+                completed_at,
+            }
+        })
+    }
+
+    /// Skips a countdown reminder's coming occurrence: it restarts from now.
+    pub fn skip_expected(
+        &mut self,
+        reminder_id: &str,
+        note: Option<&str>,
+        now: i64,
+    ) -> Result<String> {
+        let note = note
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string);
+        self.close_expected(reminder_id, now, now, |id| Event::OccurrenceSkipped {
+            occurrence_id: id,
+            skipped_at: now,
+            note,
+        })
     }
 
     /// Skips an open occurrence, with an optional note.
@@ -1001,7 +1194,26 @@ impl Core {
         if let Some(note) = edit.note.filter(|n| *n != current.note) {
             changes.push(Change::Note(note));
         }
-        if let Some(schedules) = edit.schedules.filter(|s| *s != current.schedules) {
+        if let Some(countdown) = edit
+            .countdown
+            .filter(|c| Some(c) != current.countdown.as_ref())
+        {
+            if !current.counts_down() {
+                return Err(Error::NotCountdown(reminder_id.to_string()));
+            }
+            countdown.validate().map_err(Error::BadCountdown)?;
+            changes.push(Change::Countdown(countdown));
+        }
+        if let Some(schedules) = edit
+            .schedules
+            .filter(|s| *s != current.schedules)
+            .filter(|s| !(s.is_empty() && current.counts_down()))
+        {
+            if current.counts_down() {
+                return Err(Error::BadSchedule(
+                    "a countdown reminder has no schedules".into(),
+                ));
+            }
             let zone = edit.zone.as_ref().unwrap_or(&current.zone);
             check_schedules(&schedules, zone.as_deref())?;
             changes.push(Change::Schedules(schedules));
@@ -1083,7 +1295,7 @@ impl Core {
             .flat_map(|(_, s)| {
                 s.reminders
                     .values()
-                    .filter(|r| r.repeats())
+                    .filter(|r| r.has_schedules())
                     .filter_map(|r| {
                         let after = s
                             .last_scheduled(&r.id)
@@ -1092,6 +1304,14 @@ impl Core {
                         let until = after.max(0).saturating_add(5 * 366 * DAY);
                         self.instances(r, after, until, 1).first().copied()
                     })
+            })
+            .min();
+        let counting = self
+            .states()
+            .flat_map(|(_, s)| {
+                s.reminders
+                    .values()
+                    .filter_map(|r| self.countdown_next(s, r))
             })
             .min();
         let expiring = self
@@ -1103,7 +1323,12 @@ impl Core {
                     .filter_map(|o| s.reminders.get(&o.reminder_id)?.expires_at(o.scheduled_at))
             })
             .min();
-        one_off.into_iter().chain(scheduled).chain(expiring).min()
+        one_off
+            .into_iter()
+            .chain(scheduled)
+            .chain(counting)
+            .chain(expiring)
+            .min()
     }
 
     /// Occurrences predicted after `now` and up to `until`, earliest first:
@@ -1113,7 +1338,14 @@ impl Core {
         let mut out = Vec::new();
         for (_, s) in self.states() {
             for r in s.reminders.values() {
-                let times = if r.repeats() {
+                let times = if r.counts_down() {
+                    // Only the next one: the one after depends on when
+                    // this one is closed.
+                    self.countdown_next(s, r)
+                        .filter(|t| *t > now && *t <= until)
+                        .into_iter()
+                        .collect()
+                } else if r.has_schedules() {
                     let after = s
                         .last_scheduled(&r.id)
                         .unwrap_or(i64::MIN)
@@ -1369,6 +1601,23 @@ impl Core {
                     self.states().flat_map(|(_, s)| s.upcoming()).collect();
                 up.sort_by_key(|u| (u.fire_at, u.reminder_id.clone()));
                 up
+            },
+            countdowns: {
+                let mut v: Vec<CountdownItem> = self
+                    .states()
+                    .flat_map(|(_, s)| {
+                        s.reminders.values().filter_map(move |r| {
+                            Some(CountdownItem {
+                                reminder_id: r.id.clone(),
+                                title: r.title.clone(),
+                                countdown: r.countdown.clone()?,
+                                next_at: self.countdown_next(s, r),
+                            })
+                        })
+                    })
+                    .collect();
+                v.sort_by_key(|c| (c.next_at.unwrap_or(i64::MAX), c.reminder_id.clone()));
+                v
             },
             notices: self.device_notices(),
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),

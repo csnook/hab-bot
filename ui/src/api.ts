@@ -71,9 +71,27 @@ export interface SecurityNotice {
   at: number;
 }
 
+export type CountdownUnit = "minutes" | "hours" | "days" | "weeks";
+
+/** Fires `amount` `unit`s after the last occurrence closed; `at` is a time of day ("09:00") for days and weeks. */
+export interface Countdown {
+  amount: number;
+  unit: CountdownUnit;
+  at: string | null;
+}
+
+/** A countdown reminder and when it fires next (null while an occurrence is open). */
+export interface CountdownItem {
+  reminder_id: string;
+  title: string;
+  countdown: Countdown;
+  next_at: number | null;
+}
+
 export interface Snapshot {
   due: DueItem[];
   upcoming: UpcomingItem[];
+  countdowns: CountdownItem[];
   sign_in_notices: SignInNotice[];
   reconciliations: ReconciliationNotice[];
   security_notices: SecurityNotice[];
@@ -127,8 +145,35 @@ export const createRecurringReminder = (
   zone: string | null,
   priority: PriorityName,
 ) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
-export const completeOccurrence = (occurrenceId: string) =>
-  invoke<void>("complete_occurrence", { occurrenceId });
+/**
+ * Creates a reminder that fires a set time after it was last done. `lastDone`
+ * is unix seconds, or null for never (it fires at once). No `zone` makes a
+ * time of day floating.
+ */
+export const createCountdownReminder = (
+  title: string,
+  countdown: Countdown,
+  lastDone: number | null,
+  zone: string | null,
+  priority: PriorityName,
+) =>
+  invoke<void>("create_countdown_reminder", {
+    title,
+    amount: countdown.amount,
+    unit: countdown.unit,
+    at: countdown.at,
+    lastDone,
+    zone,
+    priority,
+  });
+/** Completes it before it fires: it restarts from `doneAt` (now by default). */
+export const completeCountdown = (reminderId: string, doneAt?: number) =>
+  invoke<void>("complete_countdown", { reminderId, doneAt });
+export const skipCountdown = (reminderId: string) =>
+  invoke<void>("skip_countdown", { reminderId });
+/** `doneAt` is when it was done, if not just now: a countdown restarts from it. */
+export const completeOccurrence = (occurrenceId: string, doneAt?: number) =>
+  invoke<void>("complete_occurrence", { occurrenceId, doneAt });
 export const skipOccurrence = (occurrenceId: string, note?: string) =>
   invoke<void>("skip_occurrence", { occurrenceId, note });
 /** Silences the current alert on all devices without closing the occurrence. */

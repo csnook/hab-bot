@@ -6,7 +6,8 @@ export type Repeat =
   | "weekdays"
   | "weekly"
   | "monthly_date"
-  | "monthly_weekday";
+  | "monthly_weekday"
+  | "countdown";
 
 export const REPEATS: Array<[Repeat, string]> = [
   ["once", "Doesn't repeat"],
@@ -15,6 +16,7 @@ export const REPEATS: Array<[Repeat, string]> = [
   ["weekly", "Weekly on chosen days"],
   ["monthly_date", "Monthly, on this date"],
   ["monthly_weekday", "Monthly, on this weekday"],
+  ["countdown", "A set time after it was last done"],
 ];
 
 /** iCalendar's day codes, Monday first. */
@@ -37,6 +39,7 @@ export const DAYS: Array<[string, string]> = [
 export function patternFor(repeat: Repeat, date: string, days: string[]): Pattern | null {
   switch (repeat) {
     case "once":
+    case "countdown":
       return null;
     case "daily":
       return { kind: "daily" };
