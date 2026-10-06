@@ -373,6 +373,7 @@ mod tests {
             later_today: vec![],
             earlier_today: vec![],
             paused: vec![],
+            folded: vec![],
         }
     }
 
@@ -387,6 +388,19 @@ mod tests {
         m.iter()
             .filter(|e| matches!(e, Entry::Submenu { label, .. } if label != "Snooze all" && label != QUIET_LABEL))
             .collect()
+    }
+
+    #[test]
+    fn folding_does_not_change_the_badge_or_the_tooltip() {
+        let mut i = inbox(
+            vec![item("a", Priority::Low), item("b", Priority::Low)],
+            vec![],
+        );
+        let (badge_before, tip_before) = (badge(&i), tooltip(&i));
+        i.folded = vec!["a".into(), "b".into()];
+        assert_eq!(badge(&i), badge_before);
+        assert_eq!(tooltip(&i), tip_before);
+        assert_eq!(badge(&i).count, 2);
     }
 
     #[test]

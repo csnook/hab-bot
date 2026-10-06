@@ -32,6 +32,8 @@ import {
   type QuietHours,
   onStateChanged,
   skipOccurrence,
+  skipFolded,
+  undoAll,
   snapshot,
   undoOccurrence,
   type Snapshot,
@@ -54,6 +56,8 @@ import { quietLine } from "./quiet";
 import { earlierLabel } from "./closing";
 import { untilText } from "./pause";
 import { filterInbox, filterSnapshot, hiddenCount, isFiltering, noFilters, pruned } from "./filters";
+import { SkipAllDialog } from "./SkipAll";
+import { foldLabel, foldMark, skippedText, splitOverdue, undoneText } from "./folding";
 import { listById, listColour, listName } from "./lists";
 
 /** The first start asks how to use this device, then the app opens. */
@@ -228,7 +232,13 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
     later_today: [],
     earlier_today: [],
     paused: [],
+    folded: [],
   });
+  // The older-quiet row: expanded or not, its Skip all… dialog, and what a
+  // Skip all just did, kept for one "Undo all".
+  const [foldOpen, setFoldOpen] = useState(false);
+  const [skippingAll, setSkippingAll] = useState(false);
+  const [skipAllDone, setSkipAllDone] = useState<{ ids: string[]; text: string } | null>(null);
   const [error, setError] = useState("");
   const [lists, setLists] = useState<ListInfo[]>([]);
   const [deleted, setDeleted] = useState<DeletedReminder[]>([]);
@@ -281,6 +291,7 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
   }, [lists]);
 
   const shown = filterInbox(filters, sections);
+  const overdueSplit = splitOverdue(shown.overdue, shown.folded);
   const shownSnap = filterSnapshot(filters, snap);
   const hidden =
     view === "board" ? hiddenCards(filters, boardCards) : hiddenCount(filters, sections);
@@ -380,10 +391,45 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
         <h2 id="overdue">Overdue</h2>
         {shown.overdue.length === 0 && <p class="empty">Nothing overdue.</p>}
         <ul>
-          {shown.overdue.map((d) => (
+          {overdueSplit.shown.map((d) => (
             <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} onDetails={() => setPanel({ state: "open", item: d })} dot={dot(d.list_id)} />
           ))}
+          {overdueSplit.folded.length > 0 && (
+            <li class="folded-row">
+              <button
+                type="button"
+                aria-expanded={foldOpen}
+                onClick={() => setFoldOpen(!foldOpen)}
+              >
+                {foldLabel(overdueSplit.folded.length)} {foldMark(foldOpen)}
+              </button>
+              <button type="button" onClick={() => setSkippingAll(true)}>Skip all…</button>
+            </li>
+          )}
+          {foldOpen &&
+            overdueSplit.folded.map((d) => (
+              <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} onDetails={() => setPanel({ state: "open", item: d })} dot={dot(d.list_id)} />
+            ))}
         </ul>
+        {skipAllDone && (
+          <p class="notice" role="status">
+            {skipAllDone.text}{" "}
+            {skipAllDone.ids.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const ids = skipAllDone.ids;
+                  undoAll(ids)
+                    .then((r) => setSkipAllDone({ ids: [], text: undoneText(r) }))
+                    .catch((e) => setError(String(e)));
+                }}
+              >
+                Undo all
+              </button>
+            )}
+            <button type="button" onClick={() => setSkipAllDone(null)}>Dismiss</button>
+          </p>
+        )}
       </section>
 
       <section aria-labelledby="due">
@@ -539,6 +585,17 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
           target={panel}
           onClose={() => setPanel(null)}
           onEdit={edit}
+        />
+      )}
+      {skippingAll && (
+        <SkipAllDialog
+          count={overdueSplit.folded.length}
+          onCancel={() => setSkippingAll(false)}
+          onConfirm={async () => {
+            const ids = await skipFolded(overdueSplit.folded.map((d) => d.occurrence_id));
+            setSkippingAll(false);
+            setSkipAllDone({ ids, text: skippedText(ids.length) });
+          }}
         />
       )}
       {snoozingAll && (

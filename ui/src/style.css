@@ -160,3 +160,4 @@ dialog.snooze-all form { display: grid; gap: 8px; max-width: 28em; }
 .card-main .title { font-weight: 600; }
 .card-main .status { color: #888; font-size: 0.9rem; }
 .card-main .meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 0.8rem; color: #888; }
+.folded-row button + button { margin-left: 8px; }

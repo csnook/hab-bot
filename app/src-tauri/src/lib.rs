@@ -497,6 +497,42 @@ fn undo_occurrence(
     Ok(outcome)
 }
 
+/// Skip all… on the Inbox's older-quiet row: skips each listed occurrence
+/// that still folds, one skip each, and returns the ids it skipped.
+#[tauri::command]
+fn skip_folded(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let skipped = app
+        .core
+        .lock()
+        .unwrap()
+        .skip_folded(&occurrence_ids, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(skipped)
+}
+
+/// Undo all after a Skip all: one undo each. Returns how many reopened and
+/// how many were left missed or expected.
+#[tauri::command]
+fn undo_all(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_ids: Vec<String>,
+) -> Result<Vec<(String, hab_core::UndoOutcome)>, String> {
+    let undone = app
+        .core
+        .lock()
+        .unwrap()
+        .undo_all(&occurrence_ids, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(undone)
+}
+
 /// Changes how a closed occurrence, a missed one too, was closed. `kind` is
 /// "completed" or "skipped"; `at` is when it was done (unix seconds).
 #[tauri::command]
@@ -2000,6 +2036,8 @@ pub fn run() {
             complete_early,
             skip_ahead,
             undo_occurrence,
+            skip_folded,
+            undo_all,
             correct_occurrence,
             closed_occurrence,
             recent_skip_notes,

@@ -253,6 +253,11 @@ export interface Inbox {
   earlier_today: EarlierItem[];
   /** Open occurrences of reminders paused now: set aside, quiet. */
   paused: PausedOpen[];
+  /**
+   * Ids of the overdue occurrences that fold into the older-quiet row:
+   * Minimum and Low, overdue for over a week. They are still in `overdue`.
+   */
+  folded: string[];
 }
 
 /** The Agenda's data: unfiltered, like the Inbox. */
@@ -476,6 +481,12 @@ export const skipAhead = (reminderId: string, note?: string) =>
 /** Undoes a completion or skip: reopened, expected again, or missed. */
 export const undoOccurrence = (occurrenceId: string) =>
   invoke<UndoOutcome>("undo_occurrence", { occurrenceId });
+/** Skip all… on the older-quiet row: one skip each; returns the ids skipped. */
+export const skipFolded = (occurrenceIds: string[]) =>
+  invoke<string[]>("skip_folded", { occurrenceIds });
+/** Undo all after a Skip all: one undo each; returns what each left. */
+export const undoAll = (occurrenceIds: string[]) =>
+  invoke<Array<[string, UndoOutcome]>>("undo_all", { occurrenceIds });
 /** Changes how a closed occurrence, a missed one too, was closed. */
 export const correctOccurrence = (
   occurrenceId: string,

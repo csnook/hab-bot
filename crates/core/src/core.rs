@@ -457,6 +457,22 @@ pub struct Inbox {
     /// can be acted on, but they are not in Overdue or Due, never alert and
     /// don't count in the tray's badge: pausing is for being left alone.
     pub paused: Vec<PausedOpen>,
+    /// The ids of the overdue occurrences that fold into the one row at the
+    /// end of Overdue ("4 older quiet reminders"): Minimum and Low ones
+    /// overdue for more than [`FOLD_AFTER`]. They are still in `overdue`, so
+    /// the window can apply its filters first and count what is left. Only a
+    /// view reads this: the tray's badge and the alerts ignore folding.
+    pub folded: Vec<String>,
+}
+
+/// How long a Minimum or Low occurrence is overdue before it folds away.
+pub const FOLD_AFTER: i64 = 7 * 86_400;
+
+/// Whether an overdue occurrence folds into the Inbox's older-quiet row:
+/// its priority (the user's own, overrides included) is Minimum or Low, and
+/// it has been overdue for more than a week. Medium and above never fold.
+pub fn folds(priority: Priority, overdue_at: i64, now: i64) -> bool {
+    priority <= Priority::Low && now.saturating_sub(overdue_at) > FOLD_AFTER
 }
 
 /// The Agenda: the open occurrences for its "Now" band, and everything
@@ -2780,13 +2796,74 @@ impl Core {
         let (start, end) = schedule::day_bounds(&zone, now);
         let earlier = self.closed_between(start, end);
         let (overdue, due, paused) = self.open_sections(now);
+        let folded = overdue
+            .iter()
+            .filter(|d| folds(d.priority, d.overdue_at, now))
+            .map(|d| d.occurrence_id.clone())
+            .collect();
         Inbox {
             overdue,
             due,
             later_today: self.expected(now, end - 1),
             earlier_today: earlier,
             paused,
+            folded,
         }
+    }
+
+    /// "Skip all…" on the older-quiet row: skips each of `occurrence_ids`
+    /// that still folds at `now` (open, overdue for over a week, Minimum or
+    /// Low) and returns the ids it skipped. Anything else in the list is left
+    /// alone, so what another device closed, or a priority raised, since the
+    /// window drew the row is never touched, and nothing above Low can be
+    /// skipped through here.
+    ///
+    /// Each is its own `OccurrenceSkipped` at `now`, with no note, so each
+    /// can be undone or corrected like any skip, and a completion on another
+    /// device beats it (ADR 0010). There is no bulk event: devices that
+    /// disagree about one occurrence settle it by the usual rules.
+    pub fn skip_folded(&mut self, occurrence_ids: &[String], now: i64) -> Result<Vec<String>> {
+        let (overdue, _, _) = self.open_sections(now);
+        let folding: BTreeSet<String> = overdue
+            .into_iter()
+            .filter(|d| folds(d.priority, d.overdue_at, now))
+            .map(|d| d.occurrence_id)
+            .collect();
+        let mut skipped = Vec::new();
+        for id in occurrence_ids {
+            if folding.contains(id) && !skipped.contains(id) {
+                self.skip(id, None, now)?;
+                skipped.push(id.clone());
+            }
+        }
+        Ok(skipped)
+    }
+
+    /// "Undo all" after a Skip all: undoes each of `occurrence_ids` that is
+    /// still closed as skipped, one `OccurrenceUndone` each, and returns what
+    /// each left. One that is no longer a skip (another device completed it,
+    /// which beat the skip, or corrected it) is left as it is, so Undo all
+    /// only takes back what the Skip all did.
+    pub fn undo_all(
+        &mut self,
+        occurrence_ids: &[String],
+        now: i64,
+    ) -> Result<Vec<(String, UndoOutcome)>> {
+        let mut undone = Vec::new();
+        for id in occurrence_ids {
+            if self
+                .closed_occurrence(id)
+                .is_none_or(|v| v.kind != ClosingKind::Skipped)
+            {
+                continue;
+            }
+            match self.undo(id, now) {
+                Ok(outcome) => undone.push((id.clone(), outcome)),
+                Err(Error::NotClosed(_) | Error::CantUndoMiss) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(undone)
     }
 
     // ---- Snooze all and quiet hours (ADR 0013) ----

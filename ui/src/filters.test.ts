@@ -17,6 +17,7 @@ const due = (id: string, list: string, priority: DueItem["priority"]): DueItem =
   ({ occurrence_id: id, reminder_id: id, list_id: list, priority, title: id }) as DueItem;
 
 const inbox = (): Inbox => ({
+  folded: [],
   overdue: [due("a", "home", "high"), due("b", "work", "low")],
   due: [due("c", "home", "minimum"), due("d", "p", "medium")],
   later_today: [
