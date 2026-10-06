@@ -105,6 +105,19 @@ describe("the sentence", () => {
   });
 });
 
+describe("a pause", () => {
+  test("is mentioned last, only while the reminder is paused", () => {
+    expect(summarize({ ...base, paused: null })).toBe(summarize(base));
+    expect(summarize({ ...base, paused: "until 3 March" })).toBe(
+      "In Household, remind me to take the bins out every Wednesday at 18:00, at Medium priority. " +
+        "It is paused until 3 March.",
+    );
+    expect(
+      summarize({ ...base, overdue: { kind: "after", seconds: 3600 }, paused: "until resumed" }),
+    ).toMatch(/It goes overdue after 1 h\. It is paused until resumed\.$/);
+  });
+});
+
 describe("pieces of it", () => {
   test("schedules", () => {
     expect(describeSchedule({ kind: "daily" }, "07:00")).toBe("every day at 07:00");

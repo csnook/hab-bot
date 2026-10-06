@@ -31,6 +31,8 @@ import { SnoozeMenu } from "./SnoozeMenu";
 import { OccurrencePanel, type PanelTarget } from "./OccurrencePanel";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
+import { earlierLabel } from "./closing";
+import { untilText } from "./pause";
 import { filterInbox, filterSnapshot, hiddenCount, isFiltering, noFilters, pruned } from "./filters";
 import { listById, listColour, listName } from "./lists";
 
@@ -162,6 +164,7 @@ function Inbox() {
     due: [],
     later_today: [],
     earlier_today: [],
+    paused: [],
   });
   const [error, setError] = useState("");
   const [lists, setLists] = useState<ListInfo[]>([]);
@@ -270,6 +273,26 @@ function Inbox() {
         </ul>
       </section>
 
+      {shown.paused.length > 0 && (
+        <section aria-labelledby="paused-open">
+          <h2 id="paused-open">Paused</h2>
+          <ul>
+            {shown.paused.map((p) => (
+              <li key={p.item.occurrence_id}>
+                {dot(p.item.list_id)}
+                <button class="title link" onClick={() => setPanel({ state: "open", item: p.item })}>
+                  {p.item.title}
+                </button>
+                <span class="when">
+                  {p.pause.list ? "its list is paused " : "paused "}
+                  {untilText(p.pause.until, Math.floor(Date.now() / 1000))}; no alerts
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <section aria-labelledby="later-today">
         <h2 id="later-today">Later today</h2>
         {shown.later_today.length === 0 && <p class="empty">Nothing more today.</p>}
@@ -307,8 +330,7 @@ function Inbox() {
                 {e.title}
               </button>
               <span class="when">
-                {e.kind}
-                {e.corrected ? " (corrected)" : ""} {formatTime(e.closed_at)}
+                {earlierLabel(e)} {formatTime(e.closed_at)}
               </span>
               {e.can_undo && (
                 <button

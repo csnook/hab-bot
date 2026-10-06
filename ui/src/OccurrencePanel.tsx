@@ -4,6 +4,7 @@ import {
   completeEarly,
   completeOccurrence,
   correctOccurrence,
+  pauseReminder,
   recentSkipNotes,
   skipAhead,
   skipOccurrence,
@@ -17,12 +18,14 @@ import { SnoozeMenu } from "./SnoozeMenu";
 import {
   buttonsFor,
   cleanNote,
+  earlierLabel,
   historyLine,
   noteChoices,
   outcomeLabel,
   saidTime,
   undoMessage,
 } from "./closing";
+import { nextWeekOf, pauseUntil, tomorrowOf } from "./pause";
 import { formatTime } from "./time";
 
 /** What the panel is about: an open, expected or closed occurrence. */
@@ -39,8 +42,12 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
  * Complete early, Skip ahead and Snooze ahead on an expected one; Undo and
  * Correct on a closed one, with the history of how it was closed.
  *
- * Type-checked and unit-tested for its pure logic (closing.ts) only: it has
- * never been run in a real window.
+ * Pause, in the More menu of an open occurrence and beside Edit on an expected
+ * one, sets the reminder aside until a day or until resumed (pause.ts); the
+ * occurrence open now is skipped by it.
+ *
+ * Type-checked and unit-tested for its pure logic (closing.ts, pause.ts) only:
+ * it has never been run in a real window.
  */
 export function OccurrencePanel({
   target,
@@ -59,7 +66,9 @@ export function OccurrencePanel({
   const [when, setWhen] = useState("");
   const [closed, setClosed] = useState<ClosedView | null>(null);
   // Which form is showing: skipping with a note, or correcting.
-  const [form, setForm] = useState<"skip" | "correct" | null>(null);
+  const [form, setForm] = useState<"skip" | "correct" | "pause" | null>(null);
+  const [pauseDate, setPauseDate] = useState(() => nextWeekOf(nowSeconds()));
+  const [untilResumed, setUntilResumed] = useState(false);
   const [kind, setKind] = useState<"completed" | "skipped">("completed");
 
   useEffect(() => {
@@ -117,6 +126,38 @@ export function OccurrencePanel({
     </>
   );
 
+  // Pause the reminder until a day, or until it is resumed.
+  const pauseForm = (reminderId: string) => (
+    <form
+      aria-label="Pause"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const until = pauseUntil(untilResumed, pauseDate, nowSeconds());
+        if (!until.ok) return setError(until.error);
+        run(pauseReminder(reminderId, until.value));
+      }}
+    >
+      <label class="radio">
+        <input type="radio" name="pause-end" checked={!untilResumed} onChange={() => setUntilResumed(false)} />
+        Until
+        <input
+          type="date"
+          aria-label="Paused until"
+          min={tomorrowOf(nowSeconds())}
+          value={pauseDate}
+          disabled={untilResumed}
+          onInput={(e) => setPauseDate(e.currentTarget.value)}
+        />
+      </label>
+      <label class="radio">
+        <input type="radio" name="pause-end" checked={untilResumed} onChange={() => setUntilResumed(true)} />
+        Until I resume it
+      </label>
+      <p class="muted">What falls in the pause is skipped, this one too.</p>
+      <button>Pause</button>
+    </form>
+  );
+
   let title = "";
   let body: preact.ComponentChild = null;
   if (target.state === "open") {
@@ -133,9 +174,11 @@ export function OccurrencePanel({
           <details>
             <summary>{buttons.main[3]}</summary>
             <button onClick={() => setForm("correct")}>{buttons.more[0]}</button>
-            <button onClick={() => { onEdit(d.reminder_id); onClose(); }}>{buttons.more[1]}</button>
+            <button onClick={() => setForm(form === "pause" ? null : "pause")}>{buttons.more[1]}</button>
+            <button onClick={() => { onEdit(d.reminder_id); onClose(); }}>{buttons.more[2]}</button>
           </details>
         </div>
+        {form === "pause" && pauseForm(d.reminder_id)}
         {form === "skip" && (
           <form onSubmit={(e) => { e.preventDefault(); run(skipOccurrence(d.occurrence_id, cleanNote(note))); }}>
             {noteField()}
@@ -174,8 +217,10 @@ export function OccurrencePanel({
             label="Snooze ahead"
             onError={setError}
           />
+          <button onClick={() => setForm(form === "pause" ? null : "pause")}>Pause</button>
           <button onClick={() => { onEdit(e.reminder_id); onClose(); }}>Edit reminder</button>
         </div>
+        {form === "pause" && pauseForm(e.reminder_id)}
         {form === "correct" && (
           <form
             onSubmit={(ev) => {
@@ -208,7 +253,7 @@ export function OccurrencePanel({
     body = (
       <>
         <p>
-          {closed ? outcomeLabel(closed.outcome) : c.kind} · {formatTime(c.closed_at)}
+          {closed ? outcomeLabel(closed.outcome, closed.paused) : earlierLabel(c)} · {formatTime(c.closed_at)}
           {c.corrected && " (corrected)"}
         </p>
         <div class="alarm-row">

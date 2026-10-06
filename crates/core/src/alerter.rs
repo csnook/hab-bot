@@ -46,6 +46,10 @@
 //! gentle, titled "Last chance: ..." with "Expires at 23:59". An occurrence
 //! snoozed ahead of time opens already snoozed, so it fires quietly.
 //!
+//! Pausing: an open occurrence of a paused reminder (or one in a paused list)
+//! is not alerted about, and an alert standing for it is closed on the next
+//! pass. Its alerts begin again when the pause ends (ADR 0011).
+//!
 //! Acknowledging quiets the occurrence: while due, until it goes overdue;
 //! once overdue, for one overdue interval, after which alerts resume. The
 //! time of the acknowledgement is the one recorded on its event.
@@ -278,7 +282,17 @@ impl Alerter {
             }
         };
 
-        // Occurrences that closed: their notifications go.
+        // A paused reminder's open occurrence is in neither list: the pause
+        // closes the alert standing for it, as closing the occurrence would.
+        // The alert comes back when the pause ends, so that is a moment to
+        // look again.
+        for p in &inbox.paused {
+            if let Some(until) = p.pause.until {
+                soonest(until, &mut out);
+            }
+        }
+
+        // Occurrences that closed or were paused: their notifications go.
         let ids: HashSet<&str> = open.iter().map(|d| d.occurrence_id.as_str()).collect();
         let mut gone: Vec<String> = self
             .tracked

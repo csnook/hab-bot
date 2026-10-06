@@ -348,7 +348,7 @@ fn the_new_settings_need_a_reader_of_the_new_format() {
     assert_eq!(edit(Change::Overdue(None)).format(), 3);
     assert_eq!(edit(Change::Expiry(vec![Delay::After(5)])).format(), 3);
     assert_eq!(edit(Change::Title("t".into())).format(), 1);
-    assert_eq!(hab_core::FORMAT_VERSION, 9);
+    assert_eq!(hab_core::FORMAT_VERSION, 10);
 
     let mut c = core();
     c.join("u1", "1").unwrap();

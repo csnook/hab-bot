@@ -77,6 +77,7 @@ export function filterInbox(f: Filters, inbox: Inbox): Inbox {
     due: visible(f, inbox.due),
     later_today: visible<ExpectedItem>(f, inbox.later_today),
     earlier_today: visible<EarlierItem>(f, inbox.earlier_today),
+    paused: inbox.paused.filter((p) => shows(f, p.item)),
   };
 }
 

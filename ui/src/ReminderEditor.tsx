@@ -6,8 +6,10 @@ import {
   editReminder,
   lists as loadLists,
   moveReminder,
+  pauseReminder,
   priorities,
   reminderView,
+  resumeReminder,
   type ListInfo,
   type PriorityInfo,
   type PriorityName,
@@ -30,6 +32,7 @@ import {
 import {
   buildEdit,
   buildNew,
+  buildPause,
   listMove,
   newExpiry,
   newReminderList,
@@ -46,6 +49,7 @@ import {
 import { DeleteDialog } from "./DeleteDialog";
 import { listById, listName as nameOf } from "./lists";
 import { DAYS, REPEATS, type Repeat } from "./repeat";
+import { activePause, nextWeekOf, pauseLine, tomorrowOf, type PauseForm } from "./pause";
 import { expiryLine, noteLine, overdueLine, summarize } from "./summary";
 import type { CountdownUnit } from "./api";
 import type { LastDone } from "./countdown";
@@ -57,8 +61,10 @@ const zoneName = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 /**
  * The reminder editor, for a new reminder or (with `reminderId`) an existing
  * one: the live sentence, the always-visible basics, and the folded Overdue,
- * Expiry and Note sections. Pause, Turns, Only if (conditions) and the other
- * triggers arrive with their own tickets.
+ * Expiry, Note and (for an existing reminder) Pause sections. Turns, Only if
+ * (conditions) and the other triggers arrive with their own tickets.
+ *
+ * Type-checked only: the editor has never been run in a real window.
  */
 export function ReminderEditor({
   reminderId,
@@ -123,7 +129,15 @@ export function ReminderEditor({
         if (!view) return;
         const edit = buildEdit(state, view, zoneName());
         if (!edit.ok) return setError(edit.error);
+        const pause = buildPause(state, view, Math.floor(Date.now() / 1000));
+        if (!pause.ok) return setError(pause.error);
         if (Object.keys(edit.value).length) await editReminder(view.reminder_id, edit.value);
+        // Pausing skips what falls in the period, so it is an action of its own.
+        if (pause.value.kind === "pause") {
+          await pauseReminder(view.reminder_id, pause.value.until);
+        } else if (pause.value.kind === "resume") {
+          await resumeReminder(view.reminder_id);
+        }
         // Moving to another list keeps its history.
         const to = listMove(state, view);
         if (to) await moveReminder(view.reminder_id, to);
@@ -173,6 +187,8 @@ export function ReminderEditor({
   const overdueSummary = overdueLine(overdue.ok ? overdue.value : null, defaultText);
   const expirySummary = expiryLine(expiries.ok ? expiries.value : [], DEFAULT_EXPIRY_TEXT);
   const noteSummary = noteLine(state.note);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const pauseSummary = pauseLine(view?.pause ?? null, view?.list_pause ?? null, nowSeconds);
 
   return (
     <dialog ref={ref} class="editor" aria-labelledby="editor-title" onClose={onClose}>
@@ -401,6 +417,22 @@ export function ReminderEditor({
           </label>
         </details>
 
+        {editing && view && (
+          <details class="fold" aria-label="Pause">
+            <summary>
+              Pause{" "}
+              <span class={pauseSummary.isDefault ? "one-line grey" : "one-line"}>
+                {pauseSummary.text}
+              </span>
+            </summary>
+            <PauseSection
+              value={state.pause}
+              listPaused={activePause(view.list_pause, nowSeconds) !== null}
+              onChange={(pause) => set({ pause })}
+            />
+          </details>
+        )}
+
         <div class="buttons">
           <button type="button" onClick={onClose}>Cancel</button>
           {editing && view && (
@@ -422,6 +454,64 @@ export function ReminderEditor({
         />
       )}
     </dialog>
+  );
+}
+
+/** Pause: not paused, until a day, or until resumed. Turning it off resumes early. */
+function PauseSection({
+  value,
+  listPaused,
+  onChange,
+}: {
+  value: PauseForm;
+  listPaused: boolean;
+  onChange: (v: PauseForm) => void;
+}) {
+  const now = Math.floor(Date.now() / 1000);
+  return (
+    <div class="section">
+      <label class="radio">
+        <input
+          type="radio"
+          name="pause"
+          checked={value.mode === "off"}
+          onChange={() => onChange({ ...value, mode: "off" })}
+        />
+        Not paused
+      </label>
+      <label class="radio">
+        <input
+          type="radio"
+          name="pause"
+          checked={value.mode === "until"}
+          onChange={() => onChange({ ...value, mode: "until", date: value.date || nextWeekOf(now) })}
+        />
+        Until
+        {value.mode === "until" && (
+          <input
+            type="date"
+            aria-label="Paused until"
+            min={tomorrowOf(now)}
+            value={value.date}
+            onInput={(e) => onChange({ ...value, mode: "until", date: e.currentTarget.value })}
+          />
+        )}
+      </label>
+      <label class="radio">
+        <input
+          type="radio"
+          name="pause"
+          checked={value.mode === "resumed"}
+          onChange={() => onChange({ ...value, mode: "resumed" })}
+        />
+        Until I resume it
+      </label>
+      {listPaused && <p class="muted">Its list is paused too: resume the list from the sidebar.</p>}
+      <p class="muted">
+        Occurrences in the pause are skipped, and the history says the pause did it. Resuming early
+        brings back normal firing from its next one.
+      </p>
+    </div>
   );
 }
 

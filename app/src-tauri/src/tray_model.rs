@@ -19,6 +19,12 @@
 //!   (or Overdue) section until it closes; the badge says how many are open,
 //!   not how many are currently ringing. Its menu row says when the snooze
 //!   ends.
+//! - **Paused reminders don't count and aren't listed.** An open occurrence of
+//!   a paused reminder is in `Inbox::paused`, not in Overdue or Due, so the
+//!   badge, the tooltip and the menu's rows leave it out: pausing is for being
+//!   left alone. They aren't in the Waiting section either, which is for
+//!   reminders whose conditions aren't met; the Board's Paused column
+//!   ([`hab_core::Core::paused_reminders`]) is where they show.
 //! - **Overdue means `overdue_at <= now`,** the Inbox's own test.
 
 use hab_core::{DueItem, Inbox, Priority};
@@ -246,11 +252,36 @@ mod tests {
             due,
             later_today: vec![],
             earlier_today: vec![],
+            paused: vec![],
         }
     }
 
     fn clock(t: i64) -> String {
         format!("t{t}")
+    }
+
+    #[test]
+    fn a_paused_occurrence_is_not_counted_or_listed() {
+        let mut i = inbox(vec![], vec![item("a", Priority::Low)]);
+        i.paused.push(hab_core::PausedOpen {
+            item: item("p", Priority::Maximum),
+            pause: hab_core::PauseCause {
+                until: Some(99),
+                list: false,
+            },
+        });
+        // Even a Maximum that is long overdue doesn't redden the badge.
+        i.paused[0].item.overdue_at = -1000;
+        let b = badge(&i);
+        assert_eq!((b.count, b.tone), (1, Tone::Blue));
+        assert_eq!(tooltip(&i), "1 due");
+        let m = menu(&i, &[], 10, &clock);
+        let rows = m
+            .iter()
+            .filter(|e| matches!(e, Entry::Submenu { .. }))
+            .count();
+        assert_eq!(rows, 1);
+        assert!(!m.contains(&Entry::Heading("Waiting".into())));
     }
 
     #[test]

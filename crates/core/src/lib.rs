@@ -15,6 +15,7 @@ mod countdown;
 mod delay;
 mod event;
 mod hlc;
+mod pause;
 mod priority;
 mod schedule;
 mod state;
@@ -23,8 +24,8 @@ mod store;
 pub use crate::core::{
     ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem,
     EditReminder, ExpectedItem, Filters, Fired, Inbox, ListInfo, OccurrenceView, Outcome,
-    ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice, SignInNotice, Snapshot,
-    SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
+    PausedOpen, PausedReminder, ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice,
+    SignInNotice, Snapshot, SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
@@ -37,6 +38,7 @@ pub use event::{
     FORMAT_VERSION, UPDATE_NOTICE,
 };
 pub use hlc::{Hlc, MAX_AHEAD_MS};
+pub use pause::{Pause, PauseCause};
 pub use priority::{
     built_in_priorities, AlertStyle, EscalationStep, Priority, PriorityInfo, PrioritySettings,
 };
@@ -99,6 +101,8 @@ pub enum Error {
     ListNotEmpty,
     #[error("the reminder is already in that list")]
     SameList,
+    #[error("a pause has to end in the future")]
+    PauseInThePast,
     #[error("an event from the server could not be read: {0}")]
     BadEvent(&'static str),
 }

@@ -538,6 +538,79 @@ fn delete_reminder(
     Ok(())
 }
 
+/// Pauses a reminder from now until `until` (unix seconds), or until it is
+/// resumed when `until` is not given.
+#[tauri::command]
+fn pause_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    until: Option<i64>,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .pause_reminder(&reminder_id, until, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Resumes a paused reminder.
+#[tauri::command]
+fn resume_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .resume_reminder(&reminder_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Pauses every reminder in a list from now until `until`, or until resumed.
+#[tauri::command]
+fn pause_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: String,
+    until: Option<i64>,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .pause_list(&list_id, until, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Resumes a paused list.
+#[tauri::command]
+fn resume_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .resume_list(&list_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// The reminders paused now, for the Board's Paused column.
+#[tauri::command]
+fn paused_reminders(app: tauri::State<'_, App>) -> Vec<hab_core::PausedReminder> {
+    app.core.lock().unwrap().paused_reminders(now())
+}
+
 /// Reminders deleted with their history kept.
 #[tauri::command]
 fn deleted_reminders(app: tauri::State<'_, App>) -> Vec<hab_core::DeletedReminder> {
@@ -1528,6 +1601,11 @@ pub fn run() {
             delete_list,
             move_reminder,
             delete_reminder,
+            pause_reminder,
+            resume_reminder,
+            pause_list,
+            resume_list,
+            paused_reminders,
             deleted_reminders,
             filters,
             set_filters,

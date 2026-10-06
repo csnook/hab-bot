@@ -1,4 +1,5 @@
-import type { ClosedEntry, ClosedView, ExpectedItem, UndoOutcome } from "./api";
+import type { ClosedEntry, ClosedView, EarlierItem, ExpectedItem, UndoOutcome } from "./api";
+import { causeText } from "./pause";
 
 /**
  * What the details panel offers (spec: Desktop → Occurrence details and
@@ -23,7 +24,7 @@ export function buttonsFor(
     case "open":
       return {
         main: ["Done", "Snooze ▾", "Skip", "More ▾"],
-        more: ["Done at a different time", "Edit reminder"],
+        more: ["Done at a different time", "Pause", "Edit reminder"],
       };
     case "expected":
       // Complete early and Skip ahead close the next expected occurrence only.
@@ -32,7 +33,7 @@ export function buttonsFor(
           ...(options.canCloseEarly ? ["Complete early", "Skip ahead"] : []),
           "Snooze ahead",
         ],
-        more: ["Edit reminder"],
+        more: ["Pause", "Edit reminder"],
       };
     case "closed":
       return {
@@ -95,6 +96,7 @@ export function undoMessage(outcome: UndoOutcome): string {
 export function historyLine(
   e: ClosedEntry,
   format: (unixSeconds: number) => string,
+  now = Math.floor(Date.now() / 1000),
 ): string {
   const what: Record<ClosedEntry["what"], string> = {
     completed: "Completed",
@@ -104,6 +106,8 @@ export function historyLine(
     expected: "Undone: expected again",
   };
   const parts = [what[e.what]];
+  // A skip the pause made says so, with what paused it.
+  if (e.paused) parts[0] = `Skipped by ${causeText(e.paused, now)}`;
   if (e.at !== null) parts[0] += ` at ${format(e.at)}`;
   if (e.note) parts.push(`“${e.note}”`);
   // The time said and the time tapped, once they differ, and when the server had it.
@@ -114,11 +118,21 @@ export function historyLine(
 }
 
 /** "Done late" and the like, for the panel's heading. */
-export function outcomeLabel(outcome: ClosedView["outcome"]): string {
+export function outcomeLabel(
+  outcome: ClosedView["outcome"],
+  paused: ClosedView["paused"] = null,
+): string {
+  if (paused && outcome === "skipped") return "Skipped by the pause";
   return {
     done_on_time: "Done on time",
     done_late: "Done late",
     skipped: "Skipped",
     missed: "Missed",
   }[outcome];
+}
+
+/** The Earlier today row's word for how it closed: a pause's skip says so. */
+export function earlierLabel(e: Pick<EarlierItem, "kind" | "paused" | "corrected">): string {
+  const base = e.paused ? "skipped by pause" : e.kind;
+  return e.corrected ? `${base} (corrected)` : base;
 }

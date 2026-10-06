@@ -3,7 +3,9 @@ import {
   colourList,
   createList,
   deleteList,
+  pauseList,
   renameList,
+  resumeList,
   type Filters,
   type ListInfo,
   type PriorityName,
@@ -19,6 +21,7 @@ import {
   whyNotDeletable,
 } from "./lists";
 import { priorityName } from "./delays";
+import { listPauseLine, nextWeekOf, pauseUntil, tomorrowOf } from "./pause";
 
 /**
  * The left sidebar: a checkbox for each list and each priority, which filter
@@ -59,6 +62,9 @@ export function Sidebar({
                 <span class="dot" style={{ background: listColour(l, lists) }} aria-hidden="true" />
                 <span class="name">{listName(l)}</span>
                 <span class="count">{l.reminders}</span>
+                {listPauseLine(l.pause, Math.floor(Date.now() / 1000)) && (
+                  <span class="muted">{listPauseLine(l.pause, Math.floor(Date.now() / 1000))}</span>
+                )}
               </label>
               <button
                 type="button"
@@ -177,6 +183,8 @@ function ManageList({
 }) {
   const [name, setName] = useState(list.name ?? "");
   const [error, setError] = useState("");
+  const [pauseDate, setPauseDate] = useState(() => nextWeekOf(Math.floor(Date.now() / 1000)));
+  const [untilResumed, setUntilResumed] = useState(false);
   const current = listColour(list, lists);
   const run = (f: () => Promise<void>) => f().then(onDone).catch((e) => onError(String(e)));
 
@@ -187,6 +195,14 @@ function ManageList({
     run(() => renameList(list.id, checked.value));
   };
   const why = whyNotDeletable(list);
+  const now = Math.floor(Date.now() / 1000);
+  const pausedLine = listPauseLine(list.pause, now);
+  const pause = (e: Event) => {
+    e.preventDefault();
+    const until = pauseUntil(untilResumed, pauseDate, now);
+    if (!until.ok) return setError(until.error);
+    run(() => pauseList(list.id, until.value));
+  };
 
   return (
     <div class="list-form" role="group" aria-label={`${listName(list)} settings`}>
@@ -201,6 +217,32 @@ function ManageList({
       )}
       {list.personal && <p class="muted">The personal list is the default and keeps its name.</p>}
       <Swatches value={current} onChange={(c) => run(() => colourList(list.id, c))} />
+      <form onSubmit={pause} aria-label={`Pause ${listName(list)}`}>
+        <h3>Pause this list</h3>
+        {pausedLine && <p>{pausedLine}. Every reminder in it is set aside.</p>}
+        <label class="radio">
+          <input type="radio" name="list-pause" checked={!untilResumed} onChange={() => setUntilResumed(false)} />
+          Until
+          <input
+            type="date"
+            aria-label="Paused until"
+            min={tomorrowOf(now)}
+            value={pauseDate}
+            disabled={untilResumed}
+            onInput={(e) => setPauseDate(e.currentTarget.value)}
+          />
+        </label>
+        <label class="radio">
+          <input type="radio" name="list-pause" checked={untilResumed} onChange={() => setUntilResumed(true)} />
+          Until I resume it
+        </label>
+        <button type="submit">{pausedLine ? "Change the pause" : "Pause list"}</button>
+        {pausedLine && (
+          <button type="button" onClick={() => run(() => resumeList(list.id))}>
+            Resume list
+          </button>
+        )}
+      </form>
       {error && <p class="error" role="alert">{error}</p>}
       <button
         type="button"

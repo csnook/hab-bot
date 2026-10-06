@@ -184,7 +184,7 @@ To close an occurrence by recording that it was done, by whom and when.
 To close an occurrence without doing it, optionally with a note. An expected occurrence can be skipped ahead of time.
 
 **Pause**:
-To set a reminder or a reminder list aside for a period, skipping its occurrences in that period. On a shared reminder a user can instead pause just for themselves, declining them.
+To set a reminder or a reminder list aside for a period (until a day, or until resumed), skipping its occurrences in that period, the open one included. The history says the pause skipped them. Resuming early brings back normal firing from the next instance. On a shared reminder a user can instead pause just for themselves, declining them. See ADR 0011.
 
 **Missed**:
 Said of an occurrence the app closed because it expired before anyone completed or skipped it. Unlike a skip, nobody chose it.

@@ -19,6 +19,7 @@ const list = (id: string, over: Partial<ListInfo> = {}): ListInfo => ({
   colour: null,
   personal: false,
   reminders: 0,
+  pause: null,
   ...over,
 });
 const personal = list("p", { name: null, personal: true });

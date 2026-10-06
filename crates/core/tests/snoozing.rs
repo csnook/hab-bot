@@ -470,7 +470,7 @@ fn snoozing_ahead_reaches_other_devices_before_or_after_the_occurrence_fires_the
 
 #[test]
 fn snoozing_ahead_is_a_format_6_event_an_older_app_keeps_without_applying() {
-    assert_eq!(FORMAT_VERSION, 9);
+    assert_eq!(FORMAT_VERSION, 10);
     let e = Event::ExpectedOccurrenceSnoozed {
         reminder_id: "r".into(),
         scheduled_at: T0,

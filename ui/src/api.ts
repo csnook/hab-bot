@@ -25,6 +25,23 @@ export interface DueItem {
   expires_at: number | null;
 }
 
+/**
+ * A pause: set aside from `from` until `until` (unix seconds), or until it is
+ * resumed when `until` is null. It sets things aside only while it covers the
+ * time, so one that has run out is still sent but means nothing.
+ */
+export interface Pause {
+  from: number;
+  until: number | null;
+}
+
+/** What put an occurrence under a pause: the reminder's own, or its list's. */
+export interface PauseCause {
+  until: number | null;
+  /** The pause is the list's, not the reminder's own. */
+  list: boolean;
+}
+
 export type PriorityName = "minimum" | "low" | "medium" | "high" | "maximum";
 export type AlertStyle = "silent" | "gentle" | "insistent" | "alarm";
 
@@ -126,6 +143,25 @@ export interface ExpectedItem {
   can_close_early: boolean;
 }
 
+/** An open occurrence of a paused reminder: quiet, and not in Overdue or Due. */
+export interface PausedOpen {
+  item: DueItem;
+  pause: PauseCause;
+}
+
+/** A reminder paused now, for the Board's Paused column. */
+export interface PausedReminder {
+  reminder_id: string;
+  list_id: string;
+  title: string;
+  priority: PriorityName;
+  pause: PauseCause;
+  /** When that pause began, in unix seconds. */
+  from: number;
+  /** It has an open occurrence, so its card stays in Overdue or Due. */
+  has_open: boolean;
+}
+
 export interface EarlierItem {
   occurrence_id: string;
   list_id: string;
@@ -138,6 +174,8 @@ export interface EarlierItem {
   can_undo: boolean;
   /** How it was closed was changed afterwards. */
   corrected: boolean;
+  /** Skipped because it fell in a pause. */
+  paused: PauseCause | null;
 }
 
 export type Outcome = "done_on_time" | "done_late" | "skipped" | "missed";
@@ -156,6 +194,8 @@ export interface ClosedEntry {
   received_at: number | null;
   /** A later correction or undo took its place: the original, kept. */
   superseded: boolean;
+  /** A skip the pause made: the history attributes it to the pause. */
+  paused: PauseCause | null;
 }
 
 /** A closed occurrence as the details panel shows it. */
@@ -172,6 +212,8 @@ export interface ClosedView {
   note: string | null;
   can_undo: boolean;
   corrected: boolean;
+  /** Skipped because it fell in a pause. */
+  paused: PauseCause | null;
   history: ClosedEntry[];
 }
 
@@ -188,6 +230,8 @@ export interface Inbox {
   due: DueItem[];
   later_today: ExpectedItem[];
   earlier_today: EarlierItem[];
+  /** Open occurrences of reminders paused now: set aside, quiet. */
+  paused: PausedOpen[];
 }
 
 /** The patterns the editor offers; anything else is a written rule. */
@@ -298,6 +342,10 @@ export interface ReminderView {
   overdue: DelaySpec | null;
   /** The expiries added; firing again always expires it too. */
   expiries: DelaySpec[];
+  /** Its own pause, if it was paused and not resumed. */
+  pause: Pause | null;
+  /** Its list's pause, which also sets it aside. */
+  list_pause: Pause | null;
 }
 
 /** What the editor changed; anything left out stays as it is. */
@@ -433,6 +481,8 @@ export interface ListInfo {
   personal: boolean;
   /** How many reminders it holds, not counting deleted ones. */
   reminders: number;
+  /** The list's pause, if it was paused and not resumed. */
+  pause: Pause | null;
 }
 
 /** A reminder that was deleted with its history kept. */
@@ -471,6 +521,17 @@ export const moveReminder = (reminderId: string, listId: string) =>
 export const deleteReminder = (reminderId: string, withHistory: boolean) =>
   invoke<void>("delete_reminder", { reminderId, withHistory });
 export const deletedReminders = () => invoke<DeletedReminder[]>("deleted_reminders");
+/** Pauses a reminder from now until `until` (unix seconds), or until resumed when null. */
+export const pauseReminder = (reminderId: string, until: number | null) =>
+  invoke<void>("pause_reminder", { reminderId, until });
+export const resumeReminder = (reminderId: string) =>
+  invoke<void>("resume_reminder", { reminderId });
+/** Pauses every reminder in a list. */
+export const pauseList = (listId: string, until: number | null) =>
+  invoke<void>("pause_list", { listId, until });
+export const resumeList = (listId: string) => invoke<void>("resume_list", { listId });
+/** The reminders paused now (the Board's Paused column). */
+export const pausedReminders = () => invoke<PausedReminder[]>("paused_reminders");
 export const filters = () => invoke<Filters>("filters");
 export const setFilters = (f: Filters) => invoke<void>("set_filters", { filters: f });
 

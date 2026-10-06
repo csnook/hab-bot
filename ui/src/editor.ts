@@ -18,6 +18,7 @@ import {
   type DurationUnit,
   type NextForm,
 } from "./delays";
+import { pauseAction, pauseFormOf, pauseSummary, type PauseAction, type PauseForm } from "./pause";
 import { patternFor, type Repeat } from "./repeat";
 import type { SummaryInput, SummaryTrigger } from "./summary";
 import { toUnixSeconds } from "./time";
@@ -65,6 +66,8 @@ export interface EditorState {
   whenLocked: string | null;
   /** The user has changed the When, so an edit sends it. */
   whenTouched: boolean;
+  /** The Pause section: only an existing reminder has one. */
+  pause: PauseForm;
 }
 
 export function newState(listId = ""): EditorState {
@@ -87,6 +90,7 @@ export function newState(listId = ""): EditorState {
     expiries: [],
     whenLocked: null,
     whenTouched: false,
+    pause: { mode: "off", date: "" },
   };
 }
 
@@ -139,9 +143,13 @@ export function expiryFormOf(spec: DelaySpec): ExpiryForm {
 }
 
 /** The form for an existing reminder. */
-export function stateFromView(v: ReminderView): EditorState {
+export function stateFromView(
+  v: ReminderView,
+  now = Math.floor(Date.now() / 1000),
+): EditorState {
   const s: EditorState = {
     ...newState(v.list_id),
+    pause: pauseFormOf(v.pause, now),
     title: v.title,
     note: v.note,
     priority: v.priority,
@@ -369,6 +377,15 @@ export function buildEdit(
   return { ok: true, value: edit };
 }
 
+/**
+ * What the Pause section asks of the core when the form is saved, given the
+ * reminder as it was opened. Pausing is not one of the edited settings: it
+ * skips what falls in the period, so the core does it as its own action.
+ */
+export function buildPause(s: EditorState, v: ReminderView, now: number): Built<PauseAction> {
+  return pauseAction(s.pause, v.pause, now);
+}
+
 /** The reminder's trigger, for the summary sentence. */
 function summaryTrigger(s: EditorState): SummaryTrigger {
   if (s.repeat === "countdown") {
@@ -382,7 +399,12 @@ function summaryTrigger(s: EditorState): SummaryTrigger {
 }
 
 /** What the live sentence at the top of the editor is built from. */
-export function summaryInput(s: EditorState, listName: string, zoneName: string | null): SummaryInput {
+export function summaryInput(
+  s: EditorState,
+  listName: string,
+  zoneName: string | null,
+  now = Math.floor(Date.now() / 1000),
+): SummaryInput {
   const o = overdueSpec(s.overdue);
   const x = expirySpecs(s.expiries);
   const zonePinned =
@@ -395,5 +417,6 @@ export function summaryInput(s: EditorState, listName: string, zoneName: string 
     zone: zonePinned ? zoneName : null,
     overdue: o.ok ? o.value : null,
     expiries: x.ok ? x.value : [],
+    paused: pauseSummary(s.pause, now),
   };
 }

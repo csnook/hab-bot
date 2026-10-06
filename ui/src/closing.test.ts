@@ -3,6 +3,7 @@ import type { ClosedEntry } from "./api";
 import {
   buttonsFor,
   cleanNote,
+  earlierLabel,
   historyLine,
   noteChoices,
   outcomeLabel,
@@ -15,7 +16,7 @@ const now = Math.floor(new Date("2026-10-03T12:00:00").getTime() / 1000);
 test("an open occurrence has Done, Snooze, Skip and a More menu", () => {
   expect(buttonsFor("open")).toEqual({
     main: ["Done", "Snooze ▾", "Skip", "More ▾"],
-    more: ["Done at a different time", "Edit reminder"],
+    more: ["Done at a different time", "Pause", "Edit reminder"],
   });
 });
 
@@ -70,6 +71,7 @@ test("history lines show what was said, tapped and received, and what was replac
     tapped_at: 4600,
     received_at: 4601,
     superseded: false,
+    paused: null,
   };
   expect(historyLine(e, f)).toBe("Completed at t1000, tapped t4600, received t4601");
   expect(historyLine({ ...e, what: "skipped", note: "away", tapped_at: 1010, received_at: null, superseded: true }, f)).toBe(
@@ -81,4 +83,35 @@ test("history lines show what was said, tapped and received, and what was replac
 test("a miss that was corrected is labelled done late", () => {
   expect(outcomeLabel("done_late")).toBe("Done late");
   expect(outcomeLabel("missed")).toBe("Missed");
+});
+
+test("a skip the pause made says so in the history, the panel and the Inbox", () => {
+  const f = (t: number) => `t${t}`;
+  const e: ClosedEntry = {
+    event_id: "e",
+    what: "skipped",
+    at: 1000,
+    note: null,
+    by: "u",
+    tapped_at: 1000,
+    received_at: null,
+    superseded: false,
+    paused: { until: null, list: false },
+  };
+  expect(historyLine(e, f, now)).toBe("Skipped by the pause until resumed at t1000");
+  expect(historyLine({ ...e, paused: { until: null, list: true } }, f, now)).toBe(
+    "Skipped by the list's pause until resumed at t1000",
+  );
+  expect(outcomeLabel("skipped", { until: 5, list: false })).toBe("Skipped by the pause");
+  expect(outcomeLabel("skipped")).toBe("Skipped");
+  expect(earlierLabel({ kind: "skipped", paused: { until: 5, list: false }, corrected: false })).toBe(
+    "skipped by pause",
+  );
+  expect(earlierLabel({ kind: "completed", paused: null, corrected: true })).toBe("completed (corrected)");
+});
+
+test("Pause is in the More menu of an open and an expected occurrence", () => {
+  expect(buttonsFor("open").more).toContain("Pause");
+  expect(buttonsFor("expected").more).toContain("Pause");
+  expect(buttonsFor("closed").more).toEqual([]);
 });

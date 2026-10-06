@@ -25,6 +25,10 @@ const inbox = (): Inbox => ({
   earlier_today: [
     { occurrence_id: "f", list_id: "home", priority: "low" } as Inbox["earlier_today"][number],
   ],
+  paused: [
+    { item: due("g", "home", "high"), pause: { until: null, list: false } },
+    { item: due("h", "work", "low"), pause: { until: 9, list: true } },
+  ],
 });
 
 describe("the sidebar's checkboxes", () => {
@@ -41,6 +45,8 @@ describe("the sidebar's checkboxes", () => {
     expect(i.due.map((d) => d.occurrence_id)).toEqual(["d"]);
     expect(i.later_today.map((e) => e.reminder_id)).toEqual(["e"]);
     expect(i.earlier_today).toEqual([]);
+    // The paused ones are filtered like the rest, and stay out of the count of hidden open ones.
+    expect(i.paused.map((p) => p.item.occurrence_id)).toEqual(["h"]);
     const snap = filterSnapshot(f, {
       due: [due("a", "home", "high"), due("b", "work", "low")],
       upcoming: [

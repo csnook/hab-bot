@@ -27,6 +27,8 @@ export interface SummaryInput {
   overdue: DelaySpec | null;
   /** The expiries added; none isn't mentioned. */
   expiries: DelaySpec[];
+  /** How long it is paused for ("until 3 March"); left out when it isn't. */
+  paused?: string | null;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -91,7 +93,8 @@ function when(t: SummaryTrigger): string {
  * Medium priority. It goes overdue after 3 h. It expires after 1 h, or the next
  * 23:59, whichever comes first."
  *
- * An overdue time or expiry is mentioned only when the reminder overrides it.
+ * An overdue time or expiry is mentioned only when the reminder overrides it,
+ * and a pause only while it is paused.
  */
 export function summarize(i: SummaryInput): string {
   const title = i.title.trim();
@@ -106,6 +109,7 @@ export function summarize(i: SummaryInput): string {
   } else if (i.expiries.length > 1) {
     parts.push(`It expires ${describeExpiries(i.expiries)}, whichever comes first.`);
   }
+  if (i.paused) parts.push(`It is paused ${i.paused}.`);
   return parts.join(" ");
 }
 

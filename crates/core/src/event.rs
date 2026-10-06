@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::countdown::Countdown;
 use crate::delay::{expiries, Delay};
 use crate::hlc::Hlc;
+use crate::pause::Pause;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -89,6 +90,21 @@ pub enum Event {
         replaces: Vec<String>,
         outcome: UndoOutcome,
     },
+    /// The occurrence fell in a pause and was skipped, because of it. If it
+    /// wasn't opened yet (an instance that came due while paused) this
+    /// opens it, closed; if it was open (when the pause began) it closes it.
+    /// `until` is when the pause ends. It is dated by `skipped_at`, which is
+    /// the instance's own time for one that came due, so that devices
+    /// skipping the same instance agree. Format 10.
+    OccurrenceSkippedForPause {
+        occurrence_id: String,
+        reminder_id: String,
+        scheduled_at: i64,
+        skipped_at: i64,
+        until: Option<i64>,
+        /// The pause is the list's, not the reminder's own.
+        list: bool,
+    },
     /// The app closed the occurrence because it expired before anyone acted.
     OccurrenceMissed {
         occurrence_id: String,
@@ -126,6 +142,10 @@ pub enum Event {
     /// that was moved or made into it meanwhile, on another device, keeps it
     /// (ADR 0009). Format 8.
     ListDeleted,
+    /// The list is paused, or resumed with `None`: every reminder in it is set
+    /// aside for the period (ADR 0011). Of several, the one with the latest
+    /// `hlc` counts. Format 10.
+    ListPaused { hlc: Hlc, pause: Option<Pause> },
     /// The reminder moved into this list from `from_list_id`, keeping its
     /// settings, occurrences and history, which this device finds in the list
     /// it came from. Of several moves of one reminder, the one with the latest
@@ -200,6 +220,8 @@ pub enum Setting {
     Expiry,
     /// The countdown trigger of a countdown reminder.
     Countdown,
+    /// Whether the reminder is paused, and until when.
+    Pause,
 }
 
 /// A new value for one setting.
@@ -219,6 +241,8 @@ pub enum Change {
     /// Empty is no delay-based expiry.
     Expiry(#[serde(with = "expiries")] Vec<Delay>),
     Countdown(Countdown),
+    /// `None` is not paused: resumed.
+    Pause(Option<Pause>),
 }
 
 impl Change {
@@ -233,6 +257,7 @@ impl Change {
             Change::Overdue(_) => Setting::Overdue,
             Change::Expiry(_) => Setting::Expiry,
             Change::Countdown(_) => Setting::Countdown,
+            Change::Pause(_) => Setting::Pause,
         }
     }
 }
@@ -276,6 +301,14 @@ impl Event {
                 change: Change::Countdown(_),
                 ..
             } => 5,
+            // Pausing arrived in format 10: an older app keeps these without
+            // applying them, so it goes on firing and alerting until updated.
+            Event::ListPaused { .. }
+            | Event::OccurrenceSkippedForPause { .. }
+            | Event::ReminderEdited {
+                change: Change::Pause(_),
+                ..
+            } => 10,
             // Undoing and correcting arrived in format 9.
             Event::OccurrenceCorrected { .. } | Event::OccurrenceUndone { .. } => 9,
             // Snoozing ahead of time arrived in format 6.

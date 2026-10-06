@@ -3,6 +3,7 @@ import type { ReminderView } from "./api";
 import {
   buildEdit,
   buildNew,
+  buildPause,
   expirySpecs,
   newExpiry,
   newNextExpiry,
@@ -48,6 +49,8 @@ const view = (patch: Partial<ReminderView> = {}): ReminderView => ({
   zone: null,
   default_overdue_seconds: 3600,
   overdue: null,
+  pause: null,
+  list_pause: null,
   expiries: [],
   ...patch,
 });
@@ -348,5 +351,52 @@ describe("lists", () => {
   test("a new reminder goes in the list chosen, or the personal list if none", () => {
     expect(newReminderList(newState())).toBeNull();
     expect(newReminderList(newState("l2"))).toBe("l2");
+  });
+});
+
+describe("the Pause section", () => {
+  const at = (s: string) => Math.floor(new Date(s).getTime() / 1000);
+  const now = at("2026-10-03T12:00:00");
+
+  test("a new reminder isn't paused, and the sentence says nothing of it", () => {
+    expect(newState().pause.mode).toBe("off");
+    expect(summaryInput(filled(), "Personal", ZONE, now).paused).toBeNull();
+  });
+
+  test("an existing reminder's form starts as it is paused", () => {
+    const paused = view({ pause: { from: now - 60, until: at("2026-10-20T00:00:00") } });
+    expect(stateFromView(paused, now).pause).toEqual({ mode: "until", date: "2026-10-20" });
+    expect(stateFromView(view(), now).pause.mode).toBe("off");
+    expect(stateFromView(view({ pause: { from: 1, until: null } }), now).pause.mode).toBe("resumed");
+    // A pause that has run out reads as off.
+    expect(stateFromView(view({ pause: { from: 1, until: now - 1 } }), now).pause.mode).toBe("off");
+  });
+
+  test("saving asks for a pause until the day, which the sentence also says", () => {
+    const v = view();
+    const s = { ...stateFromView(v, now), pause: { mode: "until" as const, date: "2026-10-20" } };
+    expect(buildPause(s, v, now)).toEqual({
+      ok: true,
+      value: { kind: "pause", until: at("2026-10-20T00:00:00") },
+    });
+    expect(summarize(summaryInput(s, "Personal", ZONE, now))).toMatch(/It is paused until 20 October\.$/);
+    // Pausing isn't one of the edited settings.
+    const edit = buildEdit(s, v, ZONE);
+    expect(edit.ok && Object.keys(edit.value)).toEqual([]);
+  });
+
+  test("turning a pause off resumes early, and an untouched one sends nothing", () => {
+    const v = view({ pause: { from: now - 60, until: at("2026-10-20T00:00:00") } });
+    const open = stateFromView(v, now);
+    expect(buildPause(open, v, now)).toEqual({ ok: true, value: { kind: "none" } });
+    const off = { ...open, pause: { ...open.pause, mode: "off" as const } };
+    expect(buildPause(off, v, now)).toEqual({ ok: true, value: { kind: "resume" } });
+    expect(summarize(summaryInput(off, "Personal", ZONE, now))).not.toMatch(/paused/);
+  });
+
+  test("a day that has passed is refused", () => {
+    const v = view();
+    const s = { ...stateFromView(v, now), pause: { mode: "until" as const, date: "2026-10-03" } };
+    expect(buildPause(s, v, now).ok).toBe(false);
   });
 });

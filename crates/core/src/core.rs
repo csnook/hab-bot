@@ -12,6 +12,7 @@ use crate::event::{
     FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
+use crate::pause::{Pause, PauseCause};
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::{self, Parts, Schedule};
 use crate::state::{
@@ -144,6 +145,10 @@ pub struct ListInfo {
     pub personal: bool,
     /// How many reminders it holds, not counting deleted ones.
     pub reminders: usize,
+    /// The list's pause, if it was ever paused and not resumed. It sets its
+    /// reminders aside only for as long as it covers the time
+    /// ([`Pause::covers`]): one that has run out is still shown here.
+    pub pause: Option<Pause>,
 }
 
 /// A reminder that was deleted with its history kept.
@@ -285,6 +290,11 @@ pub struct ReminderView {
     /// The expiries added, whichever comes first. Firing again always
     /// expires an occurrence too.
     pub expiries: Vec<DelaySpec>,
+    /// The reminder's own pause, if it was paused and not resumed. It counts
+    /// only while it covers the time ([`Pause::covers`]).
+    pub pause: Option<Pause>,
+    /// Its list's pause, which also sets it aside.
+    pub list_pause: Option<Pause>,
 }
 
 /// An occurrence predicted to come due: it becomes an occurrence only if the
@@ -322,6 +332,8 @@ pub struct EarlierItem {
     pub can_undo: bool,
     /// How it was closed was changed afterwards: the history has the original.
     pub corrected: bool,
+    /// It was skipped because it fell in a pause.
+    pub paused: Option<PauseCause>,
 }
 
 /// How a closed occurrence counts, for the history and reliability.
@@ -352,6 +364,8 @@ pub struct ClosedEntry {
     pub received_at: Option<i64>,
     /// A later correction or undo took its place: the original, kept.
     pub superseded: bool,
+    /// A skip the pause made: the history attributes it to the pause.
+    pub paused: Option<PauseCause>,
 }
 
 /// A closed occurrence as the details panel shows it.
@@ -370,6 +384,8 @@ pub struct ClosedView {
     pub note: Option<String>,
     pub can_undo: bool,
     pub corrected: bool,
+    /// It was skipped because it fell in a pause.
+    pub paused: Option<PauseCause>,
     /// Every closing, correction and undo, oldest first.
     pub history: Vec<ClosedEntry>,
 }
@@ -386,6 +402,33 @@ pub struct Inbox {
     pub later_today: Vec<ExpectedItem>,
     /// Occurrences closed today, including missed ones, latest first.
     pub earlier_today: Vec<EarlierItem>,
+    /// Open occurrences of reminders that are paused now. They stay open and
+    /// can be acted on, but they are not in Overdue or Due, never alert and
+    /// don't count in the tray's badge: pausing is for being left alone.
+    pub paused: Vec<PausedOpen>,
+}
+
+/// An open occurrence of a paused reminder, and what pauses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PausedOpen {
+    pub item: DueItem,
+    pub pause: PauseCause,
+}
+
+/// A reminder that is paused now, for the Board's Paused column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PausedReminder {
+    pub reminder_id: String,
+    pub list_id: String,
+    pub title: String,
+    pub priority: Priority,
+    /// What pauses it: its own pause or its list's, and until when.
+    pub pause: PauseCause,
+    /// When that pause began.
+    pub from: i64,
+    /// It has an open occurrence, which stays where it is until it closes
+    /// (the Board keeps such a card in Overdue or Due).
+    pub has_open: bool,
 }
 
 /// Instances kept when a device was away long enough to pass many: the most
@@ -494,6 +537,7 @@ impl Core {
             colour: s.list_colour.clone(),
             personal,
             reminders: s.reminders.len(),
+            pause: s.list_pause,
         };
         let mut v = vec![info(&self.list_id, &self.state, true)];
         let mut others: Vec<ListInfo> = self
@@ -842,6 +886,8 @@ impl Core {
             default_overdue_seconds: r.default_overdue_after(),
             overdue: r.overdue_override.as_ref().map(Delay::spec),
             expiries: r.expiries.iter().map(Delay::spec).collect(),
+            pause: r.pause,
+            list_pause: state.list_pause,
         })
     }
 
@@ -1041,8 +1087,28 @@ impl Core {
     /// A reminder whose time passed while the app was closed fires late, on
     /// the first tick after start; if its expiry has passed too it is missed
     /// at once and, as nobody should be alerted, not returned.
+    ///
+    /// An instance that falls in a pause doesn't fire: it is recorded as
+    /// skipped because of the pause (ADR 0011).
     pub fn tick(&mut self, now: i64) -> Result<Vec<Fired>> {
-        let pending: Vec<(String, String, String, i64)> = self
+        let mut fired = self.fire_due(now, false)?;
+        let expired = self.expire_open(now)?;
+        fired.retain(|f| !expired.contains(&f.occurrence_id));
+        Ok(fired)
+    }
+
+    /// Records as skipped the instances that have come due in a pause, and
+    /// nothing else. Run before a pause changes, so that what fell in the
+    /// pause as it stood is skipped whatever the change, and a device waking
+    /// after a resume doesn't fire what the pause had covered.
+    fn skip_paused(&mut self, now: i64) -> Result<()> {
+        self.fire_due(now, true).map(|_| ())
+    }
+
+    /// Opens (or, in a pause, skips) every instance whose time has come. With
+    /// `paused_only` an instance outside a pause is left alone.
+    fn fire_due(&mut self, now: i64, paused_only: bool) -> Result<Vec<Fired>> {
+        let pending: Vec<(String, String, String, i64, Option<PauseCause>)> = self
             .states()
             .flat_map(|(list_id, s)| {
                 s.pending_firings(now)
@@ -1053,13 +1119,28 @@ impl Core {
                             r.id.clone(),
                             r.title.clone(),
                             r.fire_at,
+                            s.pause_at(r, r.fire_at),
                         )
                     })
                     .collect::<Vec<_>>()
             })
             .collect();
         let mut fired = Vec::new();
-        for (list_id, reminder_id, title, scheduled_at) in pending {
+        for (list_id, reminder_id, title, scheduled_at, paused) in pending {
+            if let Some(cause) = paused {
+                self.record_pause_skip(
+                    &list_id,
+                    &reminder_id,
+                    scheduled_at,
+                    scheduled_at,
+                    cause,
+                    now,
+                )?;
+                continue;
+            }
+            if paused_only {
+                continue;
+            }
             // The occurrence's identity is the reminder plus the scheduled
             // time, so firings on several devices merge into one.
             let occurrence_id = format!("{reminder_id}@{scheduled_at}");
@@ -1079,11 +1160,35 @@ impl Core {
                 title,
             });
         }
-        fired.extend(self.fire_schedules(now)?);
-        fired.extend(self.fire_countdowns(now)?);
-        let expired = self.expire_open(now)?;
-        fired.retain(|f| !expired.contains(&f.occurrence_id));
+        fired.extend(self.fire_schedules(now, paused_only)?);
+        fired.extend(self.fire_countdowns(now, paused_only)?);
         Ok(fired)
+    }
+
+    /// Records that an occurrence, open or yet to open, was skipped because
+    /// it fell in a pause, as of `skipped_at`.
+    fn record_pause_skip(
+        &mut self,
+        list_id: &str,
+        reminder_id: &str,
+        scheduled_at: i64,
+        skipped_at: i64,
+        cause: PauseCause,
+        now: i64,
+    ) -> Result<()> {
+        self.record_in(
+            list_id,
+            now,
+            Event::OccurrenceSkippedForPause {
+                occurrence_id: format!("{reminder_id}@{scheduled_at}"),
+                reminder_id: reminder_id.to_string(),
+                scheduled_at,
+                skipped_at,
+                until: cause.until,
+                list: cause.list,
+            },
+        )?;
+        Ok(())
     }
 
     /// Closes as missed every open occurrence whose reminder's expiry delay,
@@ -1169,34 +1274,58 @@ impl Core {
 
     /// Fires the countdowns that have run out. Like a schedule it fires late
     /// on waking, with its scheduled time unchanged so what is overdue and
-    /// what has expired count from it.
-    fn fire_countdowns(&mut self, now: i64) -> Result<Vec<Fired>> {
-        let mut due = Vec::new();
-        for (list_id, state) in self.states() {
-            for r in state.reminders.values().filter(|r| r.counts_down()) {
-                if let Some(at) = self.countdown_next(state, r).filter(|at| *at <= now) {
-                    due.push((list_id.to_string(), r.id.clone(), r.title.clone(), at));
+    /// what has expired count from it. One that runs out in a pause is
+    /// skipped as of when it ran out, which restarts it from there (ADR 0011).
+    fn fire_countdowns(&mut self, now: i64, paused_only: bool) -> Result<Vec<Fired>> {
+        let mut fired = Vec::new();
+        // Each skip restarts the countdown, which may run out again in the
+        // same pause.
+        for _ in 0..MAX_LATE_INSTANCES {
+            let mut due = Vec::new();
+            for (list_id, state) in self.states() {
+                for r in state.reminders.values().filter(|r| r.counts_down()) {
+                    if let Some(at) = self.countdown_next(state, r).filter(|at| *at <= now) {
+                        due.push((
+                            list_id.to_string(),
+                            r.id.clone(),
+                            r.title.clone(),
+                            at,
+                            state.pause_at(r, at),
+                        ));
+                    }
                 }
             }
-        }
-        let mut fired = Vec::new();
-        for (list_id, reminder_id, title, at) in due {
-            let occurrence_id = format!("{reminder_id}@{at}");
-            self.record_in(
-                &list_id,
-                now,
-                Event::OccurrenceOpened {
-                    occurrence_id: occurrence_id.clone(),
-                    reminder_id: reminder_id.clone(),
-                    scheduled_at: at,
-                    fired_at: now,
-                },
-            )?;
-            fired.push(Fired {
-                occurrence_id,
-                reminder_id,
-                title,
-            });
+            let mut progressed = false;
+            for (list_id, reminder_id, title, at, paused) in due {
+                if let Some(cause) = paused {
+                    self.record_pause_skip(&list_id, &reminder_id, at, at, cause, now)?;
+                    progressed = true;
+                    continue;
+                }
+                if paused_only {
+                    continue;
+                }
+                let occurrence_id = format!("{reminder_id}@{at}");
+                self.record_in(
+                    &list_id,
+                    now,
+                    Event::OccurrenceOpened {
+                        occurrence_id: occurrence_id.clone(),
+                        reminder_id: reminder_id.clone(),
+                        scheduled_at: at,
+                        fired_at: now,
+                    },
+                )?;
+                fired.push(Fired {
+                    occurrence_id,
+                    reminder_id,
+                    title,
+                });
+                progressed = true;
+            }
+            if !progressed {
+                break;
+            }
         }
         Ok(fired)
     }
@@ -1206,8 +1335,9 @@ impl Core {
     /// scheduled time unchanged so what is overdue and what has expired count
     /// from it. Earlier instances that passed meanwhile are recorded as
     /// missed, and so is any occurrence still open when an instance fires
-    /// (ADR 0001): a reminder never has two open.
-    fn fire_schedules(&mut self, now: i64) -> Result<Vec<Fired>> {
+    /// (ADR 0001): a reminder never has two open. An instance in a pause is
+    /// skipped instead, as of its own time (ADR 0011).
+    fn fire_schedules(&mut self, now: i64, paused_only: bool) -> Result<Vec<Fired>> {
         struct Work {
             list_id: String,
             reminder: Reminder,
@@ -1242,6 +1372,14 @@ impl Core {
                 let state = self.state_of(&w.list_id).expect("the list is held");
                 if state.is_fired(&occurrence_id) {
                     continue; // another device already fired this instance
+                }
+                if let Some(cause) = state.pause_at(&w.reminder, at) {
+                    self.record_pause_skip(&w.list_id, reminder_id, at, at, cause, now)?;
+                    continue;
+                }
+                if paused_only {
+                    // What comes after is for the next tick to fire.
+                    break;
                 }
                 let open = state
                     .occurrences
@@ -1604,6 +1742,7 @@ impl Core {
                 by: h.by,
                 tapped_at: h.recorded_at,
                 superseded: h.superseded,
+                paused: h.paused,
             })
             .collect();
         let corrected = !c.replaces.is_empty();
@@ -1639,6 +1778,7 @@ impl Core {
             note: c.note.clone(),
             can_undo: c.kind != ClosingKind::Missed,
             corrected,
+            paused: c.paused,
             history,
         })
     }
@@ -2012,6 +2152,10 @@ impl Core {
 
     /// When the next unfired reminder is due or the next open occurrence
     /// expires, so the scheduler can sleep.
+    ///
+    /// An instance in a pause counts too: nothing alerts, but it is skipped
+    /// when its time comes, so that the history says so and a countdown
+    /// restarts, and for that the device wakes (ADR 0011).
     pub fn next_fire_at(&self) -> Option<i64> {
         let device = &self.device_tz();
         let one_off = self.states().filter_map(|(_, s)| s.next_fire_at()).min();
@@ -2068,7 +2212,7 @@ impl Core {
         let mut out = Vec::new();
         for (_, s) in self.states() {
             for r in s.reminders.values() {
-                let times = if r.counts_down() {
+                let times: Vec<i64> = if r.counts_down() {
                     // Only the next one: the one after depends on when
                     // this one is closed.
                     self.countdown_next(s, r)
@@ -2087,6 +2231,12 @@ impl Core {
                 } else {
                     Vec::new()
                 };
+                // What falls in a pause won't fire: it is skipped when its
+                // time comes, so it isn't expected.
+                let times: Vec<i64> = times
+                    .into_iter()
+                    .filter(|t| s.pause_at(r, *t).is_none())
+                    .collect();
                 let next = self.next_expected(s, r, now).ok();
                 out.extend(times.into_iter().map(|t| ExpectedItem {
                     can_close_early: next == Some(t),
@@ -2126,16 +2276,33 @@ impl Core {
                         kind: c.kind,
                         can_undo: c.kind != ClosingKind::Missed,
                         corrected: !c.replaces.is_empty(),
+                        paused: c.paused,
                     })
                 })
             })
             .collect();
         earlier
             .sort_by(|a, b| (b.closed_at, &b.occurrence_id).cmp(&(a.closed_at, &a.occurrence_id)));
-        let (mut overdue, due): (Vec<DueItem>, Vec<DueItem>) = self
-            .states()
-            .flat_map(|(_, s)| s.due(&self.device_tz()))
-            .partition(|d| d.overdue_at <= now);
+        // Open occurrences of paused reminders are set aside, quiet.
+        let mut paused: Vec<PausedOpen> = Vec::new();
+        let mut open: Vec<DueItem> = Vec::new();
+        for (_, s) in self.states() {
+            for d in s.due(&self.device_tz()) {
+                match s
+                    .reminders
+                    .get(&d.reminder_id)
+                    .and_then(|r| s.pause_at(r, now))
+                {
+                    Some(pause) => paused.push(PausedOpen { item: d, pause }),
+                    None => open.push(d),
+                }
+            }
+        }
+        paused.sort_by(|a, b| {
+            (a.item.fired_at, &a.item.occurrence_id).cmp(&(b.item.fired_at, &b.item.occurrence_id))
+        });
+        let (mut overdue, due): (Vec<DueItem>, Vec<DueItem>) =
+            open.into_iter().partition(|d| d.overdue_at <= now);
         overdue.sort_by(|a, b| {
             (
                 std::cmp::Reverse(a.priority),
@@ -2155,7 +2322,182 @@ impl Core {
             due,
             later_today: self.expected(now, end - 1),
             earlier_today: earlier,
+            paused,
         }
+    }
+
+    // ---- Pausing (ADR 0011) ----
+
+    /// Sets a reminder aside from now until `until`, or until it is resumed
+    /// with `None`. Its instances in the pause are skipped, the history
+    /// saying it was the pause, and so is its occurrence that is open now.
+    /// Pausing one already paused changes the end and keeps the start.
+    pub fn pause_reminder(
+        &mut self,
+        reminder_id: &str,
+        until: Option<i64>,
+        now: i64,
+    ) -> Result<()> {
+        if until.is_some_and(|u| u <= now) {
+            return Err(Error::PauseInThePast);
+        }
+        let list_id = self.list_of_reminder(reminder_id)?;
+        self.skip_paused(now)?;
+        let state = self.state_of(&list_id).expect("the list is held");
+        let current = state.reminders[reminder_id].pause;
+        let from = current.filter(|p| p.covers(now)).map_or(now, |p| p.from);
+        let pause = Pause { from, until };
+        if current != Some(pause) {
+            let hlc = self.next_hlc(&list_id, now);
+            self.record_in(
+                &list_id,
+                now,
+                Event::ReminderEdited {
+                    reminder_id: reminder_id.to_string(),
+                    hlc,
+                    change: Change::Pause(Some(pause)),
+                },
+            )?;
+        }
+        self.skip_open_for_pause(&list_id, Some(reminder_id), now)
+    }
+
+    /// Resumes a reminder paused on its own: it fires normally from its next
+    /// instance. What fell in the pause stays skipped. (If its list is
+    /// paused, it stays set aside until that is resumed.)
+    pub fn resume_reminder(&mut self, reminder_id: &str, now: i64) -> Result<()> {
+        let list_id = self.list_of_reminder(reminder_id)?;
+        if self.state_of(&list_id).expect("the list is held").reminders[reminder_id]
+            .pause
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.skip_paused(now)?;
+        let hlc = self.next_hlc(&list_id, now);
+        self.record_in(
+            &list_id,
+            now,
+            Event::ReminderEdited {
+                reminder_id: reminder_id.to_string(),
+                hlc,
+                change: Change::Pause(None),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Sets a whole list aside, as [`Core::pause_reminder`] does a reminder:
+    /// every reminder in it, including ones moved into it while it is
+    /// paused.
+    pub fn pause_list(&mut self, list_id: &str, until: Option<i64>, now: i64) -> Result<()> {
+        self.check_list(list_id)?;
+        if until.is_some_and(|u| u <= now) {
+            return Err(Error::PauseInThePast);
+        }
+        self.skip_paused(now)?;
+        let current = self.state_of(list_id).and_then(|s| s.list_pause);
+        let from = current.filter(|p| p.covers(now)).map_or(now, |p| p.from);
+        let pause = Pause { from, until };
+        if current != Some(pause) {
+            let hlc = self.next_hlc(list_id, now);
+            self.record_in(
+                list_id,
+                now,
+                Event::ListPaused {
+                    hlc,
+                    pause: Some(pause),
+                },
+            )?;
+        }
+        self.skip_open_for_pause(list_id, None, now)
+    }
+
+    /// Resumes a paused list.
+    pub fn resume_list(&mut self, list_id: &str, now: i64) -> Result<()> {
+        self.check_list(list_id)?;
+        if self.state_of(list_id).and_then(|s| s.list_pause).is_none() {
+            return Ok(());
+        }
+        self.skip_paused(now)?;
+        let hlc = self.next_hlc(list_id, now);
+        self.record_in(list_id, now, Event::ListPaused { hlc, pause: None })?;
+        Ok(())
+    }
+
+    /// Skips the occurrences open now of a reminder (or, with `None`, of
+    /// every reminder in the list) that the pause covers: the pause is for
+    /// being left alone, and what is open is part of it.
+    fn skip_open_for_pause(
+        &mut self,
+        list_id: &str,
+        reminder_id: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let state = self.state_of(list_id).expect("the list is held");
+        let open: Vec<(String, String, i64, PauseCause)> = state
+            .occurrences
+            .values()
+            .filter(|o| o.is_open())
+            .filter(|o| reminder_id.is_none_or(|r| o.reminder_id == r))
+            .filter_map(|o| {
+                let r = state.reminders.get(&o.reminder_id)?;
+                let cause = state.pause_at(r, now)?;
+                Some((o.id.clone(), r.id.clone(), o.scheduled_at, cause))
+            })
+            .collect();
+        for (id, reminder_id, scheduled_at, cause) in open {
+            self.record_in(
+                list_id,
+                now,
+                Event::OccurrenceSkippedForPause {
+                    occurrence_id: id,
+                    reminder_id,
+                    scheduled_at,
+                    skipped_at: now,
+                    until: cause.until,
+                    list: cause.list,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Whether a reminder is paused at `now`, by its own pause or its list's.
+    /// An event trigger (when they exist) doesn't fire while this is true.
+    pub fn is_paused(&self, reminder_id: &str, now: i64) -> bool {
+        self.states().any(|(_, s)| s.is_paused(reminder_id, now))
+    }
+
+    /// The reminders paused at `now`, by name: the Board's Paused column.
+    pub fn paused_reminders(&self, now: i64) -> Vec<PausedReminder> {
+        let mut v: Vec<PausedReminder> = self
+            .states()
+            .flat_map(|(list_id, s)| {
+                s.reminders.values().filter_map(move |r| {
+                    let pause = s.pause_at(r, now)?;
+                    let from = if pause.list {
+                        s.list_pause?.from
+                    } else {
+                        r.pause?.from
+                    };
+                    Some(PausedReminder {
+                        reminder_id: r.id.clone(),
+                        list_id: list_id.to_string(),
+                        title: r.title.clone(),
+                        priority: r.priority,
+                        pause,
+                        from,
+                        has_open: s
+                            .occurrences
+                            .values()
+                            .any(|o| o.reminder_id == r.id && o.is_open()),
+                    })
+                })
+            })
+            .collect();
+        v.sort_by(|a, b| (&a.title, &a.reminder_id).cmp(&(&b.title, &b.reminder_id)));
+        v
     }
 
     // ---- Lists, moving and deleting (ADR 0009) ----

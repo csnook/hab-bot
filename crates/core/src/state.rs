@@ -7,6 +7,7 @@ use crate::countdown::Countdown;
 use crate::delay::Delay;
 use crate::event::{Change, Correction, Event, Setting, StoredEvent, UndoOutcome};
 use crate::hlc::Hlc;
+use crate::pause::{Pause, PauseCause};
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
@@ -55,6 +56,9 @@ pub struct Reminder {
     /// When it was last done, as given when the countdown reminder was made,
     /// which starts its first countdown. `None` is "never": it fires at once.
     pub countdown_from: Option<i64>,
+    /// Set aside for a period, if it is. A reminder in a paused list is also
+    /// paused, by the list ([`State::pause_at`]).
+    pub pause: Option<Pause>,
 }
 
 impl Reminder {
@@ -136,6 +140,8 @@ pub struct Closing {
     /// The closings the author had seen and took the place of: a correction,
     /// or the miss an undo left. Empty for a closing of an open occurrence.
     pub replaces: Vec<String>,
+    /// A skip made because the occurrence fell in a pause.
+    pub paused: Option<PauseCause>,
 }
 
 impl Closing {
@@ -150,6 +156,7 @@ impl Closing {
             event_id: stored.event_id.clone(),
             recorded_at: stored.recorded_at,
             replaces: Vec::new(),
+            paused: None,
         }
     }
 }
@@ -276,6 +283,8 @@ pub struct HistoryEntry {
     pub superseded: bool,
     /// It is a correction of, or an undo of, an earlier entry.
     pub replaces: Vec<String>,
+    /// A skip the pause made, which the history attributes to it.
+    pub paused: Option<PauseCause>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -447,6 +456,18 @@ pub struct MoveIn {
     pub hlc: Hlc,
 }
 
+/// One pause or resume of a whole list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListPauseVersion {
+    pub event_id: String,
+    pub hlc: Hlc,
+    /// `None` resumed the list.
+    pub pause: Option<Pause>,
+    pub by: String,
+    pub device_id: String,
+    pub recorded_at: i64,
+}
+
 /// The current state, built by applying a stream's events in order.
 #[derive(Debug, Default, Clone)]
 pub struct State {
@@ -465,6 +486,11 @@ pub struct State {
     pub tombstones: BTreeMap<String, Tombstone>,
     /// Reminders deleted with their history: nothing of them is kept.
     pub purged: BTreeSet<String>,
+    /// Every pause or resume of this whole list, in stream order.
+    pub list_pauses: Vec<ListPauseVersion>,
+    /// The list's pause now: the latest of them by clock. Reminders in the
+    /// list are paused by it for as long as it covers them.
+    pub list_pause: Option<Pause>,
     /// The moves into this list, in stream order.
     pub moves_in: Vec<MoveIn>,
     /// Actions on an occurrence this list's stream doesn't have, such as one
@@ -518,6 +544,7 @@ impl State {
                 | Event::OccurrenceCompleted { occurrence_id, .. }
                 | Event::OccurrenceSkipped { occurrence_id, .. }
                 | Event::OccurrenceMissed { occurrence_id, .. }
+                | Event::OccurrenceSkippedForPause { occurrence_id, .. }
                 | Event::OccurrenceCorrected { occurrence_id, .. }
                 | Event::OccurrenceUndone { occurrence_id, .. }
                 | Event::OccurrenceSnoozed { occurrence_id, .. }
@@ -538,6 +565,7 @@ impl State {
                 | Event::ListNamed { .. }
                 | Event::ListColoured { .. }
                 | Event::ListDeleted
+                | Event::ListPaused { .. }
                 | Event::ReminderMovedIn { .. }
                 | Event::ReminderDeleted { .. }
                 | Event::ReminderPurged { .. }
@@ -593,6 +621,7 @@ impl State {
                             expiries: Vec::new(),
                             countdown: None,
                             countdown_from: None,
+                            pause: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -629,6 +658,7 @@ impl State {
                             expiries: Vec::new(),
                             countdown: None,
                             countdown_from: None,
+                            pause: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -666,6 +696,7 @@ impl State {
                             expiries: Vec::new(),
                             countdown: Some(countdown.clone()),
                             countdown_from: *last_done,
+                            pause: None,
                         },
                     );
                     self.refresh(reminder_id);
@@ -701,58 +732,39 @@ impl State {
                     }
                     return;
                 }
-                if self.aliases.contains_key(occurrence_id) {
+                self.insert_occurrence(occurrence_id, reminder_id, *scheduled_at, *fired_at);
+            }
+            Event::OccurrenceSkippedForPause {
+                occurrence_id,
+                reminder_id,
+                scheduled_at,
+                skipped_at,
+                until,
+                list,
+            } => {
+                if self.purged.contains(reminder_id) {
                     return;
                 }
-                let one_off = self
-                    .reminders
-                    .get(reminder_id)
-                    .is_some_and(|r| !r.repeats());
-                if one_off {
-                    // A one-off reminder has one occurrence (ADR 0001).
-                    let existing = self
-                        .occurrences
-                        .values()
-                        .find(|o| &o.reminder_id == reminder_id)
-                        .map(|o| o.id.clone());
-                    if let Some(existing) = existing {
-                        self.aliases.insert(occurrence_id.clone(), existing);
-                        return;
-                    }
+                // An instance that came due while paused is opened, closed
+                // at once; an occurrence open when the pause began is closed.
+                if !self.occurrences.contains_key(self.resolve(occurrence_id)) {
+                    self.insert_occurrence(
+                        occurrence_id,
+                        reminder_id,
+                        *scheduled_at,
+                        *scheduled_at,
+                    );
                 }
-                self.occurrences.insert(
-                    occurrence_id.clone(),
-                    Occurrence {
-                        id: occurrence_id.clone(),
-                        reminder_id: reminder_id.clone(),
-                        scheduled_at: *scheduled_at,
-                        fired_at: *fired_at,
-                        closing: None,
-                        records: Vec::new(),
-                        undos: Vec::new(),
-                        unfired: false,
-                        snoozed_until: None,
-                        snoozed_at: None,
-                        acknowledged: false,
-                        acknowledged_at: None,
+                self.add_record(
+                    occurrence_id,
+                    Closing {
+                        paused: Some(PauseCause {
+                            until: *until,
+                            list: *list,
+                        }),
+                        ..Closing::new(ClosingKind::Skipped, *skipped_at, None, stored)
                     },
                 );
-                // Snoozed ahead of time: it opens quietly.
-                let ahead = self
-                    .snoozes
-                    .iter()
-                    .rev()
-                    .find(|s| &s.occurrence_id == occurrence_id && s.ended.is_none())
-                    .map(|s| (s.until, s.set_at));
-                if let (Some((until, at)), Some(o)) =
-                    (ahead, self.occurrences.get_mut(occurrence_id))
-                {
-                    o.snoozed_until = Some(until);
-                    o.snoozed_at = Some(at);
-                }
-                if !one_off {
-                    self.expire_superseded(reminder_id);
-                }
             }
             Event::OccurrenceCompleted {
                 occurrence_id,
@@ -877,6 +889,34 @@ impl State {
             Event::ListDeleted => {
                 self.list_deleted = true;
             }
+            Event::ListPaused { hlc, pause } => {
+                if self
+                    .list_pauses
+                    .iter()
+                    .any(|p| p.event_id == stored.event_id)
+                {
+                    return;
+                }
+                let hlc = hlc.clamped(stored.recorded_at);
+                if hlc > self.latest_hlc {
+                    self.latest_hlc = hlc.clone();
+                }
+                self.list_pauses.push(ListPauseVersion {
+                    event_id: stored.event_id.clone(),
+                    hlc,
+                    pause: *pause,
+                    by: stored.author.clone(),
+                    device_id: stored.device_id.clone(),
+                    recorded_at: stored.recorded_at,
+                });
+                // Of several, the latest clock counts, whatever order they
+                // arrive in.
+                self.list_pause = self
+                    .list_pauses
+                    .iter()
+                    .max_by(|a, b| a.hlc.cmp(&b.hlc))
+                    .and_then(|p| p.pause);
+            }
             Event::ReminderMovedIn {
                 reminder_id,
                 from_list_id,
@@ -933,6 +973,68 @@ impl State {
                     at: stored.recorded_at,
                 });
             }
+        }
+    }
+
+    /// Adds an occurrence a reminder fired, unless it is one the reminder
+    /// already has (ADR 0001): a one-off has only one, and for a repeating
+    /// reminder the older open ones are missed.
+    fn insert_occurrence(
+        &mut self,
+        occurrence_id: &String,
+        reminder_id: &String,
+        scheduled_at: i64,
+        fired_at: i64,
+    ) {
+        if self.aliases.contains_key(occurrence_id) {
+            return;
+        }
+        let one_off = self
+            .reminders
+            .get(reminder_id)
+            .is_some_and(|r| !r.repeats());
+        if one_off {
+            // A one-off reminder has one occurrence (ADR 0001).
+            let existing = self
+                .occurrences
+                .values()
+                .find(|o| &o.reminder_id == reminder_id)
+                .map(|o| o.id.clone());
+            if let Some(existing) = existing {
+                self.aliases.insert(occurrence_id.clone(), existing);
+                return;
+            }
+        }
+        self.occurrences.insert(
+            occurrence_id.clone(),
+            Occurrence {
+                id: occurrence_id.clone(),
+                reminder_id: reminder_id.clone(),
+                scheduled_at,
+                fired_at,
+                closing: None,
+                records: Vec::new(),
+                undos: Vec::new(),
+                unfired: false,
+                snoozed_until: None,
+                snoozed_at: None,
+                acknowledged: false,
+                acknowledged_at: None,
+            },
+        );
+        // Snoozed ahead of time: it opens quietly.
+        let ahead = self
+            .snoozes
+            .iter()
+            .rev()
+            .find(|s| &s.occurrence_id == occurrence_id && s.ended.is_none())
+            .map(|s| (s.until, s.set_at));
+        if let (Some((until, at)), Some(o)) = (ahead, self.occurrences.get_mut(occurrence_id)) {
+            o.snoozed_until = Some(until);
+            o.snoozed_at = Some(at);
+        }
+        if !one_off {
+            self.expire_superseded(reminder_id);
         }
     }
 
@@ -1182,6 +1284,7 @@ impl State {
                     event_id: format!("expired:{id}"),
                     recorded_at: at,
                     replaces: Vec::new(),
+                    paused: None,
                 },
             );
         }
@@ -1212,6 +1315,7 @@ impl State {
                 recorded_at: c.recorded_at,
                 superseded: gone.contains(c.event_id.as_str()),
                 replaces: c.replaces.clone(),
+                paused: c.paused,
             })
             .chain(o.undos.iter().map(|u| HistoryEntry {
                 event_id: u.event_id.clone(),
@@ -1226,6 +1330,7 @@ impl State {
                 recorded_at: u.recorded_at,
                 superseded: gone.contains(u.event_id.as_str()),
                 replaces: u.replaces.clone(),
+                paused: None,
             }))
             .collect();
         v.sort_by(|a, b| (a.recorded_at, &a.event_id).cmp(&(b.recorded_at, &b.event_id)));
@@ -1333,6 +1438,7 @@ impl State {
             Setting::Overdue,
             Setting::Expiry,
             Setting::Countdown,
+            Setting::Pause,
         ] {
             let latest = self
                 .versions
@@ -1357,6 +1463,7 @@ impl State {
                 Some(Change::Overdue(o)) => r.overdue_override = o,
                 Some(Change::Expiry(e)) => r.expiries = e,
                 Some(Change::Countdown(c)) => r.countdown = Some(c),
+                Some(Change::Pause(p)) => r.pause = p,
                 None => {}
             }
         }
@@ -1384,6 +1491,29 @@ impl State {
             first.current = true;
         }
         v
+    }
+
+    /// What puts the reminder under a pause at `t`, if anything: its own
+    /// pause, or else its list's. Instances that fall in a pause are skipped
+    /// ([`crate::Core::tick`]) and event triggers don't fire in it.
+    pub fn pause_at(&self, r: &Reminder, t: i64) -> Option<PauseCause> {
+        let own = r.pause.filter(|p| p.covers(t)).map(|p| PauseCause {
+            until: p.until,
+            list: false,
+        });
+        own.or_else(|| {
+            self.list_pause.filter(|p| p.covers(t)).map(|p| PauseCause {
+                until: p.until,
+                list: true,
+            })
+        })
+    }
+
+    /// Whether the reminder is paused at `now`.
+    pub fn is_paused(&self, reminder_id: &str, now: i64) -> bool {
+        self.reminders
+            .get(reminder_id)
+            .is_some_and(|r| self.pause_at(r, now).is_some())
     }
 
     /// Whether the reminder has fired yet (its one occurrence exists).
