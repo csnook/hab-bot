@@ -420,12 +420,13 @@ impl Alerter {
                 tracked.standing = Some(style);
                 tracked.last_at = now;
                 tracked.stopped = false;
-                out.commands.push(Command::Show(Notification::new(
-                    &d.occurrence_id,
-                    &d.title,
-                    style,
-                    d.overdue_at <= now,
-                )));
+                let mut n =
+                    Notification::new(&d.occurrence_id, &d.title, style, d.overdue_at <= now);
+                // The note rides along under "Due" or "Overdue".
+                if !d.note.is_empty() {
+                    n.body = format!("{}\n{}", n.body, d.note);
+                }
+                out.commands.push(Command::Show(n));
             }
             // An alarm that has rung for its ring duration goes quiet, once.
             if style == AlertStyle::Alarm {

@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use crate::countdown::Countdown;
+use crate::delay::Delay;
 use crate::event::{Change, Event, Setting, StoredEvent};
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
@@ -41,12 +43,12 @@ pub struct Reminder {
     /// 8:00 doesn't fire this morning's.
     pub active_from: i64,
     pub priority: Priority,
-    /// Overrides the priority's due interval: seconds after the scheduled time
-    /// that an occurrence goes overdue.
-    pub overdue_override: Option<i64>,
-    /// Seconds after the scheduled time that an open occurrence is missed.
-    /// Firing again always expires it too (ADR 0001).
-    pub expiry_after: Option<i64>,
+    /// Overrides the priority's due interval: when, counted from the
+    /// scheduled time, an occurrence goes overdue.
+    pub overdue_override: Option<Delay>,
+    /// When, counted from the scheduled time, an open occurrence is missed:
+    /// whichever comes first. Firing again always expires it too (ADR 0001).
+    pub expiries: Vec<Delay>,
     /// What fires it, if it is a countdown: a set time after its last
     /// occurrence closed. A countdown reminder has no schedules.
     pub countdown: Option<Countdown>,
@@ -56,22 +58,40 @@ pub struct Reminder {
 }
 
 impl Reminder {
-    /// Seconds after an occurrence's scheduled time that it goes overdue: the
-    /// override if there is one, otherwise the priority's due interval.
-    pub fn overdue_after(&self) -> i64 {
-        self.overdue_override
-            .unwrap_or_else(|| self.priority.settings().due_interval)
+    /// The time zone the reminder's schedules are read in: its own, or else
+    /// the device's.
+    pub fn zone_in(&self, device: &TimeZone) -> TimeZone {
+        self.zone
+            .as_deref()
+            .and_then(crate::schedule::zone)
+            .unwrap_or_else(|| device.clone())
     }
 
-    /// When an occurrence scheduled at `scheduled_at` goes overdue.
-    pub fn overdue_at(&self, scheduled_at: i64) -> i64 {
-        scheduled_at.saturating_add(self.overdue_after())
+    /// Seconds after an occurrence's scheduled time that it goes overdue by
+    /// default: the priority's due interval.
+    pub fn default_overdue_after(&self) -> i64 {
+        self.priority.settings().due_interval
+    }
+
+    /// When an occurrence scheduled at `scheduled_at` goes overdue: the
+    /// reminder's override if it has one that can be met, otherwise the
+    /// priority's.
+    pub fn overdue_at(&self, scheduled_at: i64, device: &TimeZone) -> i64 {
+        let zone = self.zone_in(device);
+        self.overdue_override
+            .as_ref()
+            .and_then(|d| d.resolve(scheduled_at, &zone))
+            .unwrap_or_else(|| scheduled_at.saturating_add(self.default_overdue_after()))
     }
 
     /// When an occurrence scheduled at `scheduled_at` is missed for want of
-    /// action, if the reminder has such an expiry.
-    pub fn expires_at(&self, scheduled_at: i64) -> Option<i64> {
-        self.expiry_after.map(|d| scheduled_at.saturating_add(d))
+    /// action, if the reminder has such an expiry: the first of its expiries.
+    pub fn expires_at(&self, scheduled_at: i64, device: &TimeZone) -> Option<i64> {
+        let zone = self.zone_in(device);
+        self.expiries
+            .iter()
+            .filter_map(|d| d.resolve(scheduled_at, &zone))
+            .min()
     }
 
     /// Fires again and again, on schedules or a countdown.
@@ -149,7 +169,10 @@ impl Occurrence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DueItem {
     pub occurrence_id: String,
+    pub reminder_id: String,
     pub title: String,
+    /// The reminder's note, shown on its occurrences.
+    pub note: String,
     pub scheduled_at: i64,
     pub fired_at: i64,
     /// A change to it hasn't been received by the server yet.
@@ -173,6 +196,7 @@ pub struct DueItem {
 pub struct UpcomingItem {
     pub reminder_id: String,
     pub title: String,
+    pub note: String,
     pub fire_at: i64,
     /// A change to it hasn't been received by the server yet.
     pub not_sent: bool,
@@ -373,7 +397,7 @@ impl State {
                             active_from: stored.recorded_at,
                             priority: Priority::default(),
                             overdue_override: None,
-                            expiry_after: None,
+                            expiries: Vec::new(),
                             countdown: None,
                             countdown_from: None,
                         },
@@ -409,7 +433,7 @@ impl State {
                             active_from: stored.recorded_at,
                             priority: Priority::default(),
                             overdue_override: None,
-                            expiry_after: None,
+                            expiries: Vec::new(),
                             countdown: None,
                             countdown_from: None,
                         },
@@ -446,7 +470,7 @@ impl State {
                             active_from: stored.recorded_at,
                             priority: Priority::default(),
                             overdue_override: None,
-                            expiry_after: None,
+                            expiries: Vec::new(),
                             countdown: Some(countdown.clone()),
                             countdown_from: *last_done,
                         },
@@ -885,7 +909,7 @@ impl State {
                 Some(Change::Zone(z)) => r.zone = z,
                 Some(Change::Priority(p)) => r.priority = p,
                 Some(Change::Overdue(o)) => r.overdue_override = o,
-                Some(Change::Expiry(e)) => r.expiry_after = e,
+                Some(Change::Expiry(e)) => r.expiries = e,
                 Some(Change::Countdown(c)) => r.countdown = Some(c),
                 None => {}
             }
@@ -946,7 +970,7 @@ impl State {
 
     /// Every open occurrence, oldest firing first, due or overdue alike. The
     /// Inbox splits them ([`crate::Core::inbox`]).
-    pub fn due(&self) -> Vec<DueItem> {
+    pub fn due(&self, device: &TimeZone) -> Vec<DueItem> {
         let mut v: Vec<DueItem> = self
             .occurrences
             .values()
@@ -955,7 +979,9 @@ impl State {
                 let r = self.reminders.get(&o.reminder_id)?;
                 Some(DueItem {
                     occurrence_id: o.id.clone(),
+                    reminder_id: r.id.clone(),
                     title: r.title.clone(),
+                    note: r.note.clone(),
                     scheduled_at: o.scheduled_at,
                     fired_at: o.fired_at,
                     not_sent: self.unsent_occurrences.contains(&o.id)
@@ -965,8 +991,8 @@ impl State {
                     acknowledged: o.acknowledged,
                     acknowledged_at: o.acknowledged_at,
                     priority: r.priority,
-                    overdue_at: r.overdue_at(o.scheduled_at),
-                    expires_at: r.expires_at(o.scheduled_at),
+                    overdue_at: r.overdue_at(o.scheduled_at, device),
+                    expires_at: r.expires_at(o.scheduled_at, device),
                 })
             })
             .collect();
@@ -982,6 +1008,7 @@ impl State {
             .map(|r| UpcomingItem {
                 reminder_id: r.id.clone(),
                 title: r.title.clone(),
+                note: r.note.clone(),
                 fire_at: r.fire_at,
                 not_sent: self.unsent_reminders.contains(&r.id),
             })

@@ -105,6 +105,101 @@ fn set_priority(
         .map_err(|e| e.to_string())
 }
 
+/// A reminder as the editor shows it.
+#[tauri::command]
+fn reminder_view(
+    app: tauri::State<'_, App>,
+    reminder_id: String,
+) -> Result<hab_core::ReminderView, String> {
+    let core = app.core.lock().unwrap();
+    core.reminder_view(&reminder_id).map_err(|e| e.to_string())
+}
+
+/// What the editor changed; anything left out stays as it is.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct EditArgs {
+    title: Option<String>,
+    note: Option<String>,
+    priority: Option<hab_core::Priority>,
+    /// A one-off reminder's time.
+    fire_at: Option<i64>,
+    /// Replaces a schedule reminder's schedules with this one.
+    schedule: Option<SchedulePick>,
+    /// Pins the reminder to this time zone; `floating` unpins it.
+    zone: Option<String>,
+    floating: bool,
+    countdown: Option<hab_core::Countdown>,
+    /// The overdue override, or with `follow_priority` none.
+    overdue: Option<hab_core::DelaySpec>,
+    follow_priority: bool,
+    /// All the expiries, replacing the reminder's.
+    expiry: Option<Vec<hab_core::DelaySpec>>,
+}
+
+#[derive(serde::Deserialize)]
+struct SchedulePick {
+    pattern: hab_core::Pattern,
+    date: String,
+    time: String,
+}
+
+/// Applies the editor's changes to a reminder.
+#[tauri::command]
+fn edit_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    edit: EditArgs,
+) -> Result<(), String> {
+    let delay = |d: &hab_core::DelaySpec| d.to_delay();
+    let overdue = if edit.follow_priority {
+        Some(None)
+    } else {
+        match &edit.overdue {
+            Some(d) => Some(Some(delay(d)?)),
+            None => None,
+        }
+    };
+    let expiry = match &edit.expiry {
+        Some(v) => Some(v.iter().map(delay).collect::<Result<Vec<_>, _>>()?),
+        None => None,
+    };
+    let schedules = match &edit.schedule {
+        Some(p) => Some(vec![hab_core::Schedule::from_pattern(
+            &p.pattern, &p.date, &p.time,
+        )?]),
+        None => None,
+    };
+    let zone = if edit.floating {
+        Some(None)
+    } else {
+        edit.zone.clone().map(Some)
+    };
+    {
+        let mut core = app.core.lock().unwrap();
+        let _ = core.use_system_zone();
+        core.edit_reminder(
+            &reminder_id,
+            hab_core::EditReminder {
+                title: edit.title,
+                fire_at: edit.fire_at,
+                note: edit.note,
+                schedules,
+                zone,
+                priority: edit.priority,
+                overdue,
+                expiry,
+                countdown: edit.countdown,
+            },
+            now(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    changed(&app, &handle);
+    Ok(())
+}
+
 /// The built-in priorities, for the editor and Settings → Priorities.
 #[tauri::command]
 fn priorities() -> Vec<hab_core::PriorityInfo> {
@@ -124,18 +219,19 @@ fn create_reminder(
     title: String,
     fire_at: i64,
     priority: Option<hab_core::Priority>,
-) -> Result<(), String> {
-    {
+) -> Result<String, String> {
+    let new_id = {
         let mut core = app.core.lock().unwrap();
         let id = core
             .create_reminder(&title, fire_at, now())
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
-    }
+        id
+    };
     app.sync_wake.notify_one();
     let _ = app.wake.send(());
     let _ = handle.emit(STATE_CHANGED, ());
-    Ok(())
+    Ok(new_id)
 }
 
 /// A reminder that repeats: a common pattern from a date, at a time of day,
@@ -151,21 +247,22 @@ fn create_recurring_reminder(
     time: String,
     zone: Option<String>,
     priority: Option<hab_core::Priority>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let schedule =
         hab_core::Schedule::from_pattern(&pattern, &date, &time).map_err(|e| e.to_string())?;
-    {
+    let new_id = {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
         let id = core
             .create_recurring_reminder(&title, vec![schedule], zone.as_deref(), now())
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
-    }
+        id
+    };
     app.sync_wake.notify_one();
     let _ = app.wake.send(());
     let _ = handle.emit(STATE_CHANGED, ());
-    Ok(())
+    Ok(new_id)
 }
 
 /// A reminder that fires a set time after its last occurrence closed.
@@ -184,8 +281,8 @@ fn create_countdown_reminder(
     last_done: Option<i64>,
     zone: Option<String>,
     priority: Option<hab_core::Priority>,
-) -> Result<(), String> {
-    {
+) -> Result<String, String> {
+    let new_id = {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
         let countdown = hab_core::Countdown { amount, unit, at };
@@ -193,9 +290,10 @@ fn create_countdown_reminder(
             .create_countdown_reminder(&title, countdown, zone.as_deref(), last_done, now())
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
-    }
+        id
+    };
     changed(&app, &handle);
-    Ok(())
+    Ok(new_id)
 }
 
 /// Completes a countdown reminder before it fires, as done at `done_at`
@@ -1109,6 +1207,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             create_reminder,
+            reminder_view,
+            edit_reminder,
             create_recurring_reminder,
             create_countdown_reminder,
             complete_countdown,

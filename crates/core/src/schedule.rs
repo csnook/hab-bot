@@ -52,6 +52,16 @@ pub enum Pattern {
     },
 }
 
+/// A schedule the editor can show: see [`Schedule::parts`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Parts {
+    pub pattern: Pattern,
+    /// The first date, `2026-10-03`.
+    pub date: String,
+    /// The time of day, `09:30`.
+    pub time: String,
+}
+
 impl Schedule {
     /// A schedule following `pattern`, at `time` (`09:30`), starting on
     /// `date` (`2026-10-03`).
@@ -81,6 +91,70 @@ impl Schedule {
         };
         schedule.validate()?;
         Ok(schedule)
+    }
+
+    /// The editor's pattern, first date and time of day this schedule is, if
+    /// it is one of the patterns the editor offers and nothing else.
+    pub fn parts(&self) -> Option<Parts> {
+        let (date, time) = self.start.split_once('T')?;
+        let time = match time.len() {
+            8 if time.ends_with(":00") => &time[..5],
+            _ => return None,
+        };
+        let rule = self.rule.trim();
+        let rule = rule.strip_prefix("RRULE:").unwrap_or(rule);
+        let mut freq = None;
+        let mut by_day = None;
+        let mut by_month_day = None;
+        for part in rule.split(';').filter(|p| !p.is_empty()) {
+            let (k, v) = part.split_once('=')?;
+            match k {
+                "FREQ" => freq = Some(v),
+                "BYDAY" => by_day = Some(v),
+                "BYMONTHDAY" => by_month_day = Some(v),
+                _ => return None,
+            }
+        }
+        let pattern = match (freq?, by_day, by_month_day) {
+            ("DAILY", None, None) => Pattern::Daily,
+            ("WEEKLY", Some(days), None) => {
+                let days: Vec<&str> = days.split(',').collect();
+                if days.iter().any(|d| weekday(d).is_err()) {
+                    return None;
+                }
+                if days == ["MO", "TU", "WE", "TH", "FR"] {
+                    Pattern::Weekdays
+                } else {
+                    Pattern::Weekly {
+                        days: days.into_iter().map(str::to_string).collect(),
+                    }
+                }
+            }
+            ("MONTHLY", None, Some(day)) => Pattern::MonthlyByDate {
+                day: day
+                    .parse()
+                    .ok()
+                    .filter(|d| (-1..=31).contains(d) && *d != 0)?,
+            },
+            ("MONTHLY", Some(day), None) => {
+                let (ordinal, weekday_code) = day.split_at(day.len().checked_sub(2)?);
+                weekday(weekday_code).ok()?;
+                let ordinal: i8 = ordinal.parse().ok()?;
+                if !matches!(ordinal, -1 | 1..=4) {
+                    return None;
+                }
+                Pattern::MonthlyByWeekday {
+                    ordinal,
+                    weekday: weekday_code.to_string(),
+                }
+            }
+            _ => return None,
+        };
+        Some(Parts {
+            pattern,
+            date: date.to_string(),
+            time: time.to_string(),
+        })
     }
 
     /// Whether the schedule can be read.

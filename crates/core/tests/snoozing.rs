@@ -2,8 +2,8 @@
 //! alert and the record of each snooze, through the core's own API.
 
 use hab_core::{
-    AlertStyle, Alerter, Command, Core, Countdown, CountdownUnit, EditReminder, Error, Event,
-    Notification, Priority, SnoozeEnd, SnoozeKind, FORMAT_VERSION,
+    AlertStyle, Alerter, Command, Core, Countdown, CountdownUnit, Delay, EditReminder, Error,
+    Event, Notification, Priority, SnoozeEnd, SnoozeKind, FORMAT_VERSION,
 };
 
 const MIN: i64 = 60;
@@ -23,7 +23,7 @@ fn edit(c: &mut Core, id: &str, p: Priority, expiry: Option<i64>) {
         id,
         EditReminder {
             priority: Some(p),
-            expiry: expiry.map(Some),
+            expiry: expiry.map(|d| vec![Delay::After(d)]),
             ..Default::default()
         },
         T0 - 2 * HOUR,
@@ -470,7 +470,7 @@ fn snoozing_ahead_reaches_other_devices_before_or_after_the_occurrence_fires_the
 
 #[test]
 fn snoozing_ahead_is_a_format_6_event_an_older_app_keeps_without_applying() {
-    assert_eq!(FORMAT_VERSION, 6);
+    assert_eq!(FORMAT_VERSION, 7);
     let e = Event::ExpectedOccurrenceSnoozed {
         reminder_id: "r".into(),
         scheduled_at: T0,

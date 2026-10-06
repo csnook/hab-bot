@@ -3,7 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 
 export interface DueItem {
   occurrence_id: string;
+  reminder_id: string;
   title: string;
+  /** The reminder's note, shown on its occurrences. */
+  note: string;
   scheduled_at: number;
   fired_at: number;
   /** The server hasn't received a change to it yet. */
@@ -42,6 +45,7 @@ export interface PriorityInfo {
 export interface UpcomingItem {
   reminder_id: string;
   title: string;
+  note: string;
   fire_at: number;
   not_sent: boolean;
 }
@@ -105,6 +109,7 @@ export interface Snapshot {
 export interface ExpectedItem {
   reminder_id: string;
   title: string;
+  note: string;
   scheduled_at: number;
   /** Snoozed ahead of time until then: it fires at its time, quietly. */
   snoozed_until: number | null;
@@ -137,8 +142,9 @@ export type Pattern =
   | { kind: "monthly_by_weekday"; ordinal: number; weekday: string };
 
 export const snapshot = () => invoke<Snapshot>("snapshot");
+/** The create calls return the new reminder's id. */
 export const createReminder = (title: string, fireAt: number, priority: PriorityName) =>
-  invoke<void>("create_reminder", { title, fireAt, priority });
+  invoke<string>("create_reminder", { title, fireAt, priority });
 export const priorities = () => invoke<PriorityInfo[]>("priorities");
 export const appVersion = () => invoke<string>("app_version");
 export const inbox = () => invoke<Inbox>("inbox");
@@ -150,7 +156,7 @@ export const createRecurringReminder = (
   time: string,
   zone: string | null,
   priority: PriorityName,
-) => invoke<void>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
+) => invoke<string>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
 /**
  * Creates a reminder that fires a set time after it was last done. `lastDone`
  * is unix seconds, or null for never (it fires at once). No `zone` makes a
@@ -163,7 +169,7 @@ export const createCountdownReminder = (
   zone: string | null,
   priority: PriorityName,
 ) =>
-  invoke<void>("create_countdown_reminder", {
+  invoke<string>("create_countdown_reminder", {
     title,
     amount: countdown.amount,
     unit: countdown.unit,
@@ -172,6 +178,76 @@ export const createCountdownReminder = (
     zone,
     priority,
   });
+/**
+ * How an overdue time or an expiry is counted from the scheduled time: a
+ * duration, or the next time a pattern matches ("the next 1st at 00:00").
+ * `other` is a hand-written schedule the editor shows and leaves alone.
+ */
+export type DelaySpec =
+  | { kind: "after"; seconds: number }
+  | { kind: "next"; pattern: Pattern; time: string }
+  | { kind: "other"; rule: string };
+
+/** A schedule as the editor can show it, if it is one of its patterns. */
+export interface ScheduleParts {
+  pattern: Pattern;
+  /** The first date, "2026-10-03". */
+  date: string;
+  /** The time of day, "09:30". */
+  time: string;
+}
+
+export type TriggerView =
+  | { kind: "one_off"; fire_at: number }
+  | {
+      kind: "schedules";
+      schedules: Array<{ parts: ScheduleParts | null; start: string; rule: string }>;
+    }
+  | { kind: "countdown"; countdown: Countdown };
+
+/** A reminder as the editor shows it. */
+export interface ReminderView {
+  reminder_id: string;
+  list_id: string;
+  /** The list's name; null for the personal list. */
+  list_name: string | null;
+  title: string;
+  note: string;
+  priority: PriorityName;
+  trigger: TriggerView;
+  /** The zone it is pinned to; null is floating. */
+  zone: string | null;
+  /** Seconds after the scheduled time it goes overdue by its priority. */
+  default_overdue_seconds: number;
+  /** The overdue override; null follows the priority. */
+  overdue: DelaySpec | null;
+  /** The expiries added; firing again always expires it too. */
+  expiries: DelaySpec[];
+}
+
+/** What the editor changed; anything left out stays as it is. */
+export interface EditArgs {
+  title?: string;
+  note?: string;
+  priority?: PriorityName;
+  fire_at?: number;
+  /** Replaces a schedule reminder's schedules with this one. */
+  schedule?: { pattern: Pattern; date: string; time: string };
+  /** Pins it to this zone; `floating` unpins it. */
+  zone?: string;
+  floating?: boolean;
+  countdown?: Countdown;
+  overdue?: DelaySpec;
+  /** Go back to following the priority's overdue time. */
+  follow_priority?: boolean;
+  /** All the expiries, replacing the reminder's. */
+  expiry?: DelaySpec[];
+}
+export const reminderView = (reminderId: string) =>
+  invoke<ReminderView>("reminder_view", { reminderId });
+export const editReminder = (reminderId: string, edit: EditArgs) =>
+  invoke<void>("edit_reminder", { reminderId, edit });
+
 /** Completes it before it fires: it restarts from `doneAt` (now by default). */
 export const completeCountdown = (reminderId: string, doneAt?: number) =>
   invoke<void>("complete_countdown", { reminderId, doneAt });
@@ -238,6 +314,7 @@ export const snoozeHistory = (occurrenceId: string) =>
 export interface OccurrenceView {
   occurrence_id: string;
   title: string;
+  note: string;
   /** The list's name; null for the personal list. */
   list_name: string | null;
   priority: PriorityName;

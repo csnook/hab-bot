@@ -6,12 +6,13 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::countdown::Countdown;
+use crate::delay::{Delay, DelaySpec};
 use crate::event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
-use crate::schedule::{self, Schedule};
+use crate::schedule::{self, Parts, Schedule};
 use crate::state::{
     last_chance_at, ClosingKind, DueItem, Reminder, SnoozeView, State, UpcomingItem,
 };
@@ -71,6 +72,8 @@ const DEVICE_SETTING: &str = "device_setting:";
 pub struct OccurrenceView {
     pub occurrence_id: String,
     pub title: String,
+    /// The reminder's note.
+    pub note: String,
     /// The list's name; `None` for the personal list.
     pub list_name: Option<String>,
     pub priority: Priority,
@@ -188,14 +191,64 @@ pub struct EditReminder {
     /// floating.
     pub zone: Option<Option<String>>,
     pub priority: Option<Priority>,
-    /// Overrides the priority's overdue time with a number of seconds after
-    /// the scheduled time, or with `Some(None)` goes back to following it.
-    pub overdue: Option<Option<i64>>,
-    /// Seconds after the scheduled time that an open occurrence is missed,
-    /// or with `Some(None)` no such expiry.
-    pub expiry: Option<Option<i64>>,
+    /// Overrides the priority's overdue time with a delay from the scheduled
+    /// time (a duration, or the next time a schedule matches), or with
+    /// `Some(None)` goes back to following it.
+    pub overdue: Option<Option<Delay>>,
+    /// All the delays after which an open occurrence is missed, whichever
+    /// comes first, replacing the reminder's. Empty is no such expiry.
+    pub expiry: Option<Vec<Delay>>,
     /// A new countdown, for a countdown reminder.
     pub countdown: Option<Countdown>,
+}
+
+/// What fires a reminder, as the editor's When shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TriggerView {
+    /// Fires once, at a time.
+    OneOff {
+        fire_at: i64,
+    },
+    /// Fires on schedules.
+    Schedules {
+        schedules: Vec<ScheduleView>,
+    },
+    Countdown {
+        countdown: Countdown,
+    },
+}
+
+/// One schedule trigger: the editor's pattern if it is one, and its rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleView {
+    /// `None` for a rule written by hand that the editor can't show.
+    pub parts: Option<Parts>,
+    pub start: String,
+    pub rule: String,
+}
+
+/// A reminder as the editor shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReminderView {
+    pub reminder_id: String,
+    pub list_id: String,
+    /// The list's name; `None` for the personal list.
+    pub list_name: Option<String>,
+    pub title: String,
+    pub note: String,
+    pub priority: Priority,
+    pub trigger: TriggerView,
+    /// The zone it is pinned to; `None` is floating.
+    pub zone: Option<String>,
+    /// How long after its scheduled time an occurrence goes overdue by
+    /// default: its priority's, shown greyed until overridden.
+    pub default_overdue_seconds: i64,
+    /// The overdue override; `None` follows the priority.
+    pub overdue: Option<DelaySpec>,
+    /// The expiries added, whichever comes first. Firing again always
+    /// expires an occurrence too.
+    pub expiries: Vec<DelaySpec>,
 }
 
 /// An occurrence predicted to come due: it becomes an occurrence only if the
@@ -204,6 +257,7 @@ pub struct EditReminder {
 pub struct ExpectedItem {
     pub reminder_id: String,
     pub title: String,
+    pub note: String,
     pub scheduled_at: i64,
     /// Snoozed ahead of time until then: it fires at its time, quietly.
     pub snoozed_until: Option<i64>,
@@ -606,6 +660,49 @@ impl Core {
         Ok(stored)
     }
 
+    /// A reminder as the editor shows it.
+    pub fn reminder_view(&self, reminder_id: &str) -> Result<ReminderView> {
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let state = self.state_of(&list_id).unwrap();
+        let r = &state.reminders[reminder_id];
+        let trigger = if let Some(c) = &r.countdown {
+            TriggerView::Countdown {
+                countdown: c.clone(),
+            }
+        } else if r.has_schedules() {
+            TriggerView::Schedules {
+                schedules: r
+                    .schedules
+                    .iter()
+                    .map(|s| ScheduleView {
+                        parts: s.parts(),
+                        start: s.start.clone(),
+                        rule: s.rule.clone(),
+                    })
+                    .collect(),
+            }
+        } else {
+            TriggerView::OneOff { fire_at: r.fire_at }
+        };
+        Ok(ReminderView {
+            reminder_id: r.id.clone(),
+            list_name: if list_id == self.list_id {
+                None
+            } else {
+                state.list_name.clone()
+            },
+            list_id,
+            title: r.title.clone(),
+            note: r.note.clone(),
+            priority: r.priority,
+            trigger,
+            zone: r.zone.clone(),
+            default_overdue_seconds: r.default_overdue_after(),
+            overdue: r.overdue_override.as_ref().map(Delay::spec),
+            expiries: r.expiries.iter().map(Delay::spec).collect(),
+        })
+    }
+
     /// The list a reminder is in.
     fn list_of_reminder(&self, reminder_id: &str) -> Result<String> {
         self.states()
@@ -724,6 +821,11 @@ impl Core {
         }
     }
 
+    /// The device's own time zone.
+    fn device_tz(&self) -> TimeZone {
+        schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC)
+    }
+
     fn zone_of(&self, r: &Reminder) -> TimeZone {
         r.zone
             .as_deref()
@@ -801,6 +903,7 @@ impl Core {
     /// counted from the scheduled time, has passed. It is missed as of when
     /// the expiry came, not when this device noticed. Returns their ids.
     fn expire_open(&mut self, now: i64) -> Result<Vec<String>> {
+        let device = &self.device_tz();
         let due: Vec<(String, String, i64)> = self
             .states()
             .flat_map(|(list_id, s)| {
@@ -811,7 +914,7 @@ impl Core {
                         let at = s
                             .reminders
                             .get(&o.reminder_id)?
-                            .expires_at(o.scheduled_at)?;
+                            .expires_at(o.scheduled_at, device)?;
                         (at <= now).then(|| (list_id.to_string(), o.id.clone(), at))
                     })
                     .collect::<Vec<_>>()
@@ -835,13 +938,17 @@ impl Core {
     /// When the next open occurrence goes overdue after `now`, so the window
     /// can move it from Due to Overdue, and the platform can escalate.
     pub fn next_overdue_at(&self, now: i64) -> Option<i64> {
+        let device = &self.device_tz();
         self.states()
             .flat_map(|(_, s)| {
                 s.occurrences
                     .values()
                     .filter(|o| o.is_open())
                     .filter_map(|o| {
-                        let at = s.reminders.get(&o.reminder_id)?.overdue_at(o.scheduled_at);
+                        let at = s
+                            .reminders
+                            .get(&o.reminder_id)?
+                            .overdue_at(o.scheduled_at, device);
                         (at > now).then_some(at)
                     })
             })
@@ -1155,7 +1262,11 @@ impl Core {
         let (list_id, id) = self.open_id(occurrence_id)?;
         let item = self
             .state_of(&list_id)
-            .and_then(|s| s.due().into_iter().find(|d| d.occurrence_id == id))
+            .and_then(|s| {
+                s.due(&self.device_tz())
+                    .into_iter()
+                    .find(|d| d.occurrence_id == id)
+            })
             .ok_or_else(|| Error::NotOpen(occurrence_id.to_string()))?;
         let until = now
             + item
@@ -1228,7 +1339,11 @@ impl Core {
         let (list_id, id) = self.open_id(occurrence_id)?;
         let item = self
             .state_of(&list_id)
-            .and_then(|s| s.due().into_iter().find(|d| d.occurrence_id == id))
+            .and_then(|s| {
+                s.due(&self.device_tz())
+                    .into_iter()
+                    .find(|d| d.occurrence_id == id)
+            })
             .ok_or_else(|| Error::NotOpen(occurrence_id.to_string()))?;
         let length = item
             .priority
@@ -1248,7 +1363,13 @@ impl Core {
         let list_id = self.list_of_reminder(reminder_id)?;
         let r = &self.state_of(&list_id).expect("the list is held").reminders[reminder_id];
         let length = r.priority.settings().snooze_length(false);
-        Ok(self.picker(length, scheduled_at, r.expires_at(scheduled_at), true, now))
+        Ok(self.picker(
+            length,
+            scheduled_at,
+            r.expires_at(scheduled_at, &self.device_tz()),
+            true,
+            now,
+        ))
     }
 
     fn picker(
@@ -1287,7 +1408,11 @@ impl Core {
     pub fn occurrence_view(&self, occurrence_id: &str) -> Option<OccurrenceView> {
         for (list_id, state) in self.states() {
             let id = state.resolve(occurrence_id).to_string();
-            if let Some(d) = state.due().into_iter().find(|d| d.occurrence_id == id) {
+            if let Some(d) = state
+                .due(&self.device_tz())
+                .into_iter()
+                .find(|d| d.occurrence_id == id)
+            {
                 let list_name = if list_id == self.list_id {
                     None
                 } else {
@@ -1296,6 +1421,7 @@ impl Core {
                 return Some(OccurrenceView {
                     occurrence_id: d.occurrence_id,
                     title: d.title,
+                    note: d.note,
                     list_name,
                     priority: d.priority,
                     scheduled_at: d.scheduled_at,
@@ -1400,20 +1526,17 @@ impl Core {
         if let Some(p) = edit.priority.filter(|p| *p != current.priority) {
             changes.push(Change::Priority(p));
         }
-        for (new, now_value, make) in [
-            (
-                edit.overdue,
-                current.overdue_override,
-                Change::Overdue as fn(Option<i64>) -> Change,
-            ),
-            (edit.expiry, current.expiry_after, Change::Expiry),
-        ] {
-            if let Some(v) = new.filter(|v| *v != now_value) {
-                if v.is_some_and(|d| d < 0) {
-                    return Err(Error::BadDuration);
-                }
-                changes.push(make(v));
+        if let Some(v) = edit.overdue.filter(|v| *v != current.overdue_override) {
+            if let Some(d) = &v {
+                check_delay(d)?;
             }
+            changes.push(Change::Overdue(v));
+        }
+        if let Some(v) = edit.expiry.filter(|v| *v != current.expiries) {
+            for d in &v {
+                check_delay(d)?;
+            }
+            changes.push(Change::Expiry(v));
         }
         for change in changes {
             let hlc = self.next_hlc(&list_id, now);
@@ -1464,6 +1587,7 @@ impl Core {
     /// When the next unfired reminder is due or the next open occurrence
     /// expires, so the scheduler can sleep.
     pub fn next_fire_at(&self) -> Option<i64> {
+        let device = &self.device_tz();
         let one_off = self.states().filter_map(|(_, s)| s.next_fire_at()).min();
         let scheduled = self
             .states()
@@ -1495,7 +1619,11 @@ impl Core {
                 s.occurrences
                     .values()
                     .filter(|o| o.is_open())
-                    .filter_map(|o| s.reminders.get(&o.reminder_id)?.expires_at(o.scheduled_at))
+                    .filter_map(|o| {
+                        s.reminders
+                            .get(&o.reminder_id)?
+                            .expires_at(o.scheduled_at, device)
+                    })
             })
             .min();
         one_off
@@ -1510,6 +1638,7 @@ impl Core {
     /// the one-offs yet to fire and the instances of every schedule. The
     /// views ask for the range they show.
     pub fn expected(&self, now: i64, until: i64) -> Vec<ExpectedItem> {
+        let device = &self.device_tz();
         let mut out = Vec::new();
         for (_, s) in self.states() {
             for r in s.reminders.values() {
@@ -1538,9 +1667,10 @@ impl Core {
                 out.extend(times.into_iter().map(|t| ExpectedItem {
                     reminder_id: r.id.clone(),
                     title: r.title.clone(),
+                    note: r.note.clone(),
                     scheduled_at: t,
                     snoozed_until: s.expected_snooze(&r.id, t),
-                    expires_at: r.expires_at(t),
+                    expires_at: r.expires_at(t, device),
                 }));
             }
         }
@@ -1573,7 +1703,7 @@ impl Core {
             .sort_by(|a, b| (b.closed_at, &b.occurrence_id).cmp(&(a.closed_at, &a.occurrence_id)));
         let (mut overdue, due): (Vec<DueItem>, Vec<DueItem>) = self
             .states()
-            .flat_map(|(_, s)| s.due())
+            .flat_map(|(_, s)| s.due(&self.device_tz()))
             .partition(|d| d.overdue_at <= now);
         overdue.sort_by(|a, b| {
             (
@@ -1769,7 +1899,10 @@ impl Core {
             sign_in_notices: self.sign_in_notices(),
             security_notices: self.security_notices(),
             due: {
-                let mut due: Vec<DueItem> = self.states().flat_map(|(_, s)| s.due()).collect();
+                let mut due: Vec<DueItem> = self
+                    .states()
+                    .flat_map(|(_, s)| s.due(&self.device_tz()))
+                    .collect();
                 due.sort_by_key(|d| (d.fired_at, d.occurrence_id.clone()));
                 due
             },
@@ -1800,6 +1933,14 @@ impl Core {
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
         }
     }
+}
+
+/// Checks a delay can be used.
+fn check_delay(d: &Delay) -> Result<()> {
+    if matches!(d, Delay::After(n) if *n < 0) {
+        return Err(Error::BadDuration);
+    }
+    d.validate().map_err(Error::BadDelay)
 }
 
 /// Checks a reminder's schedules and zone can be used.

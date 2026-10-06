@@ -44,6 +44,7 @@ export function AlarmWindow({ occurrenceId }: { occurrenceId: string }) {
     <main class="alarm">
       <p class="ringing">{ringingHeading(view)}</p>
       <h1>{view.title}</h1>
+      {view.note && <p class="note">{view.note}</p>}
       <p class="muted">{dueLine(view.scheduled_at, Math.floor(Date.now() / 1000))}</p>
       {error && <p class="error" role="alert">{error}</p>}
       <button class="done" onClick={() => act(() => completeOccurrence(occurrenceId))}>

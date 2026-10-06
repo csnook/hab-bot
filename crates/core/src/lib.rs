@@ -12,6 +12,7 @@
 mod alerter;
 mod core;
 mod countdown;
+mod delay;
 mod event;
 mod hlc;
 mod priority;
@@ -21,14 +22,15 @@ mod store;
 
 pub use crate::core::{
     Core, CountdownItem, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox,
-    ListInfo, OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
-    SnoozeKind, SnoozeOption, SnoozePicker,
+    ListInfo, OccurrenceView, ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice,
+    SignInNotice, Snapshot, SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
     ACTION_DONE, ACTION_OPEN, ACTION_SKIP, ACTION_SNOOZE,
 };
 pub use countdown::{Countdown, CountdownUnit};
+pub use delay::{Delay, DelaySpec};
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
 };
@@ -36,7 +38,7 @@ pub use hlc::{Hlc, MAX_AHEAD_MS};
 pub use priority::{
     built_in_priorities, AlertStyle, EscalationStep, Priority, PriorityInfo, PrioritySettings,
 };
-pub use schedule::{clock_time, day_bounds, system_zone_name, zone, Pattern, Schedule};
+pub use schedule::{clock_time, day_bounds, system_zone_name, zone, Parts, Pattern, Schedule};
 pub use state::{
     last_chance_at, AlertRecord, Closing, ClosingKind, DueItem, Occurrence, Reconciliation,
     Reminder, SettingVersion, SignIn, SnoozeEnd, SnoozeRecord, SnoozeView, State, UpcomingItem,
@@ -65,6 +67,8 @@ pub enum Error {
     InTheFuture,
     #[error("a duration can't be negative")]
     BadDuration,
+    #[error("the delay can't be used: {0}")]
+    BadDelay(String),
     #[error("there is no reminder {0}")]
     NoReminder(String),
     #[error("that value was never one of the setting's")]

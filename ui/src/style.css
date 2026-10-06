@@ -64,3 +64,21 @@ main.alarm { display: grid; gap: 12px; text-align: center; }
 .snooze-menu label { display: grid; gap: 2px; }
 .snoozed, .expiry { font-size: 0.9em; opacity: 0.8; }
 .expiry { margin: 0; }
+
+/* The reminder editor */
+dialog.editor { max-width: min(96vw, 560px); width: 100%; box-sizing: border-box; }
+dialog.editor form { margin-top: 0; }
+.editor .sentence { margin: 0; padding: 8px 10px; border-left: 3px solid #3584e4; background: #8881; }
+.editor .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+.editor .row > label { flex: 1; min-width: 8rem; }
+.editor fieldset { display: grid; gap: 8px; }
+.editor .radio { display: flex; gap: 8px; align-items: center; }
+.editor .fold { border: 1px solid #8884; border-radius: 4px; padding: 6px 8px; }
+.editor .fold > summary { cursor: pointer; font-weight: 600; }
+.editor .fold[open] > summary .one-line { display: none; }
+.editor .one-line { font-weight: 400; margin-left: 8px; }
+.editor .grey, .editor .one-line.grey { color: #888; }
+.editor .section { display: grid; gap: 8px; margin-top: 8px; }
+.editor .next, .editor .duration { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.editor textarea { font: inherit; padding: 6px 8px; }
+.note { color: #888; font-size: 0.9rem; font-style: italic; }

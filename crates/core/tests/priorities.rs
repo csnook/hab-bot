@@ -1,8 +1,8 @@
 //! Priorities, going overdue and expiry delays, through the core's own API.
 
 use hab_core::{
-    built_in_priorities, AlertStyle, Change, ClosingKind, Core, DueItem, EditReminder, Error,
-    Event, Hlc, Priority, Setting, State, StoredEvent,
+    built_in_priorities, AlertStyle, Change, ClosingKind, Core, Delay, DueItem, EditReminder,
+    Error, Event, Hlc, Priority, Setting, State, StoredEvent,
 };
 
 const HOUR: i64 = 3_600;
@@ -136,7 +136,7 @@ fn defaults_follow_the_priority_until_overridden() {
     assert_eq!(overdue_at(&c), T0);
     // An override stays put when the priority changes.
     let over = EditReminder {
-        overdue: Some(Some(3 * HOUR)),
+        overdue: Some(Some(Delay::After(3 * HOUR))),
         ..Default::default()
     };
     c.edit_reminder(&id, over, T0 + 2).unwrap();
@@ -152,7 +152,7 @@ fn defaults_follow_the_priority_until_overridden() {
     c.edit_reminder(&id, clear, T0 + 4).unwrap();
     assert_eq!(overdue_at(&c), T0 + DAY);
     let bad = EditReminder {
-        overdue: Some(Some(-1)),
+        overdue: Some(Some(Delay::After(-1))),
         ..Default::default()
     };
     assert!(matches!(
@@ -225,7 +225,7 @@ fn an_expiry_delay_misses_the_occurrence_counted_from_the_scheduled_time() {
     c.edit_reminder(
         &id,
         EditReminder {
-            expiry: Some(Some(2 * HOUR)),
+            expiry: Some(vec![Delay::After(2 * HOUR)]),
             ..Default::default()
         },
         T0 - 1,
@@ -250,7 +250,7 @@ fn a_late_firing_past_its_expiry_is_missed_at_once_and_does_not_alert() {
     c.edit_reminder(
         &id,
         EditReminder {
-            expiry: Some(Some(HOUR)),
+            expiry: Some(vec![Delay::After(HOUR)]),
             ..Default::default()
         },
         T0 - 1,
@@ -322,11 +322,15 @@ fn priority_is_a_setting_of_its_own_merged_by_clock() {
         Change::Priority(Priority::Low),
     ));
     // And another setting is judged on its own.
-    s.apply(&edit(4, hlc(T0 * 1000 + 2, "a"), Change::Overdue(Some(60))));
+    s.apply(&edit(
+        4,
+        hlc(T0 * 1000 + 2, "a"),
+        Change::Overdue(Some(Delay::After(60))),
+    ));
     let r = &s.reminders["r"];
     assert_eq!(r.priority, Priority::High);
-    assert_eq!(r.overdue_override, Some(60));
-    assert_eq!(r.overdue_after(), 60);
+    assert_eq!(r.overdue_override, Some(Delay::After(60)));
+    assert_eq!(r.overdue_at(1000, &jiff::tz::TimeZone::UTC), 1060);
     let h = s.history("r", Setting::Priority);
     assert_eq!(h.len(), 2);
     assert!(h[0].current && !h[1].current);
@@ -342,9 +346,9 @@ fn the_new_settings_need_a_reader_of_the_new_format() {
     };
     assert_eq!(edit(Change::Priority(Priority::High)).format(), 3);
     assert_eq!(edit(Change::Overdue(None)).format(), 3);
-    assert_eq!(edit(Change::Expiry(Some(5))).format(), 3);
+    assert_eq!(edit(Change::Expiry(vec![Delay::After(5)])).format(), 3);
     assert_eq!(edit(Change::Title("t".into())).format(), 1);
-    assert_eq!(hab_core::FORMAT_VERSION, 6);
+    assert_eq!(hab_core::FORMAT_VERSION, 7);
 
     let mut c = core();
     c.join("u1", "1").unwrap();

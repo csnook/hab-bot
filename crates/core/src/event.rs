@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::countdown::Countdown;
+use crate::delay::{expiries, Delay};
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -146,10 +147,11 @@ pub enum Change {
     /// `None` is floating.
     Zone(Option<String>),
     Priority(Priority),
-    /// Seconds after the scheduled time. `None` follows the priority.
-    Overdue(Option<i64>),
-    /// Seconds after the scheduled time. `None` is no delay-based expiry.
-    Expiry(Option<i64>),
+    /// A delay from the scheduled time. `None` follows the priority.
+    Overdue(Option<Delay>),
+    /// The delays that mark an open occurrence missed, whichever comes first.
+    /// Empty is no delay-based expiry.
+    Expiry(#[serde(with = "expiries")] Vec<Delay>),
     Countdown(Countdown),
 }
 
@@ -179,6 +181,16 @@ impl Event {
                 change: Change::Schedules(_) | Change::Zone(_),
                 ..
             } => 2,
+            // Overdue times and expiries that are the next time a schedule
+            // matches, and several expiries, arrived in format 7.
+            Event::ReminderEdited {
+                change: Change::Overdue(Some(Delay::Next(_))),
+                ..
+            } => 7,
+            Event::ReminderEdited {
+                change: Change::Expiry(v),
+                ..
+            } if v.len() > 1 || v.iter().any(|d| !d.is_legacy()) => 7,
             // Priorities, overdue times and expiry arrived in format 3.
             Event::ReminderEdited {
                 change: Change::Priority(_) | Change::Overdue(_) | Change::Expiry(_),

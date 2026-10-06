@@ -1,7 +1,9 @@
 //! Countdowns, through the core's own API. Time is passed in, so every test
 //! says what the clock reads.
 
-use hab_core::{ClosingKind, Core, Countdown, CountdownUnit, EditReminder, Error, Event, Setting};
+use hab_core::{
+    ClosingKind, Core, Countdown, CountdownUnit, Delay, EditReminder, Error, Event, Setting,
+};
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 
@@ -266,7 +268,7 @@ fn a_skip_or_a_miss_restarts_from_when_the_occurrence_closed() {
     c.edit_reminder(
         &missed,
         EditReminder {
-            expiry: Some(Some(HOUR)),
+            expiry: Some(vec![Delay::After(HOUR)]),
             ..Default::default()
         },
         t0,
@@ -595,7 +597,7 @@ fn countdown_events_need_a_reader_of_the_new_format() {
         change: hab_core::Change::Countdown(countdown(1, CountdownUnit::Days, None)),
     };
     assert_eq!(edit.format(), 5);
-    assert_eq!(hab_core::FORMAT_VERSION, 6);
+    assert_eq!(hab_core::FORMAT_VERSION, 7);
     // And they survive a restart: the state rebuilds the same.
     let dir = std::env::temp_dir().join(format!("hab-countdown-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
