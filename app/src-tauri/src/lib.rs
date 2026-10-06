@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hab_client::{
-    check_password, join, parse_target, sign_in, suggest_passphrase, tls, ApprovalLink, DeviceInfo,
-    JoinRequest, KeyStore, NewDevice, PasswordCheck, PendingDevice, Pinned, Profile, Setup,
-    SetupFile, SignInCode, SignInRequest, SignInTarget, Syncer,
+    check_password, join, parse_target, sign_in, suggest_passphrase, tls, ApprovalLink, Checks,
+    DeviceInfo, JoinRequest, KeyStore, NewDevice, PasswordCheck, PendingDevice, Pinned, Profile,
+    Setup, SetupFile, SignInCode, SignInRequest, SignInTarget, Syncer,
 };
 use hab_core::{Alerter, Core, Snapshot};
 use serde::Serialize;
@@ -43,6 +43,9 @@ struct AlarmState {
 struct App {
     core: Arc<Mutex<Core>>,
     wake: Sender<()>,
+    /// How the scheduler's alerts check with the server (see
+    /// `hab_core::ServerCheck`); the sync loop answers.
+    checks: Arc<Checks>,
     /// Tells the sync loop there is a change to send.
     sync_wake: Arc<Notify>,
     /// Stops the sync loop; set when the app quits.
@@ -68,6 +71,10 @@ type SyncerSlot = Arc<Mutex<Option<Arc<Syncer>>>>;
 struct SyncShared {
     core: Arc<Mutex<Core>>,
     wake: Arc<Notify>,
+    /// Wakes the scheduler, so what the server delivers takes effect at once
+    /// rather than at its next look.
+    scheduler: Sender<()>,
+    checks: Arc<Checks>,
     stop: watch::Receiver<bool>,
     slot: SyncerSlot,
 }
@@ -379,6 +386,8 @@ async fn start_sync(
     let SyncShared {
         core,
         wake,
+        scheduler,
+        checks,
         stop,
         slot,
     } = shared;
@@ -396,12 +405,22 @@ async fn start_sync(
     }
     let store = KeyStore::open(&data_dir).await;
     let notify = handle.clone();
+    // What other devices do reaches the scheduler as a state change: an
+    // occurrence closed, snoozed or acknowledged elsewhere takes the
+    // notification, sound and alarm window down within seconds, instead of at
+    // the scheduler's next look (up to 30 s away).
+    let wake_scheduler = Mutex::new(scheduler.clone());
+    checks.on_progress(move || {
+        let _ = scheduler.send(());
+    });
     let syncer = Arc::new(
         Syncer::new(&profile, &store, core.clone(), wake, move || {
+            let _ = wake_scheduler.lock().unwrap().send(());
             let _ = notify.emit(STATE_CHANGED, ());
         })
         .await
-        .map_err(|e| e.to_string())?,
+        .map_err(|e| e.to_string())?
+        .with_checks(checks),
     );
     match start {
         Start::Resume => {}
@@ -469,6 +488,8 @@ async fn join_server(
         SyncShared {
             core: app.core.clone(),
             wake: app.sync_wake.clone(),
+            scheduler: app.wake.clone(),
+            checks: app.checks.clone(),
             stop: app.sync_stop.subscribe(),
             slot: app.syncer.clone(),
         },
@@ -605,6 +626,8 @@ async fn finish_sign_in(app: &App, handle: AppHandle, profile: Profile) -> Resul
         SyncShared {
             core: app.core.clone(),
             wake: app.sync_wake.clone(),
+            scheduler: app.wake.clone(),
+            checks: app.checks.clone(),
             stop: app.sync_stop.subscribe(),
             slot: app.syncer.clone(),
         },
@@ -855,6 +878,7 @@ fn run_scheduler(
     sync_wake: Arc<Notify>,
     woken: mpsc::Receiver<()>,
     delivery: Arc<Delivery>,
+    checks: Arc<Checks>,
 ) {
     // When an open occurrence next goes overdue: the window then has to move
     // it from Due to Overdue.
@@ -872,7 +896,7 @@ fn run_scheduler(
                 Vec::new()
             });
             let pass = alerter
-                .pass(&mut core, now(), inhibited)
+                .pass_with(&mut core, now(), inhibited, &*checks)
                 .unwrap_or_else(|e| {
                     eprintln!("alerting failed: {e}");
                     Default::default()
@@ -1000,6 +1024,15 @@ pub fn run() {
             let setup = SetupFile::in_dir(&data_dir).load()?;
             let (wake, woken) = mpsc::channel();
             let wake_scheduler = wake.clone();
+            let wake_for_sync = wake.clone();
+            // A device with a server starts out about to connect: a firing it
+            // missed while the app was closed checks with the server before
+            // it alerts, rather than racing the first connection.
+            let checks = Arc::new(if matches!(setup, Some(Setup::Joined(_))) {
+                Checks::connecting()
+            } else {
+                Checks::new()
+            });
             let sync_wake = Arc::new(Notify::new());
             let (sync_stop, stop) = watch::channel(false);
             let syncer: SyncerSlot = Arc::new(Mutex::new(None));
@@ -1007,6 +1040,7 @@ pub fn run() {
                 let (handle, profile, data_dir) =
                     (handle.clone(), profile.clone(), data_dir.clone());
                 let (core, sync_wake, slot) = (core.clone(), sync_wake.clone(), syncer.clone());
+                let checks = checks.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = start_sync(
                         handle,
@@ -1015,6 +1049,8 @@ pub fn run() {
                         SyncShared {
                             core,
                             wake: sync_wake,
+                            scheduler: wake_for_sync,
+                            checks,
                             stop,
                             slot,
                         },
@@ -1029,6 +1065,7 @@ pub fn run() {
             app.manage(App {
                 core: core.clone(),
                 wake,
+                checks: checks.clone(),
                 sync_wake: sync_wake.clone(),
                 sync_stop,
                 data_dir,
@@ -1085,7 +1122,9 @@ pub fn run() {
                     }
                 })?;
             }
-            std::thread::spawn(move || run_scheduler(handle, core, sync_wake, woken, delivery));
+            std::thread::spawn(move || {
+                run_scheduler(handle, core, sync_wake, woken, delivery, checks)
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

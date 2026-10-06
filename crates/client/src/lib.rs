@@ -3,6 +3,7 @@
 //! The window (Tauri and the UI) is a thin layer over this.
 
 pub mod approve;
+pub mod checks;
 pub mod code;
 pub mod join;
 pub mod keystore;
@@ -13,6 +14,7 @@ pub mod sync;
 pub mod tls;
 
 pub use approve::{ApprovalLink, ApproveError, NewDevice};
+pub use checks::{Checks, Link};
 pub use code::{parse_target, CodeError, SignInCode, SignInTarget};
 pub use join::{join, JoinError, JoinRequest, Joined};
 pub use keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};

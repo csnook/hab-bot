@@ -23,8 +23,8 @@ pub use crate::core::{
     OccurrenceView, ReconciliationNotice, SecurityNotice, SignInNotice, Snapshot,
 };
 pub use alerter::{
-    Alerter, Command, Notification, Urgency, ACTION_ACKNOWLEDGE, ACTION_DONE, ACTION_OPEN,
-    ACTION_SKIP, ACTION_SNOOZE,
+    Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
+    ACTION_DONE, ACTION_OPEN, ACTION_SKIP, ACTION_SNOOZE,
 };
 pub use event::{
     Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,

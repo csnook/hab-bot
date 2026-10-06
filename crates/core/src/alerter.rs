@@ -29,6 +29,16 @@
 //! or the next repeat). Maximum breaks Do Not Disturb, so it stays an alarm
 //! while the server is inhibited.
 //!
+//! Several devices (spec: Alerts → Alerting on several devices): every
+//! device that holds the reminder alerts, including one that only learned of
+//! the occurrence from the server, at the occurrence's state now. Before each
+//! alert (first, change of style, repeat) the device checks with the server,
+//! through a [`ServerCheck`] the platform supplies: the alert waits for the
+//! check to come back, for at most the priority's server wait, so an
+//! occurrence closed elsewhere that hasn't synced yet is seen first. Priorities
+//! with no server wait (Maximum) alert at once and ask for the check anyway.
+//! With the server out of reach the alert goes ahead without waiting.
+//!
 //! Acknowledging quiets the occurrence: while due, until it goes overdue;
 //! once overdue, for one overdue interval, after which alerts resume. The
 //! time of the acknowledgement is the one recorded on its event.
@@ -93,6 +103,47 @@ pub enum Command {
     },
 }
 
+/// How the alerter checks with the server before an alert. The platform
+/// half supplies it (on the desktop, the sync loop); the alerter only asks.
+///
+/// A check is requested with [`request`](Self::request), which returns a
+/// ticket, and is [`done`](Self::done) once the device has caught up with the
+/// server by a round trip that began after the request. Whatever the server
+/// had numbered by then, such as another device's closing, is in the core.
+pub trait ServerCheck {
+    /// Whether the server can be reached now, or is being tried for the
+    /// first time. When it can't, alerts don't wait.
+    fn reachable(&self) -> bool;
+    /// Asks for a check and returns its ticket.
+    fn request(&self) -> u64;
+    /// Whether the check with this ticket has come back.
+    fn done(&self, ticket: u64) -> bool;
+}
+
+/// No server: a standalone device, or one that has not been set up to sync.
+/// Alerts never wait.
+pub struct NoServer;
+
+impl ServerCheck for NoServer {
+    fn reachable(&self) -> bool {
+        false
+    }
+    fn request(&self) -> u64 {
+        0
+    }
+    fn done(&self, _ticket: u64) -> bool {
+        true
+    }
+}
+
+/// An alert held back for a check with the server.
+#[derive(Debug, Clone, Copy)]
+struct Waiting {
+    ticket: u64,
+    /// When it alerts anyway: the check was requested plus the server wait.
+    until: i64,
+}
+
 /// The sound-theme name for gentle and insistent alerts.
 const SOUND: &str = "message-new-instant";
 /// How long a gentle notification stays up before it settles into the
@@ -149,6 +200,8 @@ struct Tracked {
     /// The style last written to the history, so a repeat or a catch-up at
     /// the same style isn't recorded again.
     recorded: Option<AlertStyle>,
+    /// An alert that is due but waits for the server's check.
+    waiting: Option<Waiting>,
 }
 
 /// The per-device alert planner. It remembers only what it has alerted
@@ -182,6 +235,18 @@ impl Alerter {
     /// One pass at `now`. `inhibited` is the notification server's Do Not
     /// Disturb state. Writes the alerts that belong in the history.
     pub fn pass(&mut self, core: &mut Core, now: i64, inhibited: bool) -> Result<Pass> {
+        self.pass_with(core, now, inhibited, &NoServer)
+    }
+
+    /// [`pass`](Self::pass) on a device that checks with a server before each
+    /// alert.
+    pub fn pass_with(
+        &mut self,
+        core: &mut Core,
+        now: i64,
+        inhibited: bool,
+        server: &dyn ServerCheck,
+    ) -> Result<Pass> {
         let inbox = core.inbox(now);
         let open: Vec<_> = inbox.overdue.iter().chain(inbox.due.iter()).collect();
         let mut out = Pass::default();
@@ -232,6 +297,7 @@ impl Alerter {
             // quiets until the occurrence closes.
             let unmeasured = d.acknowledged && d.acknowledged_at.is_none();
             if snoozed.is_some() || acknowledged.is_some() || unmeasured {
+                tracked.waiting = None;
                 if tracked.standing.take().is_some() {
                     out.commands.push(Command::Close {
                         occurrence_id: d.occurrence_id.clone(),
@@ -256,6 +322,32 @@ impl Alerter {
                 Some(standing) if standing != style => true,
                 Some(_) => repeats && now >= repeat_at,
             };
+            // Check with the server first, within the priority's wait.
+            let mut alert = alert;
+            if alert {
+                match tracked.waiting {
+                    Some(w) => {
+                        if !server.reachable() || server.done(w.ticket) || now >= w.until {
+                            tracked.waiting = None;
+                        } else {
+                            soonest(w.until, &mut out);
+                            alert = false;
+                        }
+                    }
+                    None if server.reachable() => {
+                        let ticket = server.request();
+                        if let Some(wait) = settings.server_wait {
+                            tracked.waiting = Some(Waiting {
+                                ticket,
+                                until: now + wait,
+                            });
+                            soonest(now + wait, &mut out);
+                            alert = false;
+                        }
+                    }
+                    None => {}
+                }
+            }
             if alert {
                 if tracked.recorded != Some(style) {
                     core.record_alert(&d.occurrence_id, style, now)?;

@@ -7,6 +7,7 @@
 //! sent yet" in the core and are uploaded when the connection returns.
 
 use crate::approve::ApprovalLink;
+use crate::checks::{Checks, Link};
 use crate::keystore::{KeyId, KeyKind, KeyStore, KeyStoreError};
 use crate::profile::Profile;
 use crate::tls::{self, parse_address, Pinned, TlsError};
@@ -42,7 +43,14 @@ use tokio_tungstenite::tungstenite::Message;
 const UPLOAD_CHUNK: usize = 50;
 const PAGE: u32 = 100;
 const PING_EVERY: Duration = Duration::from_secs(25);
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A connection that has heard nothing for this long, not even an answer to a
+/// ping, is taken as dead and replaced. A ringing alarm on another device
+/// can't stop this one over a connection that silently went away.
+const SILENCE: Duration = Duration::from_secs(60);
+/// How long the first connection after start-up is taken as likely before
+/// alerts stop waiting for it (see [`Link::Connecting`]).
+const CONNECT_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -147,6 +155,8 @@ pub struct Syncer {
     /// A device signed in since the personal list's key was last sealed to
     /// the account's devices.
     reseal: AtomicBool,
+    /// How the alerter checks with the server before each alert.
+    checks: Arc<Checks>,
 }
 
 type Socket =
@@ -193,7 +203,20 @@ impl Syncer {
             rotated: Mutex::new(HashMap::new()),
             status: Mutex::new(SyncStatus::default()),
             reseal: AtomicBool::new(false),
+            checks: Arc::new(Checks::new()),
         })
+    }
+
+    /// Use `checks`, which the scheduler's alerter also holds, in place of the
+    /// syncer's own.
+    pub fn with_checks(mut self, checks: Arc<Checks>) -> Syncer {
+        self.checks = checks;
+        self
+    }
+
+    /// The requests the alerter makes of the sync loop.
+    pub fn checks(&self) -> Arc<Checks> {
+        self.checks.clone()
     }
 
     pub fn status(&self) -> SyncStatus {
@@ -994,6 +1017,7 @@ impl Syncer {
     async fn session(&self, stop: &mut watch::Receiver<bool>) -> Result<(), SyncError> {
         self.register_lists().await?;
         let mut socket = self.connect_ws().await?;
+        let caught_up_to = self.checks.newest();
         // Connected before downloading, so an event can't fall between the two.
         match self.download().await {
             Ok(_) => {}
@@ -1008,10 +1032,15 @@ impl Syncer {
         self.reseal_if_needed().await?;
         self.fetch_notices().await?;
         self.set_status(true, None);
+        self.checks.set_link(Link::Connected);
+        // Caught up with the server now, which answers any check asked for
+        // before the download began.
+        self.checks.complete(caught_up_to);
         let mut in_flight = HashSet::new();
         self.flush(&mut socket, &mut in_flight).await?;
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.tick().await;
+        let mut heard = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 _ = stop.changed() => {
@@ -1019,11 +1048,18 @@ impl Syncer {
                     return Ok(());
                 }
                 _ = self.wake.notified() => self.flush(&mut socket, &mut in_flight).await?,
-                _ = ping.tick() => socket
-                    .send(Message::Ping(Vec::new().into()))
-                    .await
-                    .map_err(|e| SyncError::Connection(e.to_string()))?,
+                _ = self.checks.asked() => self.check(&mut socket, &mut in_flight).await?,
+                _ = ping.tick() => {
+                    if heard.elapsed() > SILENCE {
+                        return Err(SyncError::Connection("the server went silent".into()));
+                    }
+                    socket
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .map_err(|e| SyncError::Connection(e.to_string()))?;
+                }
                 message = socket.next() => {
+                    heard = tokio::time::Instant::now();
                     let message = match message {
                         Some(Ok(m)) => m,
                         Some(Err(e)) => return Err(SyncError::Connection(e.to_string())),
@@ -1041,6 +1077,22 @@ impl Syncer {
                 }
             }
         }
+    }
+
+    /// The check the alerter asked for: send what this device has made, then
+    /// catch up with everything the server has numbered. Whatever another
+    /// device closed that reached the server before this started is in the
+    /// core when it returns, and the alerter is told.
+    async fn check(
+        &self,
+        socket: &mut Socket,
+        in_flight: &mut HashSet<String>,
+    ) -> Result<(), SyncError> {
+        let asked = self.checks.newest();
+        self.flush(socket, in_flight).await?;
+        self.download().await?;
+        self.checks.complete(asked);
+        Ok(())
     }
 
     /// After another device signs in, seal the list key to it as well.
@@ -1120,12 +1172,32 @@ impl Syncer {
     /// server can be reached, and try again with a growing wait when it can't.
     pub async fn run(&self, mut stop: watch::Receiver<bool>) {
         let mut wait = Duration::from_secs(1);
+        // The first attempt after start-up counts as reachable for a few
+        // seconds, so a late firing still checks with the server first.
+        let mut first = true;
         loop {
             if *stop.borrow() {
                 return;
             }
             let started = tokio::time::Instant::now();
-            let result = self.session(&mut stop).await;
+            if first {
+                self.checks.set_link(Link::Connecting);
+            }
+            let result = {
+                let attempt = self.session(&mut stop);
+                tokio::pin!(attempt);
+                tokio::select! {
+                    result = &mut attempt => result,
+                    _ = tokio::time::sleep(CONNECT_GRACE), if first => {
+                        if self.checks.link() == Link::Connecting {
+                            self.checks.set_link(Link::Unreachable);
+                        }
+                        attempt.await
+                    }
+                }
+            };
+            first = false;
+            self.checks.set_link(Link::Unreachable);
             if *stop.borrow() {
                 return;
             }
