@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::countdown::Countdown;
 use crate::delay::Delay;
-use crate::event::{Change, Event, Setting, StoredEvent};
+use crate::event::{Change, Correction, Event, Setting, StoredEvent, UndoOutcome};
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
@@ -130,6 +130,84 @@ pub struct Closing {
     pub at: i64,
     pub note: Option<String>,
     pub event_id: String,
+    /// When the event was recorded, which is when it was tapped: `at` is the
+    /// time the user said.
+    pub recorded_at: i64,
+    /// The closings the author had seen and took the place of: a correction,
+    /// or the miss an undo left. Empty for a closing of an open occurrence.
+    pub replaces: Vec<String>,
+}
+
+impl Closing {
+    /// A closing made by the event `stored`, replacing nothing.
+    fn new(kind: ClosingKind, at: i64, note: Option<String>, stored: &StoredEvent) -> Closing {
+        Closing {
+            kind,
+            by: stored.author.clone(),
+            device_id: stored.device_id.clone(),
+            at,
+            note,
+            event_id: stored.event_id.clone(),
+            recorded_at: stored.recorded_at,
+            replaces: Vec::new(),
+        }
+    }
+}
+
+/// The ids of the closings and undos that a correction or an undo has taken
+/// the place of, as long as that correction or undo itself still stands. (A
+/// correction or undo made here names everything it replaces, so only two
+/// devices acting on one closing can leave one standing over another.)
+fn superseded<'a>(records: &'a [Closing], undos: &'a [Undo]) -> BTreeSet<&'a str> {
+    let mut by: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let adjusters = records
+        .iter()
+        .map(|c| (c.event_id.as_str(), &c.replaces))
+        .chain(undos.iter().map(|u| (u.event_id.as_str(), &u.replaces)));
+    for (id, replaces) in adjusters {
+        for target in replaces {
+            by.entry(target.as_str()).or_default().push(id);
+        }
+    }
+    fn dead<'a>(
+        id: &'a str,
+        by: &BTreeMap<&'a str, Vec<&'a str>>,
+        memo: &mut BTreeMap<&'a str, bool>,
+        path: &mut Vec<&'a str>,
+    ) -> bool {
+        if let Some(d) = memo.get(id) {
+            return *d;
+        }
+        // A cycle can't come from honest devices; it replaces nothing.
+        if path.contains(&id) {
+            return false;
+        }
+        path.push(id);
+        let d = by
+            .get(id)
+            .is_some_and(|a| a.iter().any(|a| !dead(a, by, memo, path)));
+        path.pop();
+        memo.insert(id, d);
+        d
+    }
+    let mut memo = BTreeMap::new();
+    by.keys()
+        .copied()
+        .filter(|id| dead(id, &by, &mut memo, &mut Vec::new()))
+        .collect()
+}
+
+/// An undo that left the occurrence without a closing: reopened, or back to
+/// being expected. (An undo that left it missed is a [`Closing`] that
+/// replaces the one undone.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undo {
+    pub event_id: String,
+    pub by: String,
+    pub device_id: String,
+    pub recorded_at: i64,
+    pub replaces: Vec<String>,
+    pub outcome: UndoOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +216,17 @@ pub struct Occurrence {
     pub reminder_id: String,
     pub scheduled_at: i64,
     pub fired_at: i64,
+    /// How it stands closed: of the closings that haven't been replaced by a
+    /// correction or an undo, the one that counts ([`State::settle`]).
     pub closing: Option<Closing>,
+    /// Every closing, including the ones corrections and undos replaced,
+    /// which the history keeps. Oldest first.
+    pub records: Vec<Closing>,
+    /// The undos that left no closing.
+    pub undos: Vec<Undo>,
+    /// Closed ahead of its time and then undone: it is expected again and
+    /// fires at its time as usual.
+    pub unfired: bool,
     /// Alerts are quiet until then. Closing the occurrence ends a snooze.
     pub snoozed_until: Option<i64>,
     /// When that snooze was made: the time recorded on its event.
@@ -160,9 +248,46 @@ impl Occurrence {
             .map(|c| (c.by.clone(), c.at))
     }
 
+    /// Fired and not closed.
     pub fn is_open(&self) -> bool {
-        self.closing.is_none()
+        self.closing.is_none() && !self.unfired
     }
+
+    /// Opened ahead of its time, to be closed early.
+    pub fn is_early(&self) -> bool {
+        self.fired_at < self.scheduled_at
+    }
+}
+
+/// What the history shows of one thing done to an occurrence's closing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub event_id: String,
+    pub what: HistoryWhat,
+    /// The time the user said, for a closing.
+    pub at: Option<i64>,
+    pub note: Option<String>,
+    /// Who did it; empty if the app did.
+    pub by: String,
+    pub device_id: String,
+    /// When it was tapped.
+    pub recorded_at: i64,
+    /// A later correction or undo took its place.
+    pub superseded: bool,
+    /// It is a correction of, or an undo of, an earlier entry.
+    pub replaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryWhat {
+    Completed,
+    Skipped,
+    Missed,
+    /// Undone: it reopened.
+    Reopened,
+    /// Undone: it is expected again.
+    Expected,
 }
 
 /// An open occurrence for the Inbox's Due section.
@@ -393,6 +518,8 @@ impl State {
                 | Event::OccurrenceCompleted { occurrence_id, .. }
                 | Event::OccurrenceSkipped { occurrence_id, .. }
                 | Event::OccurrenceMissed { occurrence_id, .. }
+                | Event::OccurrenceCorrected { occurrence_id, .. }
+                | Event::OccurrenceUndone { occurrence_id, .. }
                 | Event::OccurrenceSnoozed { occurrence_id, .. }
                 | Event::OccurrenceAcknowledged { occurrence_id } => {
                     let id = self.resolve(occurrence_id).to_string();
@@ -423,6 +550,8 @@ impl State {
             Event::OccurrenceCompleted { occurrence_id, .. }
             | Event::OccurrenceSkipped { occurrence_id, .. }
             | Event::OccurrenceMissed { occurrence_id, .. }
+            | Event::OccurrenceCorrected { occurrence_id, .. }
+            | Event::OccurrenceUndone { occurrence_id, .. }
             | Event::OccurrenceSnoozed { occurrence_id, .. }
             | Event::OccurrenceAcknowledged { occurrence_id } => Some(occurrence_id),
             _ => None,
@@ -560,10 +689,19 @@ impl State {
                 scheduled_at,
                 fired_at,
             } => {
-                if self.occurrences.contains_key(occurrence_id)
-                    || self.aliases.contains_key(occurrence_id)
-                    || self.purged.contains(reminder_id)
-                {
+                if self.purged.contains(reminder_id) {
+                    return;
+                }
+                if let Some(o) = self.occurrences.get_mut(occurrence_id) {
+                    // Opened ahead of its time on one device, and now really
+                    // fired on another (or here, after an undo).
+                    if o.is_early() && *fired_at >= o.scheduled_at {
+                        o.fired_at = *fired_at;
+                        self.settle(occurrence_id);
+                    }
+                    return;
+                }
+                if self.aliases.contains_key(occurrence_id) {
                     return;
                 }
                 let one_off = self
@@ -590,6 +728,9 @@ impl State {
                         scheduled_at: *scheduled_at,
                         fired_at: *fired_at,
                         closing: None,
+                        records: Vec::new(),
+                        undos: Vec::new(),
+                        unfired: false,
                         snoozed_until: None,
                         snoozed_at: None,
                         acknowledged: false,
@@ -638,6 +779,57 @@ impl State {
                 occurrence_id,
                 missed_at,
             } => self.close(occurrence_id, ClosingKind::Missed, *missed_at, None, stored),
+            Event::OccurrenceCorrected {
+                occurrence_id,
+                replaces,
+                kind,
+                at,
+                note,
+            } => {
+                let kind = match kind {
+                    Correction::Completed => ClosingKind::Completed,
+                    Correction::Skipped => ClosingKind::Skipped,
+                };
+                let note = note.clone().filter(|_| kind == ClosingKind::Skipped);
+                self.add_record(
+                    occurrence_id,
+                    Closing {
+                        replaces: replaces.clone(),
+                        ..Closing::new(kind, *at, note, stored)
+                    },
+                );
+            }
+            Event::OccurrenceUndone {
+                occurrence_id,
+                replaces,
+                outcome,
+            } => {
+                let id = self.resolve(occurrence_id).to_string();
+                match outcome {
+                    UndoOutcome::Missed { at } => self.add_record(
+                        &id,
+                        Closing {
+                            replaces: replaces.clone(),
+                            ..Closing::new(ClosingKind::Missed, *at, None, stored)
+                        },
+                    ),
+                    _ => {
+                        if let Some(o) = self.occurrences.get_mut(&id) {
+                            if !o.undos.iter().any(|u| u.event_id == stored.event_id) {
+                                o.undos.push(Undo {
+                                    event_id: stored.event_id.clone(),
+                                    by: stored.author.clone(),
+                                    device_id: stored.device_id.clone(),
+                                    recorded_at: stored.recorded_at,
+                                    replaces: replaces.clone(),
+                                    outcome: outcome.clone(),
+                                });
+                            }
+                        }
+                        self.settle(&id);
+                    }
+                }
+            }
             Event::OccurrenceSnoozed {
                 occurrence_id,
                 until,
@@ -853,11 +1045,8 @@ impl State {
         self.occurrences.get_mut(&id).filter(|o| o.is_open())
     }
 
-    /// Closes an occurrence. If it is already closed, the rules for devices
-    /// that disagree decide which closing counts: the same kind merges and the
-    /// first counts; otherwise the higher kind does (completed over skipped
-    /// over missed). When a completion beats another closing, that is
-    /// recorded, for the device that lost to be told.
+    /// Closes an occurrence. Closings pile up as records and
+    /// [`State::settle`] decides which counts, whatever order they arrive in.
     fn close(
         &mut self,
         occurrence_id: &str,
@@ -867,53 +1056,97 @@ impl State {
         stored: &StoredEvent,
     ) {
         let id = self.resolve(occurrence_id).to_string();
-        let new = Closing {
-            kind,
-            by: stored.author.clone(),
-            device_id: stored.device_id.clone(),
-            at,
-            note,
-            event_id: stored.event_id.clone(),
-        };
-        self.merge_closing(&id, new);
+        self.add_record(&id, Closing::new(kind, at, note, stored));
     }
 
-    /// Gives an occurrence a closing, or settles between it and the one it
-    /// has by the rules above.
-    fn merge_closing(&mut self, id: &str, new: Closing) {
-        let Some(o) = self.occurrences.get_mut(id) else {
+    /// Adds a closing to an occurrence's records, once, and settles it.
+    fn add_record(&mut self, occurrence_id: &str, closing: Closing) {
+        let id = self.resolve(occurrence_id).to_string();
+        let Some(o) = self.occurrences.get_mut(&id) else {
             return;
         };
-        let (winner, loser) = match o.closing.take() {
-            None => {
-                let at = new.at;
-                o.snoozed_until = None;
-                o.snoozed_at = None;
-                o.acknowledged = false;
-                o.acknowledged_at = None;
-                o.closing = Some(new);
-                self.end_snoozes(id, at);
-                return;
-            }
-            Some(old) if old.kind == new.kind => {
-                o.closing = Some(old);
-                return;
-            }
-            Some(old) if old.kind > new.kind => (old, new),
-            Some(old) => (new, old),
-        };
-        if winner.kind == ClosingKind::Completed {
-            self.reconciliations.push(Reconciliation {
-                id: loser.event_id.clone(),
-                occurrence_id: id.to_string(),
-                device_id: loser.device_id.clone(),
-                by: loser.by.clone(),
-                lost: loser.kind,
-                lost_at: loser.at,
-            });
+        if o.records.iter().any(|c| c.event_id == closing.event_id) {
+            return;
         }
-        if let Some(o) = self.occurrences.get_mut(id) {
-            o.closing = Some(winner);
+        o.records.push(closing);
+        self.settle(&id);
+    }
+
+    /// Works out how an occurrence stands from everything done to it. The
+    /// rules for devices that disagree, which hold whatever order events
+    /// arrive in:
+    ///
+    /// - a correction or an undo takes the place of the closings its author
+    ///   had seen, and only those: a closing another device made meanwhile
+    ///   stands. Undoing a correction brings back what it corrected.
+    /// - of the closings that stand, a completion beats a skip, which beats a
+    ///   miss; of the same kind the first in the stream counts.
+    /// - a completion over another kind is recorded, for the loser to be told.
+    /// - with no closing standing it is open, or expected again if it was
+    ///   closed ahead of its time and undone.
+    fn settle(&mut self, occurrence_id: &str) {
+        let Some(o) = self.occurrences.get(occurrence_id) else {
+            return;
+        };
+        let superseded = superseded(&o.records, &o.undos);
+        let mut live: Vec<&Closing> = o
+            .records
+            .iter()
+            .filter(|c| !superseded.contains(c.event_id.as_str()))
+            .collect();
+        // Stable: of one kind, the one the stream has first counts (the
+        // server numbers it, so every device agrees).
+        live.sort_by_key(|c| std::cmp::Reverse(c.kind));
+        let winner = live.first().map(|c| (*c).clone());
+        let reconciled: Vec<Reconciliation> = match &winner {
+            Some(w) if w.kind == ClosingKind::Completed => live[1..]
+                .iter()
+                .filter(|c| c.kind != ClosingKind::Completed)
+                .map(|c| Reconciliation {
+                    id: c.event_id.clone(),
+                    occurrence_id: occurrence_id.to_string(),
+                    device_id: c.device_id.clone(),
+                    by: c.by.clone(),
+                    lost: c.kind,
+                    lost_at: c.at,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let expected_again = winner.is_none()
+            && o.is_early()
+            && o.undos.iter().any(|u| {
+                !superseded.contains(u.event_id.as_str()) && u.outcome == UndoOutcome::Expected
+            });
+        let was_closed = o.closing.is_some();
+        let reminder_id = o.reminder_id.clone();
+        self.reconciliations
+            .retain(|r| r.occurrence_id != occurrence_id);
+        self.reconciliations.extend(reconciled);
+        let Some(o) = self.occurrences.get_mut(occurrence_id) else {
+            return;
+        };
+        o.unfired = expected_again;
+        let closed_at = winner.as_ref().map(|c| c.at);
+        if let (Some(at), false) = (closed_at, was_closed) {
+            o.snoozed_until = None;
+            o.snoozed_at = None;
+            o.acknowledged = false;
+            o.acknowledged_at = None;
+            o.closing = winner;
+            self.end_snoozes(occurrence_id, at);
+            return;
+        }
+        o.closing = winner;
+        // Reopened: a newer occurrence of a repeating reminder takes its place.
+        if was_closed
+            && o.closing.is_none()
+            && self
+                .reminders
+                .get(&reminder_id)
+                .is_some_and(|r| r.repeats())
+        {
+            self.expire_superseded(&reminder_id);
         }
     }
 
@@ -925,33 +1158,124 @@ impl State {
         let Some(newest) = self
             .occurrences
             .values()
-            .filter(|o| o.reminder_id == reminder_id)
+            .filter(|o| o.reminder_id == reminder_id && !o.unfired)
             .map(|o| (o.scheduled_at, o.id.clone()))
             .max()
         else {
             return;
         };
-        let mut ended = Vec::new();
-        for o in self.occurrences.values_mut() {
-            if o.reminder_id == reminder_id && o.id != newest.1 && o.closing.is_none() {
-                ended.push((o.id.clone(), newest.0.max(o.scheduled_at)));
-                o.snoozed_until = None;
-                o.snoozed_at = None;
-                o.acknowledged = false;
-                o.acknowledged_at = None;
-                o.closing = Some(Closing {
+        let older: Vec<(String, i64)> = self
+            .occurrences
+            .values()
+            .filter(|o| o.reminder_id == reminder_id && o.id != newest.1 && o.is_open())
+            .map(|o| (o.id.clone(), newest.0.max(o.scheduled_at)))
+            .collect();
+        for (id, at) in older {
+            self.add_record(
+                &id,
+                Closing {
                     kind: ClosingKind::Missed,
                     by: String::new(),
                     device_id: String::new(),
-                    at: newest.0.max(o.scheduled_at),
+                    at,
                     note: None,
-                    event_id: format!("expired:{}", o.id),
-                });
+                    event_id: format!("expired:{id}"),
+                    recorded_at: at,
+                    replaces: Vec::new(),
+                },
+            );
+        }
+    }
+
+    /// Everything done to how an occurrence is closed, oldest first: each
+    /// closing, correction and undo, with the ones that were taken back
+    /// marked. Nothing is ever removed.
+    pub fn history_of(&self, occurrence_id: &str) -> Vec<HistoryEntry> {
+        let Some(o) = self.occurrences.get(self.resolve(occurrence_id)) else {
+            return Vec::new();
+        };
+        let gone = superseded(&o.records, &o.undos);
+        let mut v: Vec<HistoryEntry> = o
+            .records
+            .iter()
+            .map(|c| HistoryEntry {
+                event_id: c.event_id.clone(),
+                what: match c.kind {
+                    ClosingKind::Completed => HistoryWhat::Completed,
+                    ClosingKind::Skipped => HistoryWhat::Skipped,
+                    ClosingKind::Missed => HistoryWhat::Missed,
+                },
+                at: Some(c.at),
+                note: c.note.clone(),
+                by: c.by.clone(),
+                device_id: c.device_id.clone(),
+                recorded_at: c.recorded_at,
+                superseded: gone.contains(c.event_id.as_str()),
+                replaces: c.replaces.clone(),
+            })
+            .chain(o.undos.iter().map(|u| HistoryEntry {
+                event_id: u.event_id.clone(),
+                what: match u.outcome {
+                    UndoOutcome::Expected => HistoryWhat::Expected,
+                    _ => HistoryWhat::Reopened,
+                },
+                at: None,
+                note: None,
+                by: u.by.clone(),
+                device_id: u.device_id.clone(),
+                recorded_at: u.recorded_at,
+                superseded: gone.contains(u.event_id.as_str()),
+                replaces: u.replaces.clone(),
+            }))
+            .collect();
+        v.sort_by(|a, b| (a.recorded_at, &a.event_id).cmp(&(b.recorded_at, &b.event_id)));
+        v
+    }
+
+    /// What a correction or an undo made now takes the place of: the
+    /// closings that count, and everything they in turn replaced, so that
+    /// the occurrence is changed as a whole and not one step back. A closing
+    /// another device makes meanwhile isn't among them, and stands.
+    pub fn standing_closings(&self, occurrence_id: &str) -> Vec<String> {
+        let Some(o) = self.occurrences.get(self.resolve(occurrence_id)) else {
+            return Vec::new();
+        };
+        let gone = superseded(&o.records, &o.undos);
+        let mut out: Vec<String> = Vec::new();
+        let mut todo: Vec<&str> = o
+            .records
+            .iter()
+            .filter(|c| !gone.contains(c.event_id.as_str()))
+            .map(|c| c.event_id.as_str())
+            .collect();
+        while let Some(id) = todo.pop() {
+            if out.iter().any(|o| o == id) {
+                continue;
+            }
+            out.push(id.to_string());
+            if let Some(c) = o.records.iter().find(|c| c.event_id == id) {
+                todo.extend(c.replaces.iter().map(String::as_str));
             }
         }
-        for (id, at) in ended {
-            self.end_snoozes(&id, at);
-        }
+        out.sort();
+        out
+    }
+
+    /// Notes given when skipping, most recent first and each once, up to
+    /// `limit`: offered again the next time.
+    pub fn recent_skip_notes(&self, limit: usize) -> Vec<(i64, String)> {
+        let mut v: Vec<(i64, String)> = self
+            .occurrences
+            .values()
+            .flat_map(|o| &o.records)
+            .filter(|c| c.kind == ClosingKind::Skipped)
+            .filter_map(|c| Some((c.recorded_at, c.note.clone().filter(|n| !n.is_empty())?)))
+            .collect();
+        v.sort_by(|a, b| b.cmp(a));
+        let mut seen = BTreeSet::new();
+        v.retain(|(_, n)| seen.insert(n.clone()));
+        v.truncate(limit);
+        v
     }
 
     /// The reminder's latest occurrence: the one a countdown restarts from.
@@ -966,7 +1290,7 @@ impl State {
     pub fn last_scheduled(&self, reminder_id: &str) -> Option<i64> {
         self.occurrences
             .values()
-            .filter(|o| o.reminder_id == reminder_id)
+            .filter(|o| o.reminder_id == reminder_id && !o.unfired)
             .map(|o| o.scheduled_at)
             .max()
     }
@@ -1063,10 +1387,18 @@ impl State {
     }
 
     /// Whether the reminder has fired yet (its one occurrence exists).
-    fn has_fired(&self, reminder_id: &str) -> bool {
+    pub(crate) fn has_fired(&self, reminder_id: &str) -> bool {
         self.occurrences
             .values()
-            .any(|o| o.reminder_id == reminder_id)
+            .any(|o| o.reminder_id == reminder_id && !o.unfired)
+    }
+
+    /// Whether an occurrence exists and has really fired or been closed
+    /// early: not one that was closed ahead of its time and undone.
+    pub(crate) fn is_fired(&self, occurrence_id: &str) -> bool {
+        self.occurrences
+            .get(self.resolve(occurrence_id))
+            .is_some_and(|o| !o.unfired)
     }
 
     /// One-off reminders whose time has come and that have not fired.
@@ -1288,11 +1620,22 @@ impl State {
                         mine.acknowledged |= o.acknowledged;
                         mine.acknowledged_at = mine.acknowledged_at.max(o.acknowledged_at);
                     }
+                    if mine.is_early() && !o.is_early() {
+                        mine.fired_at = o.fired_at;
+                    }
+                    for c in &o.records {
+                        if !mine.records.iter().any(|m| m.event_id == c.event_id) {
+                            mine.records.push(c.clone());
+                        }
+                    }
+                    for u in &o.undos {
+                        if !mine.undos.iter().any(|m| m.event_id == u.event_id) {
+                            mine.undos.push(u.clone());
+                        }
+                    }
                 }
             }
-            if let Some(c) = &o.closing {
-                self.merge_closing(&o.id, c.clone());
-            }
+            self.settle(&o.id);
         }
         for (alias, target) in &from.aliases {
             if belongs(alias) || belongs(target) {

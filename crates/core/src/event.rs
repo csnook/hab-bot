@@ -8,7 +8,7 @@ use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -69,6 +69,25 @@ pub enum Event {
         occurrence_id: String,
         skipped_at: i64,
         note: Option<String>,
+    },
+    /// Someone corrected how the occurrence was closed, to completed or
+    /// skipped at `at`. It takes the place of the closings its author saw,
+    /// `replaces`, which the history keeps; a closing made meanwhile on
+    /// another device stands. Format 9.
+    OccurrenceCorrected {
+        occurrence_id: String,
+        replaces: Vec<String>,
+        kind: Correction,
+        at: i64,
+        note: Option<String>,
+    },
+    /// Someone took back the closings `replaces`, which their author saw. It
+    /// says how that left the occurrence, as worked out where it was made.
+    /// Format 9.
+    OccurrenceUndone {
+        occurrence_id: String,
+        replaces: Vec<String>,
+        outcome: UndoOutcome,
     },
     /// The app closed the occurrence because it expired before anyone acted.
     OccurrenceMissed {
@@ -135,6 +154,28 @@ pub enum Event {
     /// The device that made this event removed `device_id` from the account.
     /// The device's name stays, for the history; its sign-in notice goes.
     DeviceRemoved { device_id: String },
+}
+
+/// What a correction changes a closed occurrence to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Correction {
+    Completed,
+    Skipped,
+}
+
+/// How an undo left the occurrence, which the device that made it decides
+/// (reopening is only right if it would still be open) so that every device
+/// reaches the same answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum UndoOutcome {
+    /// Open again.
+    Reopened,
+    /// Closed ahead of its time: it is expected again and fires at its time.
+    Expected,
+    /// It would no longer be open: missed, as of `at`.
+    Missed { at: i64 },
 }
 
 /// A reminder's settings, each of which is changed (and merged) on its own.
@@ -235,6 +276,8 @@ impl Event {
                 change: Change::Countdown(_),
                 ..
             } => 5,
+            // Undoing and correcting arrived in format 9.
+            Event::OccurrenceCorrected { .. } | Event::OccurrenceUndone { .. } => 9,
             // Snoozing ahead of time arrived in format 6.
             Event::ExpectedOccurrenceSnoozed { .. } => 6,
             _ => 1,

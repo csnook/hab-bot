@@ -806,6 +806,7 @@ impl Syncer {
 
     fn numbered(&self, n: &Numbered) -> Result<(), SyncError> {
         self.core().mark_sent(&n.event_id, n.seq)?;
+        self.core().set_received_at(&n.event_id, n.received_at)?;
         (self.on_change)();
         Ok(())
     }
@@ -974,15 +975,19 @@ impl Syncer {
             && serde_json::from_slice::<Payload>(&payload)
                 .map(|p| p.event.get("type").and_then(|t| t.as_str()) == Some("device_signed_in"))
                 .unwrap_or(false);
-        match self.core().receive(
+        // The lock is let go before the match: the arms take it again.
+        let received = self.core().receive(
             &e.list_id,
             n.seq,
             &e.event_id,
             &e.device_id.to_string(),
             e.format,
             &payload,
-        ) {
+        );
+        match received {
             Ok(new) => {
+                // Best effort: the history shows when the server got it.
+                let _ = self.core().set_received_at(&e.event_id, n.received_at);
                 if new && signed_in {
                     // The new device needs the list key sealed to it.
                     self.reseal.store(true, Ordering::SeqCst);

@@ -315,39 +315,99 @@ fn create_countdown_reminder(
     Ok(new_id)
 }
 
-/// Completes a countdown reminder before it fires, as done at `done_at`
-/// (now if none): it restarts from then and the pending firing is cancelled.
+/// Completes a reminder's next expected occurrence before it fires, as done
+/// at `done_at` (now if none): it never fires, and a countdown restarts from
+/// then. Returns the occurrence, for Undo.
 #[tauri::command]
-fn complete_countdown(
+fn complete_early(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     reminder_id: String,
     done_at: Option<i64>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let now = now();
-    app.core
+    let id = app
+        .core
         .lock()
         .unwrap()
         .complete_expected(&reminder_id, done_at.unwrap_or(now), now)
         .map_err(|e| e.to_string())?;
     changed(&app, &handle);
-    Ok(())
+    Ok(id)
 }
 
-/// Skips a countdown reminder's coming occurrence: it restarts from now.
+/// Skips a reminder's next expected occurrence ahead of time, with an
+/// optional note. Returns the occurrence, for Undo.
 #[tauri::command]
-fn skip_countdown(
+fn skip_ahead(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     reminder_id: String,
+    note: Option<String>,
+) -> Result<String, String> {
+    let id = app
+        .core
+        .lock()
+        .unwrap()
+        .skip_expected(&reminder_id, note.as_deref(), now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(id)
+}
+
+/// Undoes a completion or skip: reopened if it would still be open, expected
+/// again if it was closed ahead of its time, otherwise missed.
+#[tauri::command]
+fn undo_occurrence(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_id: String,
+) -> Result<hab_core::UndoOutcome, String> {
+    let outcome = app
+        .core
+        .lock()
+        .unwrap()
+        .undo(&occurrence_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(outcome)
+}
+
+/// Changes how a closed occurrence, a missed one too, was closed. `kind` is
+/// "completed" or "skipped"; `at` is when it was done (unix seconds).
+#[tauri::command]
+fn correct_occurrence(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    occurrence_id: String,
+    kind: hab_core::Correction,
+    at: i64,
+    note: Option<String>,
 ) -> Result<(), String> {
     app.core
         .lock()
         .unwrap()
-        .skip_expected(&reminder_id, None, now())
+        .correct(&occurrence_id, kind, at, note.as_deref(), now())
         .map_err(|e| e.to_string())?;
     changed(&app, &handle);
     Ok(())
+}
+
+/// A closed occurrence with its history, for the details panel.
+#[tauri::command]
+fn closed_occurrence(
+    app: tauri::State<'_, App>,
+    occurrence_id: String,
+) -> Option<hab_core::ClosedView> {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.closed_occurrence(&occurrence_id)
+}
+
+/// Notes given when skipping, most recent first, to offer again.
+#[tauri::command]
+fn recent_skip_notes(app: tauri::State<'_, App>) -> Vec<String> {
+    app.core.lock().unwrap().recent_skip_notes(5)
 }
 
 /// Overdue, Due, Later today and Earlier today.
@@ -1476,8 +1536,12 @@ pub fn run() {
             edit_reminder,
             create_recurring_reminder,
             create_countdown_reminder,
-            complete_countdown,
-            skip_countdown,
+            complete_early,
+            skip_ahead,
+            undo_occurrence,
+            correct_occurrence,
+            closed_occurrence,
+            recent_skip_notes,
             priorities,
             app_version,
             inbox,

@@ -8,13 +8,15 @@ use uuid::Uuid;
 use crate::countdown::Countdown;
 use crate::delay::{Delay, DelaySpec};
 use crate::event::{
-    Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
+    Change, Correction, Event, Outgoing, Payload, Setting, StoredEvent, UndoOutcome,
+    FORMAT_VERSION, UPDATE_NOTICE,
 };
 use crate::hlc::Hlc;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::{self, Parts, Schedule};
 use crate::state::{
-    last_chance_at, ClosingKind, DueItem, Reminder, SnoozeView, State, UpcomingItem,
+    last_chance_at, ClosingKind, DueItem, HistoryWhat, Occurrence, Reminder, SnoozeView, State,
+    UpcomingItem,
 };
 use crate::store::Store;
 use crate::{Error, Result};
@@ -300,6 +302,9 @@ pub struct ExpectedItem {
     pub snoozed_until: Option<i64>,
     /// When it would be missed for want of action, if it has such an expiry.
     pub expires_at: Option<i64>,
+    /// "Complete early" and "Skip ahead" are offered: it is the reminder's
+    /// next expected occurrence and nothing of the reminder is open.
+    pub can_close_early: bool,
 }
 
 /// A closed occurrence for the Inbox's Earlier today section.
@@ -313,6 +318,60 @@ pub struct EarlierItem {
     pub scheduled_at: i64,
     pub closed_at: i64,
     pub kind: ClosingKind,
+    /// A completion or skip can be undone; a miss is corrected instead.
+    pub can_undo: bool,
+    /// How it was closed was changed afterwards: the history has the original.
+    pub corrected: bool,
+}
+
+/// How a closed occurrence counts, for the history and reliability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Completed while due.
+    DoneOnTime,
+    /// Completed while overdue, including a miss corrected to completed.
+    DoneLate,
+    Skipped,
+    Missed,
+}
+
+/// One closing, correction or undo in a closed occurrence's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosedEntry {
+    pub event_id: String,
+    pub what: HistoryWhat,
+    /// The time the user said it was done or skipped.
+    pub at: Option<i64>,
+    pub note: Option<String>,
+    /// Who; empty if the app closed it (a miss).
+    pub by: String,
+    /// When it was tapped.
+    pub tapped_at: i64,
+    /// When the server received it; `None` until it has.
+    pub received_at: Option<i64>,
+    /// A later correction or undo took its place: the original, kept.
+    pub superseded: bool,
+}
+
+/// A closed occurrence as the details panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosedView {
+    pub occurrence_id: String,
+    pub reminder_id: String,
+    pub list_id: String,
+    pub title: String,
+    pub priority: Priority,
+    pub scheduled_at: i64,
+    pub kind: ClosingKind,
+    pub outcome: Outcome,
+    /// The time the user said.
+    pub at: i64,
+    pub note: Option<String>,
+    pub can_undo: bool,
+    pub corrected: bool,
+    /// Every closing, correction and undo, oldest first.
+    pub history: Vec<ClosedEntry>,
 }
 
 /// The Inbox's sections about the rest of today and what's behind it.
@@ -1093,6 +1152,8 @@ impl Core {
         let countdown = r.countdown.as_ref()?;
         let zone = self.zone_of(r);
         match state.latest_occurrence(&r.id) {
+            // Closed ahead of its time and undone: it comes back as expected.
+            Some(o) if o.unfired => Some(o.scheduled_at),
             Some(o) => {
                 let closed = o.closing.as_ref()?.at;
                 let next = countdown.next_after(&zone, closed)?;
@@ -1179,7 +1240,7 @@ impl Core {
             for at in w.instances {
                 let occurrence_id = format!("{reminder_id}@{at}");
                 let state = self.state_of(&w.list_id).expect("the list is held");
-                if state.occurrences.contains_key(&occurrence_id) {
+                if state.is_fired(&occurrence_id) {
                     continue; // another device already fired this instance
                 }
                 let open = state
@@ -1260,10 +1321,39 @@ impl Core {
         Ok(())
     }
 
-    /// Closes a countdown reminder's coming occurrence before it fires: it
-    /// is opened and closed at once, as of `closed_at`, so the countdown
-    /// restarts from there and the pending firing is cancelled, on every
-    /// device. Returns the occurrence's id.
+    /// When the reminder's next occurrence is expected, if it has one that
+    /// can be closed ahead of time: a countdown's, a schedule's next instance
+    /// (once nothing is open) or a one-off's, yet to fire.
+    fn next_expected(&self, state: &State, r: &Reminder, now: i64) -> Result<i64> {
+        let open = state
+            .occurrences
+            .values()
+            .any(|o| o.reminder_id == r.id && o.is_open());
+        if open {
+            return Err(Error::StillOpen(r.id.clone()));
+        }
+        let next = if r.counts_down() {
+            self.countdown_next(state, r)
+        } else if r.has_schedules() {
+            let after = state
+                .last_scheduled(&r.id)
+                .unwrap_or(i64::MIN)
+                .max(r.active_from.saturating_sub(1))
+                .max(now);
+            let until = after.max(0).saturating_add(5 * 366 * DAY);
+            self.instances(r, after, until, 1).first().copied()
+        } else if !state.has_fired(&r.id) {
+            Some(r.fire_at)
+        } else {
+            None
+        };
+        next.ok_or_else(|| Error::NotExpected(r.id.clone()))
+    }
+
+    /// Closes a reminder's coming occurrence before it fires: it is opened
+    /// and closed at once, as of `closed_at`, so it never fires, on any
+    /// device, and a countdown restarts from there. Returns the occurrence's
+    /// id.
     fn close_expected(
         &mut self,
         reminder_id: &str,
@@ -1277,13 +1367,8 @@ impl Core {
         let list_id = self.list_of_reminder(reminder_id)?;
         let state = self.state_of(&list_id).expect("the list is held");
         let r = &state.reminders[reminder_id];
-        if !r.counts_down() {
-            return Err(Error::NotCountdown(reminder_id.to_string()));
-        }
         // An open occurrence is completed or skipped as itself.
-        let scheduled_at = self
-            .countdown_next(state, r)
-            .ok_or_else(|| Error::NotCountdown(reminder_id.to_string()))?;
+        let scheduled_at = self.next_expected(state, r, now)?;
         let occurrence_id = format!("{reminder_id}@{scheduled_at}");
         self.record_in(
             &list_id,
@@ -1299,9 +1384,11 @@ impl Core {
         Ok(occurrence_id)
     }
 
-    /// Completes a countdown reminder ahead of time, as done at
-    /// `completed_at`: it restarts from then and the pending firing is
-    /// cancelled. If it has fired, complete the open occurrence instead.
+    /// Completes a reminder's next expected occurrence ahead of time, as done
+    /// at `completed_at`: it never fires, and a countdown restarts from then.
+    /// A reminder with none expected, such as one that fires when someone
+    /// arrives somewhere, doesn't offer it. If it has fired, complete the
+    /// open occurrence instead.
     pub fn complete_expected(
         &mut self,
         reminder_id: &str,
@@ -1316,7 +1403,8 @@ impl Core {
         })
     }
 
-    /// Skips a countdown reminder's coming occurrence: it restarts from now.
+    /// Skips a reminder's next expected occurrence ahead of time: it never
+    /// fires, and a countdown restarts from now.
     pub fn skip_expected(
         &mut self,
         reminder_id: &str,
@@ -1332,6 +1420,18 @@ impl Core {
             skipped_at: now,
             note,
         })
+    }
+
+    /// Whether the reminder has an expected occurrence that can be completed
+    /// or skipped ahead of time, which is when "Complete early" and "Skip
+    /// ahead" are offered.
+    pub fn offers_early(&self, reminder_id: &str, now: i64) -> bool {
+        let Ok(list_id) = self.list_of_reminder(reminder_id) else {
+            return false;
+        };
+        let state = self.state_of(&list_id).expect("the list is held");
+        let r = &state.reminders[reminder_id];
+        self.next_expected(state, r, now).is_ok()
     }
 
     /// Skips an open occurrence, with an optional note.
@@ -1362,6 +1462,203 @@ impl Core {
             },
         )?;
         Ok(())
+    }
+
+    /// The list, id and state of a closed occurrence of a live reminder.
+    fn closed_id(&self, occurrence_id: &str) -> Result<(String, String)> {
+        for (list_id, state) in self.states() {
+            let id = state.resolve(occurrence_id).to_string();
+            if let Some(o) = state.occurrences.get(&id) {
+                return if o.closing.is_some() && state.reminders.contains_key(&o.reminder_id) {
+                    Ok((list_id.to_string(), id))
+                } else {
+                    Err(Error::NotClosed(occurrence_id.to_string()))
+                };
+            }
+        }
+        Err(Error::NotClosed(occurrence_id.to_string()))
+    }
+
+    /// What undoing a closing would leave, worked out here and recorded in
+    /// the undo so every device reaches the same answer: reopened if it would
+    /// still be open (not expired, and no newer occurrence fired); back to
+    /// being expected if it was closed ahead of its time and that time hasn't
+    /// come; otherwise missed.
+    fn undo_outcome(&self, state: &State, o: &Occurrence, now: i64) -> UndoOutcome {
+        if o.is_early() && now < o.scheduled_at {
+            return UndoOutcome::Expected;
+        }
+        let newer = state
+            .occurrences
+            .values()
+            .filter(|n| {
+                n.reminder_id == o.reminder_id
+                    && !n.unfired
+                    && (n.scheduled_at, &n.id) > (o.scheduled_at, &o.id)
+            })
+            .map(|n| n.scheduled_at)
+            .max();
+        if let Some(at) = newer {
+            return UndoOutcome::Missed {
+                at: at.max(o.scheduled_at),
+            };
+        }
+        let expiry = state
+            .reminders
+            .get(&o.reminder_id)
+            .and_then(|r| r.expires_at(o.scheduled_at, &self.device_tz()))
+            .filter(|at| *at <= now);
+        match expiry {
+            Some(at) => UndoOutcome::Missed { at },
+            None => UndoOutcome::Reopened,
+        }
+    }
+
+    /// Undoes a completion or skip. The occurrence opens again if it would
+    /// still be open; closed ahead of its time it is expected again, and a
+    /// countdown goes back to what it was; otherwise it becomes missed, as of
+    /// when it expired or the newer occurrence fired, and a countdown counts
+    /// from that. Returns what it left. A miss isn't undone but corrected.
+    ///
+    /// It takes the place of the closings this device has seen. One another
+    /// device made meanwhile stands, so that a deliberate undo is never read
+    /// as the devices disagreeing.
+    pub fn undo(&mut self, occurrence_id: &str, now: i64) -> Result<UndoOutcome> {
+        let (list_id, id) = self.closed_id(occurrence_id)?;
+        let state = self.state_of(&list_id).expect("the list is held");
+        let o = &state.occurrences[&id];
+        if o.closing
+            .as_ref()
+            .is_some_and(|c| c.kind == ClosingKind::Missed)
+        {
+            return Err(Error::CantUndoMiss);
+        }
+        let outcome = self.undo_outcome(state, o, now);
+        let replaces = state.standing_closings(&id);
+        self.record_in(
+            &list_id,
+            now,
+            Event::OccurrenceUndone {
+                occurrence_id: id,
+                replaces,
+                outcome: outcome.clone(),
+            },
+        )?;
+        Ok(outcome)
+    }
+
+    /// Changes how a closed occurrence, a missed one too, was closed: to
+    /// completed or skipped, as of `at`. The history keeps the original and
+    /// the correction, and a miss corrected to completed counts as done
+    /// late. A countdown restarts from `at`.
+    pub fn correct(
+        &mut self,
+        occurrence_id: &str,
+        kind: Correction,
+        at: i64,
+        note: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        if at > now {
+            return Err(Error::InTheFuture);
+        }
+        let (list_id, id) = self.closed_id(occurrence_id)?;
+        let replaces = self
+            .state_of(&list_id)
+            .expect("the list is held")
+            .standing_closings(&id);
+        let note = note
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && kind == Correction::Skipped)
+            .map(str::to_string);
+        self.record_in(
+            &list_id,
+            now,
+            Event::OccurrenceCorrected {
+                occurrence_id: id,
+                replaces,
+                kind,
+                at,
+                note,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// A closed occurrence for the details panel, with its history.
+    pub fn closed_occurrence(&self, occurrence_id: &str) -> Option<ClosedView> {
+        let (list_id, id) = self.closed_id(occurrence_id).ok()?;
+        let state = self.state_of(&list_id)?;
+        let o = &state.occurrences[&id];
+        let r = &state.reminders[&o.reminder_id];
+        let c = o.closing.as_ref()?;
+        let history: Vec<ClosedEntry> = state
+            .history_of(&id)
+            .into_iter()
+            .map(|h| ClosedEntry {
+                received_at: self.store.received_at(&h.event_id).ok().flatten(),
+                event_id: h.event_id,
+                what: h.what,
+                at: h.at,
+                note: h.note,
+                by: h.by,
+                tapped_at: h.recorded_at,
+                superseded: h.superseded,
+            })
+            .collect();
+        let corrected = !c.replaces.is_empty();
+        // Did a miss come before it, through however many corrections?
+        let mut from_miss = false;
+        let mut seen = c.replaces.clone();
+        while let Some(e) = seen.pop() {
+            if let Some(prior) = o.records.iter().find(|p| p.event_id == e) {
+                from_miss |= prior.kind == ClosingKind::Missed;
+                seen.extend(prior.replaces.iter().cloned());
+            }
+        }
+        let outcome = match c.kind {
+            ClosingKind::Completed
+                if from_miss || c.at >= r.overdue_at(o.scheduled_at, &self.device_tz()) =>
+            {
+                Outcome::DoneLate
+            }
+            ClosingKind::Completed => Outcome::DoneOnTime,
+            ClosingKind::Skipped => Outcome::Skipped,
+            ClosingKind::Missed => Outcome::Missed,
+        };
+        Some(ClosedView {
+            occurrence_id: id,
+            reminder_id: r.id.clone(),
+            list_id,
+            title: r.title.clone(),
+            priority: r.priority,
+            scheduled_at: o.scheduled_at,
+            kind: c.kind,
+            outcome,
+            at: c.at,
+            note: c.note.clone(),
+            can_undo: c.kind != ClosingKind::Missed,
+            corrected,
+            history,
+        })
+    }
+
+    /// Notes given when skipping, most recent first, to offer again.
+    pub fn recent_skip_notes(&self, limit: usize) -> Vec<String> {
+        let mut all: Vec<(i64, String)> = self
+            .states()
+            .flat_map(|(_, s)| s.recent_skip_notes(limit))
+            .collect();
+        all.sort_by(|a, b| b.cmp(a));
+        let mut seen = BTreeSet::new();
+        all.retain(|(_, n)| seen.insert(n.clone()));
+        all.into_iter().take(limit).map(|(_, n)| n).collect()
+    }
+
+    /// The server numbered an event and says when it received it, which the
+    /// history shows beside the time it was said and the time it was tapped.
+    pub fn set_received_at(&self, event_id: &str, received_at: i64) -> Result<()> {
+        self.store.set_received_at(event_id, received_at)
     }
 
     /// Quiets an open occurrence's alerts until `until`. The occurrence stays
@@ -1785,15 +2082,14 @@ impl Core {
                         .max(r.active_from.saturating_sub(1))
                         .max(now);
                     self.instances(r, after, until, 500)
-                } else if r.fire_at > now
-                    && r.fire_at <= until
-                    && !s.occurrences.values().any(|o| o.reminder_id == r.id)
-                {
+                } else if r.fire_at > now && r.fire_at <= until && !s.has_fired(&r.id) {
                     vec![r.fire_at]
                 } else {
                     Vec::new()
                 };
+                let next = self.next_expected(s, r, now).ok();
                 out.extend(times.into_iter().map(|t| ExpectedItem {
+                    can_close_early: next == Some(t),
                     reminder_id: r.id.clone(),
                     list_id: r.list_id.clone(),
                     priority: r.priority,
@@ -1828,6 +2124,8 @@ impl Core {
                         scheduled_at: o.scheduled_at,
                         closed_at: c.at,
                         kind: c.kind,
+                        can_undo: c.kind != ClosingKind::Missed,
+                        corrected: !c.replaces.is_empty(),
                     })
                 })
             })

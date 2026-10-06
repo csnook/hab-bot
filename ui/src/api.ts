@@ -122,6 +122,8 @@ export interface ExpectedItem {
   /** Snoozed ahead of time until then: it fires at its time, quietly. */
   snoozed_until: number | null;
   expires_at: number | null;
+  /** Complete early and Skip ahead are offered: it is the next one expected. */
+  can_close_early: boolean;
 }
 
 export interface EarlierItem {
@@ -132,7 +134,52 @@ export interface EarlierItem {
   scheduled_at: number;
   closed_at: number;
   kind: "missed" | "skipped" | "completed";
+  /** A completion or skip can be undone; a miss is corrected instead. */
+  can_undo: boolean;
+  /** How it was closed was changed afterwards. */
+  corrected: boolean;
 }
+
+export type Outcome = "done_on_time" | "done_late" | "skipped" | "missed";
+
+/** One closing, correction or undo in a closed occurrence's history. */
+export interface ClosedEntry {
+  event_id: string;
+  what: "completed" | "skipped" | "missed" | "reopened" | "expected";
+  /** The time the user said it was done or skipped. */
+  at: number | null;
+  note: string | null;
+  by: string;
+  /** When it was tapped. */
+  tapped_at: number;
+  /** When the server received it, once it has. */
+  received_at: number | null;
+  /** A later correction or undo took its place: the original, kept. */
+  superseded: boolean;
+}
+
+/** A closed occurrence as the details panel shows it. */
+export interface ClosedView {
+  occurrence_id: string;
+  reminder_id: string;
+  list_id: string;
+  title: string;
+  priority: PriorityName;
+  scheduled_at: number;
+  kind: "missed" | "skipped" | "completed";
+  outcome: Outcome;
+  at: number;
+  note: string | null;
+  can_undo: boolean;
+  corrected: boolean;
+  history: ClosedEntry[];
+}
+
+/** How an undo left the occurrence. */
+export type UndoOutcome =
+  | { outcome: "reopened" }
+  | { outcome: "expected" }
+  | { outcome: "missed"; at: number };
 
 /** The Inbox's Later today and Earlier today. */
 export interface Inbox {
@@ -276,11 +323,30 @@ export const reminderView = (reminderId: string) =>
 export const editReminder = (reminderId: string, edit: EditArgs) =>
   invoke<void>("edit_reminder", { reminderId, edit });
 
-/** Completes it before it fires: it restarts from `doneAt` (now by default). */
-export const completeCountdown = (reminderId: string, doneAt?: number) =>
-  invoke<void>("complete_countdown", { reminderId, doneAt });
-export const skipCountdown = (reminderId: string) =>
-  invoke<void>("skip_countdown", { reminderId });
+/**
+ * Completes the reminder's next expected occurrence before it fires, as done
+ * at `doneAt` (now by default): it never fires, and a countdown restarts from
+ * then. Returns the occurrence, to undo.
+ */
+export const completeEarly = (reminderId: string, doneAt?: number) =>
+  invoke<string>("complete_early", { reminderId, doneAt });
+/** Skips the next expected occurrence ahead of time, with an optional note. */
+export const skipAhead = (reminderId: string, note?: string) =>
+  invoke<string>("skip_ahead", { reminderId, note });
+/** Undoes a completion or skip: reopened, expected again, or missed. */
+export const undoOccurrence = (occurrenceId: string) =>
+  invoke<UndoOutcome>("undo_occurrence", { occurrenceId });
+/** Changes how a closed occurrence, a missed one too, was closed. */
+export const correctOccurrence = (
+  occurrenceId: string,
+  kind: "completed" | "skipped",
+  at: number,
+  note?: string,
+) => invoke<void>("correct_occurrence", { occurrenceId, kind, at, note });
+export const closedOccurrence = (occurrenceId: string) =>
+  invoke<ClosedView | null>("closed_occurrence", { occurrenceId });
+/** Notes given when skipping, most recent first. */
+export const recentSkipNotes = () => invoke<string[]>("recent_skip_notes");
 /** `doneAt` is when it was done, if not just now: a countdown restarts from it. */
 export const completeOccurrence = (occurrenceId: string, doneAt?: number) =>
   invoke<void>("complete_occurrence", { occurrenceId, doneAt });

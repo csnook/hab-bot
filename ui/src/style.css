@@ -110,3 +110,11 @@ dialog.confirm form { margin-top: 0; }
 .deleted { margin-top: 20px; }
 .deleted summary { cursor: pointer; font-weight: 600; }
 @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } .sidebar { position: static; } }
+
+/* Acting on occurrences (#45) */
+button.link { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; color: inherit; }
+button.link:hover { text-decoration: underline; }
+dialog.panel header { display: flex; justify-content: space-between; align-items: center; }
+dialog.panel h3 { font-size: 0.95rem; margin: 12px 0 4px; }
+dialog.panel li.replaced { opacity: 0.6; text-decoration: line-through; }
+dialog.panel details { display: inline-block; }

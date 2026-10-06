@@ -324,11 +324,17 @@ fn completing_before_it_fires_restarts_it_and_cancels_the_pending_firing() {
     assert_eq!(o.completed().unwrap().1, watered);
     // It fires again on the new time.
     assert_eq!(c.tick(watered + 3 * DAY).unwrap().len(), 1);
-    // Only a countdown reminder can be completed that way.
-    let one_off = c.create_reminder("Once", watered + DAY, watered).unwrap();
+    // A one-off that has already fired has no expected occurrence to close.
+    let one_off = c.create_reminder("Once", watered, watered).unwrap();
+    let fired = c.tick(watered).unwrap();
     assert!(matches!(
         c.complete_expected(&one_off, watered, watered),
-        Err(Error::NotCountdown(_))
+        Err(Error::StillOpen(_))
+    ));
+    c.complete(&fired[0].occurrence_id, watered).unwrap();
+    assert!(matches!(
+        c.complete_expected(&one_off, watered, watered),
+        Err(Error::NotExpected(_))
     ));
 }
 
@@ -597,7 +603,7 @@ fn countdown_events_need_a_reader_of_the_new_format() {
         change: hab_core::Change::Countdown(countdown(1, CountdownUnit::Days, None)),
     };
     assert_eq!(edit.format(), 5);
-    assert_eq!(hab_core::FORMAT_VERSION, 8);
+    assert_eq!(hab_core::FORMAT_VERSION, 9);
     // And they survive a restart: the state rebuilds the same.
     let dir = std::env::temp_dir().join(format!("hab-countdown-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

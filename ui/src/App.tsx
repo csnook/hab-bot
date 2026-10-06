@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
-  completeCountdown,
+  completeEarly,
   completeOccurrence,
   deletedReminders,
   filters as loadFilters,
   lists as loadLists,
   setFilters as saveFilters,
-  skipCountdown,
+  skipAhead,
   type DeletedReminder,
   type DueItem,
   type Filters,
@@ -19,6 +19,7 @@ import {
   onStateChanged,
   skipOccurrence,
   snapshot,
+  undoOccurrence,
   type Snapshot,
 } from "./api";
 import { formatTime, signInNoticeText } from "./time";
@@ -27,6 +28,7 @@ import { describeCountdown } from "./countdown";
 import { ReminderEditor } from "./ReminderEditor";
 import { Settings, type Section } from "./Settings";
 import { SnoozeMenu } from "./SnoozeMenu";
+import { OccurrencePanel, type PanelTarget } from "./OccurrencePanel";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
 import { filterInbox, filterSnapshot, hiddenCount, isFiltering, noFilters, pruned } from "./filters";
@@ -171,6 +173,8 @@ function Inbox() {
   // The reminder editor: closed, a new reminder, or an existing one.
   const [editing, setEditing] = useState<{ reminderId: string | null } | null>(null);
   const edit = (reminderId: string) => setEditing({ reminderId });
+  // The occurrence details panel: open, expected or closed.
+  const [panel, setPanel] = useState<PanelTarget | null>(null);
 
   const refresh = () => {
     snapshot().then(setSnap).catch((e) => setError(String(e)));
@@ -251,7 +255,7 @@ function Inbox() {
         {shown.overdue.length === 0 && <p class="empty">Nothing overdue.</p>}
         <ul>
           {shown.overdue.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} dot={dot(d.list_id)} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} onDetails={() => setPanel({ state: "open", item: d })} dot={dot(d.list_id)} />
           ))}
         </ul>
       </section>
@@ -261,7 +265,7 @@ function Inbox() {
         {shown.due.length === 0 && <p class="empty">Nothing due.</p>}
         <ul>
           {shown.due.map((d) => (
-            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} dot={dot(d.list_id)} />
+            <OpenItem key={d.occurrence_id} item={d} done={done} skip={skip} onError={setError} opened={opened === d.occurrence_id} onEdit={edit} onDetails={() => setPanel({ state: "open", item: d })} dot={dot(d.list_id)} />
           ))}
         </ul>
       </section>
@@ -273,7 +277,9 @@ function Inbox() {
           {shown.later_today.map((e) => (
             <li key={`${e.reminder_id}@${e.scheduled_at}`}>
               {dot(e.list_id)}
-              <span class="title">{e.title}</span>
+              <button class="title link" onClick={() => setPanel({ state: "expected", item: e })}>
+                {e.title}
+              </button>
               {e.note && <span class="note">{e.note}</span>}
               <span class="when">{formatTime(e.scheduled_at)}</span>
               {e.snoozed_until !== null && (
@@ -297,10 +303,20 @@ function Inbox() {
           {shown.earlier_today.map((e) => (
             <li key={e.occurrence_id}>
               {dot(e.list_id)}
-              <span class="title">{e.title}</span>
+              <button class="title link" onClick={() => setPanel({ state: "closed", item: e })}>
+                {e.title}
+              </button>
               <span class="when">
-                {e.kind} {formatTime(e.closed_at)}
+                {e.kind}
+                {e.corrected ? " (corrected)" : ""} {formatTime(e.closed_at)}
               </span>
+              {e.can_undo && (
+                <button
+                  onClick={() => undoOccurrence(e.occurrence_id).catch((err) => setError(String(err)))}
+                >
+                  Undo
+                </button>
+              )}
             </li>
           ))}
         </ul>
@@ -339,12 +355,12 @@ function Inbox() {
               {c.next_at !== null && (
                 <>
                   <button
-                    onClick={() => completeCountdown(c.reminder_id).catch((e) => setError(String(e)))}
+                    onClick={() => completeEarly(c.reminder_id).catch((e) => setError(String(e)))}
                   >
                     Done now
                   </button>
                   <button
-                    onClick={() => skipCountdown(c.reminder_id).catch((e) => setError(String(e)))}
+                    onClick={() => skipAhead(c.reminder_id).catch((e) => setError(String(e)))}
                   >
                     Skip
                   </button>
@@ -370,6 +386,13 @@ function Inbox() {
         </details>
       )}
 
+      {panel && (
+        <OccurrencePanel
+          target={panel}
+          onClose={() => setPanel(null)}
+          onEdit={edit}
+        />
+      )}
       {editing && (
         <ReminderEditor reminderId={editing.reminderId} onClose={() => setEditing(null)} />
       )}
@@ -398,8 +421,10 @@ function OpenItem({
   onError,
   opened,
   onEdit,
+  onDetails,
   dot,
 }: {
+  onDetails: () => void;
   dot: preact.ComponentChild;
   item: DueItem;
   done: (id: string, doneAt?: number) => void;
@@ -418,7 +443,7 @@ function OpenItem({
   return (
     <li ref={row} class={opened ? "opened" : undefined} aria-current={opened ? "true" : undefined}>
       {dot}
-      <span class="title">{d.title}</span>
+      <button class="title link" onClick={onDetails}>{d.title}</button>
       {d.note && <span class="note">{d.note}</span>}
       <span class="priority">{d.priority}</span>
       {d.not_sent && <NotSent />}

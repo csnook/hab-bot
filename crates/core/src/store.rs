@@ -14,7 +14,7 @@ pub struct Store {
     conn: Connection,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// A stored event whose body is kept raw, because it is in a newer format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +75,15 @@ impl Store {
                      DROP TABLE events_old;",
                 )?;
             }
-            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"))?;
+            conn.execute_batch("PRAGMA user_version = 1; COMMIT;")?;
+        }
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            // When the server received each event, once it has said.
+            conn.execute_batch(&format!(
+                "BEGIN; ALTER TABLE events ADD COLUMN received_at INTEGER;
+                 PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+            ))?;
         }
         Ok(Store { conn })
     }
@@ -243,6 +251,28 @@ impl Store {
             params![event_id, seq],
         )?;
         Ok(())
+    }
+
+    /// Notes when the server received an event.
+    pub fn set_received_at(&self, event_id: &str, received_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE events SET received_at = ?2 WHERE event_id = ?1 AND received_at IS NULL",
+            params![event_id, received_at],
+        )?;
+        Ok(())
+    }
+
+    /// When the server received an event, if it has said.
+    pub fn received_at(&self, event_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT received_at FROM events WHERE event_id = ?1",
+                [event_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Takes on a server account's identity: the user and device that now

@@ -21,10 +21,10 @@ mod state;
 mod store;
 
 pub use crate::core::{
-    Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem, EditReminder, ExpectedItem,
-    Filters, Fired, Inbox, ListInfo, OccurrenceView, ReconciliationNotice, ReminderView,
-    ScheduleView, SecurityNotice, SignInNotice, Snapshot, SnoozeKind, SnoozeOption, SnoozePicker,
-    TriggerView,
+    ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem,
+    EditReminder, ExpectedItem, Filters, Fired, Inbox, ListInfo, OccurrenceView, Outcome,
+    ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice, SignInNotice, Snapshot,
+    SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
@@ -33,7 +33,8 @@ pub use alerter::{
 pub use countdown::{Countdown, CountdownUnit};
 pub use delay::{Delay, DelaySpec};
 pub use event::{
-    Change, Event, Outgoing, Payload, Setting, StoredEvent, FORMAT_VERSION, UPDATE_NOTICE,
+    Change, Correction, Event, Outgoing, Payload, Setting, StoredEvent, UndoOutcome,
+    FORMAT_VERSION, UPDATE_NOTICE,
 };
 pub use hlc::{Hlc, MAX_AHEAD_MS};
 pub use priority::{
@@ -41,9 +42,9 @@ pub use priority::{
 };
 pub use schedule::{clock_time, day_bounds, system_zone_name, zone, Parts, Pattern, Schedule};
 pub use state::{
-    last_chance_at, AlertRecord, Closing, ClosingKind, DueItem, Occurrence, Reconciliation,
-    Reminder, SettingVersion, SignIn, SnoozeEnd, SnoozeRecord, SnoozeView, State, UpcomingItem,
-    LAST_CHANCE_LEAD,
+    last_chance_at, AlertRecord, Closing, ClosingKind, DueItem, HistoryEntry, HistoryWhat,
+    Occurrence, Reconciliation, Reminder, SettingVersion, SignIn, SnoozeEnd, SnoozeRecord,
+    SnoozeView, State, Undo, UpcomingItem, LAST_CHANCE_LEAD,
 };
 pub use store::{HeldEvent, Store};
 
@@ -64,6 +65,12 @@ pub enum Error {
     BadCountdown(String),
     #[error("{0} is not a countdown reminder")]
     NotCountdown(String),
+    #[error("{0} has an open occurrence: complete or skip that instead")]
+    StillOpen(String),
+    #[error("{0} is not closed, or can't be undone or corrected")]
+    NotClosed(String),
+    #[error("a miss can't be undone; correct it to completed or skipped")]
+    CantUndoMiss,
     #[error("that time hasn't come yet")]
     InTheFuture,
     #[error("a duration can't be negative")]

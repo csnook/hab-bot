@@ -192,6 +192,9 @@ Said of an occurrence the app closed because it expired before anyone completed 
 **Correct**:
 To change how or when a closed occurrence was closed, such as turning a missed occurrence into one completed at 9:40. The original closing stays in the history.
 
+**Undo**:
+To take back a completion or skip. The occurrence reopens if it would still be open, is expected again if it was closed ahead of its time, and otherwise becomes missed. A miss is corrected, not undone. See ADR 0010.
+
 **Expiry**:
 The triggers that make a reminder's open occurrence missed, whichever occurs first. The reminder firing again is always one of them: a new schedule or countdown instance, or an event trigger once the occurrence is overdue. While the occurrence is due, or just after it fired, an event trigger joins it instead.
 _Avoid_: Timeout (that is an alert stopping by itself)
