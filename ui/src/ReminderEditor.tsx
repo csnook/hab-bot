@@ -4,8 +4,11 @@ import {
   createRecurringReminder,
   createReminder,
   editReminder,
+  lists as loadLists,
+  moveReminder,
   priorities,
   reminderView,
+  type ListInfo,
   type PriorityInfo,
   type PriorityName,
   type ReminderView,
@@ -27,7 +30,9 @@ import {
 import {
   buildEdit,
   buildNew,
+  listMove,
   newExpiry,
+  newReminderList,
   newNextExpiry,
   newState,
   overdueSpec,
@@ -38,6 +43,8 @@ import {
   type ExpiryForm,
   type OverdueForm,
 } from "./editor";
+import { DeleteDialog } from "./DeleteDialog";
+import { listById, listName as nameOf } from "./lists";
 import { DAYS, REPEATS, type Repeat } from "./repeat";
 import { expiryLine, noteLine, overdueLine, summarize } from "./summary";
 import type { CountdownUnit } from "./api";
@@ -64,6 +71,8 @@ export function ReminderEditor({
   const [state, setState] = useState<EditorState>(newState);
   const [view, setView] = useState<ReminderView | null>(null);
   const [infos, setInfos] = useState<PriorityInfo[]>([]);
+  const [allLists, setAllLists] = useState<ListInfo[]>([]);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -77,6 +86,13 @@ export function ReminderEditor({
       }
     }
     priorities().then(setInfos).catch(() => {});
+    loadLists()
+      .then((l) => {
+        setAllLists(l);
+        // A new reminder starts in the personal list, the default.
+        setState((s) => (s.listId ? s : { ...s, listId: l[0]?.id ?? "" }));
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -94,7 +110,8 @@ export function ReminderEditor({
     setState((s) => ({ ...s, ...patch, whenTouched: true }));
 
   const editing = reminderId !== null;
-  const listName = view ? (view.list_name ?? "Personal") : "Personal";
+  const chosen = listById(allLists, state.listId);
+  const listName = chosen ? nameOf(chosen) : view ? (view.list_name ?? "Personal") : "Personal";
   const sentence = useMemo(() => summarize(summaryInput(state, listName, zoneName())), [state, listName]);
 
   const submit = async (e: Event) => {
@@ -107,13 +124,17 @@ export function ReminderEditor({
         const edit = buildEdit(state, view, zoneName());
         if (!edit.ok) return setError(edit.error);
         if (Object.keys(edit.value).length) await editReminder(view.reminder_id, edit.value);
+        // Moving to another list keeps its history.
+        const to = listMove(state, view);
+        if (to) await moveReminder(view.reminder_id, to);
       } else {
         const made = buildNew(state, Math.floor(Date.now() / 1000), zoneName());
         if (!made.ok) return setError(made.error);
         const { plan, priority, extras } = made.value;
+        const listId = newReminderList(state);
         let id: string;
         if (plan.kind === "once") {
-          id = await createReminder(plan.title, plan.fireAt, priority);
+          id = await createReminder(plan.title, plan.fireAt, priority, listId);
         } else if (plan.kind === "schedule") {
           id = await createRecurringReminder(
             plan.title,
@@ -122,6 +143,7 @@ export function ReminderEditor({
             plan.time,
             plan.zone,
             priority,
+            listId,
           );
         } else {
           id = await createCountdownReminder(
@@ -130,6 +152,7 @@ export function ReminderEditor({
             plan.lastDone,
             plan.zone,
             priority,
+            listId,
           );
         }
         if (extras) await editReminder(id, extras);
@@ -169,8 +192,16 @@ export function ReminderEditor({
         <div class="row">
           <label>
             List
-            <select disabled aria-label="List">
-              <option>{listName}</option>
+            <select
+              aria-label="List"
+              value={state.listId}
+              disabled={allLists.length < 2}
+              onChange={(e) => set({ listId: e.currentTarget.value })}
+            >
+              {allLists.length === 0 && <option>{listName}</option>}
+              {allLists.map((l) => (
+                <option value={l.id} key={l.id}>{nameOf(l)}</option>
+              ))}
             </select>
           </label>
           <label>
@@ -372,11 +403,24 @@ export function ReminderEditor({
 
         <div class="buttons">
           <button type="button" onClick={onClose}>Cancel</button>
+          {editing && view && (
+            <button type="button" class="danger" onClick={() => setDeleting(true)}>
+              Delete…
+            </button>
+          )}
           <button type="submit" disabled={busy || (editing && !view)}>
             {editing ? "Save" : "Create"}
           </button>
         </div>
       </form>
+      {deleting && view && (
+        <DeleteDialog
+          reminderId={view.reminder_id}
+          title={view.title}
+          onCancel={() => setDeleting(false)}
+          onDeleted={onClose}
+        />
+      )}
     </dialog>
   );
 }

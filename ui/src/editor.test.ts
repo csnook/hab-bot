@@ -6,6 +6,8 @@ import {
   expirySpecs,
   newExpiry,
   newNextExpiry,
+  listMove,
+  newReminderList,
   newState,
   overdueSpec,
   stateFromView,
@@ -29,6 +31,7 @@ const view = (patch: Partial<ReminderView> = {}): ReminderView => ({
   reminder_id: "r1",
   list_id: "l1",
   list_name: null,
+  list_colour: null,
   title: "Take the bins out",
   note: "",
   priority: "medium",
@@ -327,5 +330,23 @@ describe("the live sentence follows the form", () => {
       ZONE,
     );
     expect(cdFloating.zone).toBeNull();
+  });
+});
+
+describe("lists", () => {
+  test("an existing reminder's form starts in its list, and picking another moves it", () => {
+    const v = view();
+    const s = stateFromView(v);
+    expect(s.listId).toBe("l1");
+    expect(listMove(s, v)).toBeNull();
+    expect(listMove({ ...s, listId: "l2" }, v)).toBe("l2");
+    // A move is not one of the setting edits.
+    const e = buildEdit({ ...s, listId: "l2" }, v, ZONE);
+    expect(e.ok && Object.keys(e.value)).toEqual([]);
+  });
+
+  test("a new reminder goes in the list chosen, or the personal list if none", () => {
+    expect(newReminderList(newState())).toBeNull();
+    expect(newReminderList(newState("l2"))).toBe("l2");
   });
 });

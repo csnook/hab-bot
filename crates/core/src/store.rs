@@ -337,6 +337,39 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Deletes every stored event that mentions the reminder (its creation,
+    /// edits, occurrences and everything done to them), in every list, except
+    /// the events that record its purging. Returns how many were deleted.
+    /// Occurrence ids start with the reminder's id, so they match too.
+    pub fn redact_reminder(&self, reminder_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM events
+             WHERE instr(CAST(body AS TEXT), ?1) > 0
+               AND instr(CAST(body AS TEXT), '\"type\":\"reminder_purged\"') = 0",
+            [reminder_id],
+        )?)
+    }
+
+    /// How many stored events mention the reminder, not counting those that
+    /// record its purging.
+    pub fn count_mentioning(&self, reminder_id: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE instr(CAST(body AS TEXT), ?1) > 0
+               AND instr(CAST(body AS TEXT), '\"type\":\"reminder_purged\"') = 0",
+            [reminder_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Deletes one stored event.
+    pub fn delete_event(&self, event_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM events WHERE event_id = ?1", [event_id])?;
+        Ok(())
+    }
+
     /// Every list that has events.
     pub fn list_ids(&self) -> Result<Vec<String>> {
         let mut stmt = self

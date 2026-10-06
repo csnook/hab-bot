@@ -43,6 +43,8 @@ export type ExpiryForm =
 
 export interface EditorState {
   title: string;
+  /** The list the reminder is in or goes in; "" until the lists have loaded (the personal list). */
+  listId: string;
   note: string;
   priority: PriorityName;
   /** The trigger. Editing keeps its kind: a one-off, a schedule or a countdown. */
@@ -65,9 +67,10 @@ export interface EditorState {
   whenTouched: boolean;
 }
 
-export function newState(): EditorState {
+export function newState(listId = ""): EditorState {
   return {
     title: "",
+    listId,
     note: "",
     priority: "medium",
     repeat: "once",
@@ -138,7 +141,7 @@ export function expiryFormOf(spec: DelaySpec): ExpiryForm {
 /** The form for an existing reminder. */
 export function stateFromView(v: ReminderView): EditorState {
   const s: EditorState = {
-    ...newState(),
+    ...newState(v.list_id),
     title: v.title,
     note: v.note,
     priority: v.priority,
@@ -300,6 +303,19 @@ function extrasOf(s: EditorState): Built<EditArgs> {
   if (!x.ok) return x;
   if (x.value.length) out.expiry = x.value;
   return { ok: true, value: out };
+}
+
+/**
+ * The list an edit moves the reminder to, or null if it stays where it is.
+ * Moving keeps its history.
+ */
+export function listMove(s: EditorState, v: ReminderView): string | null {
+  return s.listId && s.listId !== v.list_id ? s.listId : null;
+}
+
+/** The list a new reminder is made in: the one chosen, or null for the personal list. */
+export function newReminderList(s: EditorState): string | null {
+  return s.listId || null;
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);

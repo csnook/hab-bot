@@ -82,3 +82,31 @@ dialog.editor form { margin-top: 0; }
 .editor .next, .editor .duration { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .editor textarea { font: inherit; padding: 6px 8px; }
 .note { color: #888; font-size: 0.9rem; font-style: italic; }
+
+/* Lists, filters and deleting (#47) */
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 8px; align-items: start; }
+.layout > main { margin: 0; }
+.sidebar { padding: 16px 8px 16px 16px; position: sticky; top: 0; }
+.sidebar h2 { margin-top: 0; }
+.sidebar li { flex-wrap: wrap; border-bottom: 0; padding: 2px 0; }
+.sidebar .check { display: flex; flex: 1; gap: 6px; align-items: center; min-width: 0; }
+.sidebar .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .count { color: #888; font-size: 0.85rem; }
+.sidebar .more { padding: 0 6px; background: none; border: 0; cursor: pointer; }
+.dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; flex: none; }
+.list-form { display: grid; gap: 6px; width: 100%; padding: 6px; border: 1px solid #8884; border-radius: 4px; margin: 4px 0; }
+.list-form form { display: grid; gap: 6px; margin: 0; }
+.swatches { display: flex; flex-wrap: wrap; gap: 4px; border: 0; padding: 0; margin: 0; }
+.swatches legend { font-size: 0.85rem; color: #888; padding: 0; }
+.swatch { position: relative; display: inline-block; }
+.swatch input { position: absolute; opacity: 0; inset: 0; margin: 0; }
+.swatch span { display: block; width: 1.2rem; height: 1.2rem; border-radius: 50%; border: 2px solid transparent; }
+.swatch input:checked + span { border-color: CanvasText; }
+.swatch input:focus-visible + span { outline: 2px solid #3584e4; outline-offset: 2px; }
+button.danger { color: #c33; }
+dialog.confirm { max-width: min(96vw, 460px); }
+dialog.confirm form { margin-top: 0; }
+.block { display: block; }
+.deleted { margin-top: 20px; }
+.deleted summary { cursor: pointer; font-weight: 600; }
+@media (max-width: 640px) { .layout { grid-template-columns: 1fr; } .sidebar { position: static; } }

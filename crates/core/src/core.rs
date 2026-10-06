@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use jiff::tz::TimeZone;
@@ -136,9 +136,38 @@ pub struct ListInfo {
     pub id: String,
     /// What the list is called. The personal list is not named.
     pub name: Option<String>,
+    /// The list's colour, `#rrggbb`, if it has been given one.
+    pub colour: Option<String>,
     /// The account's personal list, which also holds its settings.
     pub personal: bool,
+    /// How many reminders it holds, not counting deleted ones.
+    pub reminders: usize,
 }
+
+/// A reminder that was deleted with its history kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeletedReminder {
+    pub reminder_id: String,
+    pub list_id: String,
+    pub title: String,
+    /// When it was deleted, in Unix seconds.
+    pub deleted_at: i64,
+    /// The user who deleted it.
+    pub deleted_by: String,
+}
+
+/// What the window leaves out, by the sidebar's list and priority checkboxes.
+/// What is hidden is listed rather than what is shown, so a list or priority
+/// made later shows. It only decides what the window lists: every alert
+/// still comes, as the [`crate::Alerter`] never looks at it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Filters {
+    pub hidden_lists: Vec<String>,
+    pub hidden_priorities: Vec<Priority>,
+}
+
+const FILTERS: &str = "filters";
 
 /// "5 failed sign-ins to your account", from the server. The server has no
 /// device to author an event, so these are not in the list's stream: each
@@ -172,6 +201,9 @@ pub struct ReconciliationNotice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CountdownItem {
     pub reminder_id: String,
+    /// The list the reminder is in.
+    pub list_id: String,
+    pub priority: Priority,
     pub title: String,
     pub countdown: Countdown,
     /// When it fires next. `None` while an occurrence is open: it restarts
@@ -235,6 +267,8 @@ pub struct ReminderView {
     pub list_id: String,
     /// The list's name; `None` for the personal list.
     pub list_name: Option<String>,
+    /// The list's colour, if it has one.
+    pub list_colour: Option<String>,
     pub title: String,
     pub note: String,
     pub priority: Priority,
@@ -256,6 +290,9 @@ pub struct ReminderView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExpectedItem {
     pub reminder_id: String,
+    /// The list the reminder is in.
+    pub list_id: String,
+    pub priority: Priority,
     pub title: String,
     pub note: String,
     pub scheduled_at: i64,
@@ -269,6 +306,9 @@ pub struct ExpectedItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EarlierItem {
     pub occurrence_id: String,
+    /// The list the reminder is in.
+    pub list_id: String,
+    pub priority: Priority,
     pub title: String,
     pub scheduled_at: i64,
     pub closed_at: i64,
@@ -355,25 +395,23 @@ impl Core {
     /// Builds the state again from the stream: the server's numbered events in
     /// order, then this device's unsent ones on top.
     fn rebuild(&mut self) -> Result<()> {
-        let build = |store: &Store, list_id: &str| -> Result<State> {
+        let mut all: BTreeMap<String, State> = BTreeMap::new();
+        let mut holding_newer = false;
+        let mut ids = self.store.list_ids()?;
+        if !ids.contains(&self.list_id) {
+            ids.push(self.list_id.clone());
+        }
+        for id in ids {
+            holding_newer |= !self.store.held(&id)?.is_empty();
             let mut state = State::default();
-            for e in store.stream(list_id)? {
+            for e in self.store.stream(&id)? {
                 state.apply(&e);
             }
-            Ok(state)
-        };
-        self.state = build(&self.store, &self.list_id)?;
-        let mut others = BTreeMap::new();
-        let mut holding_newer = !self.store.held(&self.list_id)?.is_empty();
-        for id in self.store.list_ids()? {
-            if id == self.list_id {
-                continue;
-            }
-            holding_newer |= !self.store.held(&id)?.is_empty();
-            let state = build(&self.store, &id)?;
-            others.insert(id, state);
+            all.insert(id, state);
         }
-        self.others = others;
+        settle(&mut all);
+        self.state = all.remove(&self.list_id).unwrap_or_default();
+        self.others = all;
         self.holding_newer = holding_newer;
         Ok(())
     }
@@ -388,19 +426,39 @@ impl Core {
     }
 
     /// Every list this device holds: the personal list first, then the
-    /// others by id. A list the device has no events of yet is not held.
+    /// others by name. A list the device has no events of yet is not held, and
+    /// a deleted one that is still empty is gone.
     pub fn lists(&self) -> Vec<ListInfo> {
-        let mut v = vec![ListInfo {
-            id: self.list_id.clone(),
-            name: None,
-            personal: true,
-        }];
-        v.extend(self.others.iter().map(|(id, s)| ListInfo {
-            id: id.clone(),
-            name: s.list_name.clone(),
-            personal: false,
-        }));
+        let info = |id: &str, s: &State, personal: bool| ListInfo {
+            id: id.to_string(),
+            name: if personal { None } else { s.list_name.clone() },
+            colour: s.list_colour.clone(),
+            personal,
+            reminders: s.reminders.len(),
+        };
+        let mut v = vec![info(&self.list_id, &self.state, true)];
+        let mut others: Vec<ListInfo> = self
+            .others
+            .iter()
+            .filter(|(_, s)| !s.list_gone())
+            .map(|(id, s)| info(id, s, false))
+            .collect();
+        others.sort_by_cached_key(|l| {
+            (
+                l.name.clone().unwrap_or_default().to_lowercase(),
+                l.id.clone(),
+            )
+        });
+        v.extend(others);
         v
+    }
+
+    /// The list exists here, and is not gone.
+    fn check_list(&self, list_id: &str) -> Result<()> {
+        match self.state_of(list_id) {
+            Some(s) if list_id == self.list_id || !s.list_gone() => Ok(()),
+            _ => Err(Error::NoList(list_id.to_string())),
+        }
     }
 
     /// Every state, personal list first.
@@ -597,8 +655,32 @@ impl Core {
             format,
             &serde_json::to_vec(&p.event)?,
         )?;
+        if inserted {
+            self.forget_purged(event_id, &p.event)?;
+        }
         self.rebuild()?;
         Ok(inserted)
+    }
+
+    /// An event arrived. If it purges a reminder, what this device stored of
+    /// that reminder goes; and an event about a reminder already purged is
+    /// dropped as it comes, unless it is the purge itself.
+    fn forget_purged(&mut self, event_id: &str, event: &serde_json::Value) -> Result<()> {
+        if event.get("type").and_then(|t| t.as_str()) == Some("reminder_purged") {
+            if let Some(id) = event.get("reminder_id").and_then(|i| i.as_str()) {
+                self.store.redact_reminder(id)?;
+            }
+            return Ok(());
+        }
+        let text = event.to_string();
+        let purged: Vec<String> = self
+            .states()
+            .flat_map(|(_, s)| s.purged.iter().cloned())
+            .collect();
+        if purged.iter().any(|id| text.contains(id.as_str())) {
+            self.store.delete_event(event_id)?;
+        }
+        Ok(())
     }
 
     /// Ids of events kept without being applied, because a newer app made them.
@@ -691,6 +773,7 @@ impl Core {
             } else {
                 state.list_name.clone()
             },
+            list_colour: state.list_colour.clone(),
             list_id,
             title: r.title.clone(),
             note: r.note.clone(),
@@ -713,12 +796,26 @@ impl Core {
 
     /// Creates a one-off reminder in the personal list, to fire at `fire_at`.
     pub fn create_reminder(&mut self, title: &str, fire_at: i64, now: i64) -> Result<String> {
+        let list_id = self.list_id.clone();
+        self.create_reminder_in(&list_id, title, fire_at, now)
+    }
+
+    /// Creates a one-off reminder in the list `list_id`.
+    pub fn create_reminder_in(
+        &mut self,
+        list_id: &str,
+        title: &str,
+        fire_at: i64,
+        now: i64,
+    ) -> Result<String> {
+        self.check_list(list_id)?;
         let title = title.trim();
         if title.is_empty() {
             return Err(Error::EmptyTitle);
         }
         let reminder_id = Uuid::new_v4().to_string();
-        self.record(
+        self.record_in(
+            list_id,
             now,
             Event::ReminderCreated {
                 reminder_id: reminder_id.clone(),
@@ -740,13 +837,28 @@ impl Core {
         zone: Option<&str>,
         now: i64,
     ) -> Result<String> {
+        let list_id = self.list_id.clone();
+        self.create_recurring_reminder_in(&list_id, title, schedules, zone, now)
+    }
+
+    /// [`Self::create_recurring_reminder`] in the list `list_id`.
+    pub fn create_recurring_reminder_in(
+        &mut self,
+        list_id: &str,
+        title: &str,
+        schedules: Vec<Schedule>,
+        zone: Option<&str>,
+        now: i64,
+    ) -> Result<String> {
+        self.check_list(list_id)?;
         let title = title.trim();
         if title.is_empty() {
             return Err(Error::EmptyTitle);
         }
         check_schedules(&schedules, zone)?;
         let reminder_id = Uuid::new_v4().to_string();
-        self.record(
+        self.record_in(
+            list_id,
             now,
             Event::RecurringReminderCreated {
                 reminder_id: reminder_id.clone(),
@@ -771,6 +883,21 @@ impl Core {
         last_done: Option<i64>,
         now: i64,
     ) -> Result<String> {
+        let list_id = self.list_id.clone();
+        self.create_countdown_reminder_in(&list_id, title, countdown, zone, last_done, now)
+    }
+
+    /// [`Self::create_countdown_reminder`] in the list `list_id`.
+    pub fn create_countdown_reminder_in(
+        &mut self,
+        list_id: &str,
+        title: &str,
+        countdown: Countdown,
+        zone: Option<&str>,
+        last_done: Option<i64>,
+        now: i64,
+    ) -> Result<String> {
+        self.check_list(list_id)?;
         let title = title.trim();
         if title.is_empty() {
             return Err(Error::EmptyTitle);
@@ -781,7 +908,8 @@ impl Core {
             return Err(Error::InTheFuture);
         }
         let reminder_id = Uuid::new_v4().to_string();
-        self.record(
+        self.record_in(
+            list_id,
             now,
             Event::CountdownReminderCreated {
                 reminder_id: reminder_id.clone(),
@@ -1097,7 +1225,8 @@ impl Core {
         for (list_id, state) in self.states() {
             let id = state.resolve(occurrence_id).to_string();
             if let Some(o) = state.occurrences.get(&id) {
-                return if o.is_open() {
+                // A deleted reminder's occurrences are history only.
+                return if o.is_open() && state.reminders.contains_key(&o.reminder_id) {
                     Ok((list_id.to_string(), id))
                 } else {
                     Err(Error::NotOpen(occurrence_id.to_string()))
@@ -1666,6 +1795,8 @@ impl Core {
                 };
                 out.extend(times.into_iter().map(|t| ExpectedItem {
                     reminder_id: r.id.clone(),
+                    list_id: r.list_id.clone(),
+                    priority: r.priority,
                     title: r.title.clone(),
                     note: r.note.clone(),
                     scheduled_at: t,
@@ -1691,6 +1822,8 @@ impl Core {
                     let r = s.reminders.get(&o.reminder_id)?;
                     Some(EarlierItem {
                         occurrence_id: o.id.clone(),
+                        list_id: r.list_id.clone(),
+                        priority: r.priority,
                         title: r.title.clone(),
                         scheduled_at: o.scheduled_at,
                         closed_at: c.at,
@@ -1725,6 +1858,179 @@ impl Core {
             later_today: self.expected(now, end - 1),
             earlier_today: earlier,
         }
+    }
+
+    // ---- Lists, moving and deleting (ADR 0009) ----
+
+    /// Makes a new list, which gets its own stream and so its own key. Only
+    /// this device knows it until the sync layer registers it with the server.
+    /// Returns its id.
+    pub fn create_list(&mut self, name: &str, colour: Option<&str>, now: i64) -> Result<String> {
+        let name = check_list_name(name)?;
+        let colour = colour.map(check_colour).transpose()?;
+        let list_id = Uuid::new_v4().to_string();
+        self.record_in(&list_id, now, Event::ListNamed { name })?;
+        if let Some(colour) = colour {
+            self.record_in(&list_id, now, Event::ListColoured { colour })?;
+        }
+        Ok(list_id)
+    }
+
+    /// Renames a list. The personal list keeps its name.
+    pub fn rename_list(&mut self, list_id: &str, name: &str, now: i64) -> Result<()> {
+        self.check_list(list_id)?;
+        if list_id == self.list_id {
+            return Err(Error::PersonalList);
+        }
+        let name = check_list_name(name)?;
+        if self.state_of(list_id).and_then(|s| s.list_name.as_deref()) == Some(name.as_str()) {
+            return Ok(());
+        }
+        self.record_in(list_id, now, Event::ListNamed { name })?;
+        Ok(())
+    }
+
+    /// Gives a list (the personal one too) a colour, `#rrggbb`.
+    pub fn colour_list(&mut self, list_id: &str, colour: &str, now: i64) -> Result<()> {
+        self.check_list(list_id)?;
+        let colour = check_colour(colour)?;
+        if self
+            .state_of(list_id)
+            .and_then(|s| s.list_colour.as_deref())
+            == Some(colour.as_str())
+        {
+            return Ok(());
+        }
+        self.record_in(list_id, now, Event::ListColoured { colour })?;
+        Ok(())
+    }
+
+    /// Deletes a list that holds no reminders. The personal list can't be
+    /// deleted. (Its stream stays on the server until retention limits can
+    /// remove it; nothing in it is shown again.)
+    pub fn delete_list(&mut self, list_id: &str, now: i64) -> Result<()> {
+        self.check_list(list_id)?;
+        if list_id == self.list_id {
+            return Err(Error::PersonalList);
+        }
+        if !self
+            .state_of(list_id)
+            .is_some_and(|s| s.reminders.is_empty())
+        {
+            return Err(Error::ListNotEmpty);
+        }
+        self.record_in(list_id, now, Event::ListDeleted)?;
+        Ok(())
+    }
+
+    /// Moves a reminder to another list. It keeps its settings, its history
+    /// and its occurrences, open or closed, under the same ids, so nothing
+    /// fires twice or is forgotten. Of two moves of the same reminder on
+    /// devices out of touch, the later wins.
+    pub fn move_reminder(&mut self, reminder_id: &str, to_list_id: &str, now: i64) -> Result<()> {
+        let from = self.list_of_reminder(reminder_id)?;
+        self.check_list(to_list_id)?;
+        if from == to_list_id {
+            return Err(Error::SameList);
+        }
+        let seen = self
+            .states()
+            .map(|(_, s)| s.latest_hlc())
+            .max()
+            .cloned()
+            .unwrap_or_default();
+        let hlc = Hlc::next(now, &self.device_id, &seen);
+        self.record_in(
+            to_list_id,
+            now,
+            Event::ReminderMovedIn {
+                reminder_id: reminder_id.to_string(),
+                from_list_id: from,
+                hlc,
+            },
+        )?;
+        // It now lives in the other list, which takes it from this one.
+        self.rebuild()
+    }
+
+    /// Deletes a reminder but keeps its history, marked deleted. It never
+    /// fires or alerts again, here or on any device that gets this change,
+    /// and an edit, move or firing made meanwhile on another device doesn't
+    /// bring it back.
+    pub fn delete_reminder(&mut self, reminder_id: &str, now: i64) -> Result<()> {
+        let list_id = self.list_of_reminder(reminder_id)?;
+        self.record_in(
+            &list_id,
+            now,
+            Event::ReminderDeleted {
+                reminder_id: reminder_id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a reminder with its history (also one deleted before, with its
+    /// history kept). Every device that gets this change forgets the
+    /// reminder and removes what it stored of it. Copies on devices that
+    /// have not synced yet, and the server's encrypted copy of the events,
+    /// are not recalled.
+    pub fn purge_reminder(&mut self, reminder_id: &str, now: i64) -> Result<()> {
+        let list_id = self
+            .states()
+            .find(|(_, s)| s.knows(reminder_id))
+            .map(|(id, _)| id.to_string())
+            .ok_or_else(|| Error::NoReminder(reminder_id.to_string()))?;
+        self.record_in(
+            &list_id,
+            now,
+            Event::ReminderPurged {
+                reminder_id: reminder_id.to_string(),
+            },
+        )?;
+        self.store.redact_reminder(reminder_id)?;
+        self.rebuild()
+    }
+
+    /// How many events this device has stored that mention the reminder,
+    /// apart from the ones that record its purging. After a purge, none.
+    pub fn stored_events_of(&self, reminder_id: &str) -> Result<usize> {
+        self.store.count_mentioning(reminder_id)
+    }
+
+    /// Reminders deleted with their history kept, newest deletion first.
+    pub fn deleted_reminders(&self) -> Vec<DeletedReminder> {
+        let mut v: Vec<DeletedReminder> = self
+            .states()
+            .flat_map(|(list_id, s)| {
+                s.deleted_reminders()
+                    .into_iter()
+                    .map(move |(r, t)| DeletedReminder {
+                        reminder_id: r.id.clone(),
+                        list_id: list_id.to_string(),
+                        title: r.title.clone(),
+                        deleted_at: t.at,
+                        deleted_by: t.by.clone(),
+                    })
+            })
+            .collect();
+        v.sort_by(|a, b| (b.deleted_at, &b.reminder_id).cmp(&(a.deleted_at, &a.reminder_id)));
+        v
+    }
+
+    /// The sidebar's list and priority checkboxes, as this device remembers
+    /// them. Nothing is hidden until the user hides it.
+    pub fn filters(&self) -> Filters {
+        self.device_setting(FILTERS)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    }
+
+    /// Remembers the sidebar's checkboxes on this device. They decide only
+    /// what the window lists; hiding a list doesn't stop its alerts.
+    pub fn set_filters(&self, filters: &Filters) -> Result<()> {
+        self.set_device_setting(FILTERS, &serde_json::to_string(filters)?)
     }
 
     /// Records that this device is called `name`, in the personal list.
@@ -1919,6 +2225,8 @@ impl Core {
                         s.reminders.values().filter_map(move |r| {
                             Some(CountdownItem {
                                 reminder_id: r.id.clone(),
+                                list_id: r.list_id.clone(),
+                                priority: r.priority,
                                 title: r.title.clone(),
                                 countdown: r.countdown.clone()?,
                                 next_at: self.countdown_next(s, r),
@@ -1932,6 +2240,76 @@ impl Core {
             notices: self.device_notices(),
             update_notice: self.holding_newer.then(|| UPDATE_NOTICE.to_string()),
         }
+    }
+}
+
+/// Settles what the lists' streams say of reminders that were deleted with
+/// their history or moved between lists, so that each reminder is in exactly
+/// one list and every device that has the same events agrees which (ADR 0009).
+fn settle(all: &mut BTreeMap<String, State>) {
+    // Deleted with their history: nothing of them is kept, wherever it is.
+    let purged: BTreeSet<String> = all
+        .values()
+        .flat_map(|s| s.purged.iter().cloned())
+        .collect();
+    for s in all.values_mut() {
+        for id in &purged {
+            s.purged.insert(id.clone());
+            s.drop_reminder(id);
+        }
+    }
+    // A reminder is where its latest move put it, or where it was made.
+    let moved: BTreeSet<String> = all
+        .values()
+        .flat_map(|s| s.moves_in.iter().map(|m| m.reminder_id.clone()))
+        .collect();
+    for id in moved {
+        let Some((_, current)) = all
+            .iter()
+            .filter_map(|(list, s)| {
+                s.moved_in_at(&id)
+                    .cloned()
+                    .or_else(|| s.knows(&id).then(Hlc::default))
+                    .map(|at| (at, list.clone()))
+            })
+            .max()
+        else {
+            continue;
+        };
+        let mut here = all.remove(&current).expect("the list was just seen");
+        for (list, s) in all.iter() {
+            if s.knows(&id) && *list != current {
+                // Whatever was done to it where it was, as well.
+                here.absorb(s, &id, &current);
+            }
+        }
+        here.replay_pending();
+        all.insert(current.clone(), here);
+        for (list, s) in all.iter_mut() {
+            if *list != current {
+                s.drop_reminder(&id);
+            }
+        }
+    }
+}
+
+/// A list's name, trimmed.
+fn check_list_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::EmptyListName);
+    }
+    Ok(name.chars().take(80).collect())
+}
+
+/// A colour as `#rrggbb`, in lower case.
+fn check_colour(colour: &str) -> Result<String> {
+    let c = colour.trim().to_lowercase();
+    let ok = c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+    if ok {
+        Ok(c)
+    } else {
+        Err(Error::BadColour(colour.to_string()))
     }
 }
 

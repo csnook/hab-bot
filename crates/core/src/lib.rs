@@ -21,9 +21,10 @@ mod state;
 mod store;
 
 pub use crate::core::{
-    Core, CountdownItem, DeviceNotice, EarlierItem, EditReminder, ExpectedItem, Fired, Inbox,
-    ListInfo, OccurrenceView, ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice,
-    SignInNotice, Snapshot, SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
+    Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem, EditReminder, ExpectedItem,
+    Filters, Fired, Inbox, ListInfo, OccurrenceView, ReconciliationNotice, ReminderView,
+    ScheduleView, SecurityNotice, SignInNotice, Snapshot, SnoozeKind, SnoozeOption, SnoozePicker,
+    TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
@@ -79,6 +80,18 @@ pub enum Error {
     NotExpected(String),
     #[error("there is no open occurrence {0}")]
     NotOpen(String),
+    #[error("there is no list {0}")]
+    NoList(String),
+    #[error("the personal list can't be renamed or deleted")]
+    PersonalList,
+    #[error("the list's name is empty")]
+    EmptyListName,
+    #[error("{0} is not a colour (use #rrggbb)")]
+    BadColour(String),
+    #[error("the list still has reminders: move or delete them first")]
+    ListNotEmpty,
+    #[error("the reminder is already in that list")]
+    SameList,
     #[error("an event from the server could not be read: {0}")]
     BadEvent(&'static str),
 }

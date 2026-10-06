@@ -30,6 +30,8 @@
 - **Nothing is lost:** both changes stay in the history, so the losing one can be restored.
 - **Changes to different settings** both survive.
 - **Notes don't merge.** Of two concurrent edits to a note, the later wins, and the earlier stays in the history.
+- **Deleting wins.** A deleted reminder stays deleted whatever another device did to it meanwhile: its edits, firings and moves stay in the history and have no effect. Deleting it with its history wins over everything, and devices that get it forget the reminder.
+- **Moving between lists** is one event in the new list's stream. Of two moves of the same reminder, the later wins, and everything done to the reminder in the old list, such as a completion made by a device that hadn't heard of the move, is kept ([ADR 0009](../adr/0009-a-reminder-lives-where-its-latest-move-put-it-and-deleting-wins.md)).
 - **Occurrences follow their own rules** (see [Acting on occurrences](reminders.md#acting-on-occurrences)), such as a completion beating a skip. Claims follow the server's order.
 
 ### What syncs where

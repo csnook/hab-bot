@@ -8,7 +8,7 @@ use crate::schedule::Schedule;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -100,6 +100,31 @@ pub enum Event {
     /// an account as a list named after the device, and say so with this.
     /// Of several, the latest in the stream counts.
     ListNamed { name: String },
+    /// The list's colour, `#rrggbb`. Of several, the latest in the stream
+    /// counts. Format 8.
+    ListColoured { colour: String },
+    /// The list was deleted. It is only gone while it holds no reminders: one
+    /// that was moved or made into it meanwhile, on another device, keeps it
+    /// (ADR 0009). Format 8.
+    ListDeleted,
+    /// The reminder moved into this list from `from_list_id`, keeping its
+    /// settings, occurrences and history, which this device finds in the list
+    /// it came from. Of several moves of one reminder, the one with the latest
+    /// `hlc` says where it is now. Format 8.
+    ReminderMovedIn {
+        reminder_id: String,
+        from_list_id: String,
+        hlc: Hlc,
+    },
+    /// The reminder was deleted but its history kept, marked deleted: it
+    /// never fires or alerts again, on any device that has this event, and
+    /// nothing that happened to it meanwhile on another device brings it
+    /// back (ADR 0009). Format 8.
+    ReminderDeleted { reminder_id: String },
+    /// The reminder was deleted with its history: devices that have this
+    /// event forget everything about it, including what other devices make
+    /// of it afterwards. Format 8.
+    ReminderPurged { reminder_id: String },
     /// The device that made this event is called `name`. Device names live
     /// here, in the user's encrypted personal list, so the server never
     /// reads them. The first device says it when it joins.
@@ -196,6 +221,12 @@ impl Event {
                 change: Change::Priority(_) | Change::Overdue(_) | Change::Expiry(_),
                 ..
             } => 3,
+            // Lists with colours, moving and deleting arrived in format 8.
+            Event::ListColoured { .. }
+            | Event::ListDeleted
+            | Event::ReminderMovedIn { .. }
+            | Event::ReminderDeleted { .. }
+            | Event::ReminderPurged { .. } => 8,
             // Alerts arrived in format 4.
             Event::OccurrenceAlerted { .. } => 4,
             // Countdowns arrived in format 5.

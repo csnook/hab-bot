@@ -91,6 +91,17 @@ _Avoid_: Invite (that is for accounts), refuse
 A named collection that every reminder belongs to exactly one of, like a calendar in a calendar app. Each user has a private personal list; other lists can be shared with users and groups.
 _Avoid_: Calendar, project, board
 
+**Move**:
+To take a reminder to another reminder list. It keeps its history and its occurrences, open or closed.
+
+**Delete**:
+To take a reminder out of use. It stops firing and alerting on every device and is hidden from the lists. Deleting keeps its history, marked deleted, unless "delete with its history" is chosen, which removes the reminder and its history from every device that syncs. Deleting always wins over what another device did to the reminder meanwhile.
+_Avoid_: Archive, remove (remove is for devices and members)
+
+**Filter**:
+The sidebar's list and priority checkboxes, which decide what the window lists in every view and are remembered on that device. A filter only hides things from the window: hidden reminders still fire and alert.
+_Avoid_: Hide (as a state of the reminder), mute
+
 **Access**:
 What a user can do with a reminder list, or with a reminder shared with them directly: view (see it, never alerted), act (also alerted, and can claim, decline, complete, skip, snooze and acknowledge), edit (also create, change and delete reminders) or manage (also share it and change access). A user with access in several ways, such as through a group and individually, gets the highest. Everyone with access can see who else has it.
 _Avoid_: Role (roles belong to groups)

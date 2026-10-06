@@ -152,6 +152,9 @@ pub struct Syncer {
     /// to this device by another of the account's devices.
     rotated: Mutex<HashMap<String, BTreeMap<u32, ListKey>>>,
     status: Mutex<SyncStatus>,
+    /// The lists this device has registered with the server, or found there.
+    /// A list made since needs registering before its events are sent.
+    registered: Mutex<HashSet<String>>,
     /// A device signed in since the personal list's key was last sealed to
     /// the account's devices.
     reseal: AtomicBool,
@@ -202,6 +205,7 @@ impl Syncer {
             retired: Mutex::new(HashMap::new()),
             rotated: Mutex::new(HashMap::new()),
             status: Mutex::new(SyncStatus::default()),
+            registered: Mutex::new(HashSet::new()),
             reseal: AtomicBool::new(false),
             checks: Arc::new(Checks::new()),
         })
@@ -725,7 +729,25 @@ impl Syncer {
         // Also refreshes the directory, and finds any key a rotation added.
         self.load_keys().await?;
         let devices = self.directory.lock().unwrap().clone();
-        for list_id in self.all_lists().await? {
+        let on_server: HashSet<String> = self.account_lists().await?.into_iter().collect();
+        let lists = self.all_lists().await?;
+        for list_id in &lists {
+            // A list made after a device was removed must not start with the
+            // key every device, the removed one included, can work out from
+            // the personal key (ADR 0008): it starts with a random one too.
+            if !on_server.contains(list_id)
+                && !self.retired.lock().unwrap().is_empty()
+                && self.rotated.lock().unwrap().get(list_id).is_none()
+            {
+                self.rotated
+                    .lock()
+                    .unwrap()
+                    .entry(list_id.clone())
+                    .or_default()
+                    .insert(2, ListKey::random());
+            }
+        }
+        for list_id in lists.iter().cloned() {
             let ring = self.keyring(&list_id);
             let mut sealed = Vec::new();
             for (id, record) in &devices {
@@ -750,6 +772,21 @@ impl Syncer {
                     },
                 )
                 .await?;
+        }
+        self.registered.lock().unwrap().extend(lists);
+        Ok(())
+    }
+
+    /// Register any list this device made since it last did, before events
+    /// for it are sent: the server refuses events for a list it doesn't know.
+    async fn register_new_lists(&self) -> Result<(), SyncError> {
+        let unsent = self.core().unsent()?;
+        let new = {
+            let known = self.registered.lock().unwrap();
+            unsent.iter().any(|o| !known.contains(&o.list_id))
+        };
+        if new {
+            self.register_lists().await?;
         }
         Ok(())
     }
@@ -777,6 +814,7 @@ impl Syncer {
     /// Joining does this with the standalone history. Returns how many events
     /// the server numbered.
     pub async fn upload_unsent(&self) -> Result<usize, SyncError> {
+        self.register_new_lists().await?;
         let mut sent = 0;
         loop {
             let chunk: Vec<_> = self
@@ -995,6 +1033,7 @@ impl Syncer {
         socket: &mut Socket,
         in_flight: &mut HashSet<String>,
     ) -> Result<(), SyncError> {
+        self.register_new_lists().await?;
         let unsent = self.core().unsent()?;
         for o in unsent {
             if !in_flight.insert(o.event_id.clone()) {

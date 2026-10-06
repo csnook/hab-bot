@@ -219,11 +219,13 @@ fn create_reminder(
     title: String,
     fire_at: i64,
     priority: Option<hab_core::Priority>,
+    list_id: Option<String>,
 ) -> Result<String, String> {
     let new_id = {
         let mut core = app.core.lock().unwrap();
+        let list = list_or_personal(&core, list_id);
         let id = core
-            .create_reminder(&title, fire_at, now())
+            .create_reminder_in(&list, &title, fire_at, now())
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
         id
@@ -247,14 +249,16 @@ fn create_recurring_reminder(
     time: String,
     zone: Option<String>,
     priority: Option<hab_core::Priority>,
+    list_id: Option<String>,
 ) -> Result<String, String> {
     let schedule =
         hab_core::Schedule::from_pattern(&pattern, &date, &time).map_err(|e| e.to_string())?;
     let new_id = {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
+        let list = list_or_personal(&core, list_id);
         let id = core
-            .create_recurring_reminder(&title, vec![schedule], zone.as_deref(), now())
+            .create_recurring_reminder_in(&list, &title, vec![schedule], zone.as_deref(), now())
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
         id
@@ -281,13 +285,22 @@ fn create_countdown_reminder(
     last_done: Option<i64>,
     zone: Option<String>,
     priority: Option<hab_core::Priority>,
+    list_id: Option<String>,
 ) -> Result<String, String> {
     let new_id = {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
+        let list = list_or_personal(&core, list_id);
         let countdown = hab_core::Countdown { amount, unit, at };
         let id = core
-            .create_countdown_reminder(&title, countdown, zone.as_deref(), last_done, now())
+            .create_countdown_reminder_in(
+                &list,
+                &title,
+                countdown,
+                zone.as_deref(),
+                last_done,
+                now(),
+            )
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
         id
@@ -337,6 +350,149 @@ fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
     let core = app.core.lock().unwrap();
     let _ = core.use_system_zone();
     core.inbox(now())
+}
+
+/// The list a new reminder goes in: the one the editor chose, or the
+/// personal list.
+fn list_or_personal(core: &Core, list_id: Option<String>) -> String {
+    list_id
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| core.personal_list_id().to_string())
+}
+
+/// The lists, the personal list first.
+#[tauri::command]
+fn lists(app: tauri::State<'_, App>) -> Vec<hab_core::ListInfo> {
+    app.core.lock().unwrap().lists()
+}
+
+/// Makes a list and returns its id. The sync loop registers it with the
+/// server before sending its events.
+#[tauri::command]
+fn create_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    name: String,
+    colour: Option<String>,
+) -> Result<String, String> {
+    let id = app
+        .core
+        .lock()
+        .unwrap()
+        .create_list(&name, colour.as_deref(), now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(id)
+}
+
+#[tauri::command]
+fn rename_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: String,
+    name: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .rename_list(&list_id, &name, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+#[tauri::command]
+fn colour_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: String,
+    colour: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .colour_list(&list_id, &colour, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Deletes an empty list. The personal list can't be deleted.
+#[tauri::command]
+fn delete_list(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .delete_list(&list_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Moves a reminder to another list, keeping its history.
+#[tauri::command]
+fn move_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    list_id: String,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .move_reminder(&reminder_id, &list_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Deletes a reminder: with `with_history` everything about it goes,
+/// otherwise its history is kept, marked deleted.
+#[tauri::command]
+fn delete_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+    with_history: bool,
+) -> Result<(), String> {
+    {
+        let mut core = app.core.lock().unwrap();
+        if with_history {
+            core.purge_reminder(&reminder_id, now())
+        } else {
+            core.delete_reminder(&reminder_id, now())
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Reminders deleted with their history kept.
+#[tauri::command]
+fn deleted_reminders(app: tauri::State<'_, App>) -> Vec<hab_core::DeletedReminder> {
+    app.core.lock().unwrap().deleted_reminders()
+}
+
+/// The sidebar's list and priority checkboxes, as this device remembers them.
+#[tauri::command]
+fn filters(app: tauri::State<'_, App>) -> hab_core::Filters {
+    app.core.lock().unwrap().filters()
+}
+
+/// Remembers the sidebar's checkboxes. They only decide what the window
+/// lists: alerts are not affected.
+#[tauri::command]
+fn set_filters(app: tauri::State<'_, App>, filters: hab_core::Filters) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_filters(&filters)
+        .map_err(|e| e.to_string())
 }
 
 /// Tells the scheduler something changed, so alerts follow at once: an
@@ -1206,6 +1362,16 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            lists,
+            create_list,
+            rename_list,
+            colour_list,
+            delete_list,
+            move_reminder,
+            delete_reminder,
+            deleted_reminders,
+            filters,
+            set_filters,
             create_reminder,
             reminder_view,
             edit_reminder,

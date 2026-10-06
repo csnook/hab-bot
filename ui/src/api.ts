@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 export interface DueItem {
   occurrence_id: string;
   reminder_id: string;
+  /** The list the reminder is in. */
+  list_id: string;
   title: string;
   /** The reminder's note, shown on its occurrences. */
   note: string;
@@ -44,6 +46,8 @@ export interface PriorityInfo {
 
 export interface UpcomingItem {
   reminder_id: string;
+  list_id: string;
+  priority: PriorityName;
   title: string;
   note: string;
   fire_at: number;
@@ -90,6 +94,8 @@ export interface Countdown {
 /** A countdown reminder and when it fires next (null while an occurrence is open). */
 export interface CountdownItem {
   reminder_id: string;
+  list_id: string;
+  priority: PriorityName;
   title: string;
   countdown: Countdown;
   next_at: number | null;
@@ -108,6 +114,8 @@ export interface Snapshot {
 
 export interface ExpectedItem {
   reminder_id: string;
+  list_id: string;
+  priority: PriorityName;
   title: string;
   note: string;
   scheduled_at: number;
@@ -118,6 +126,8 @@ export interface ExpectedItem {
 
 export interface EarlierItem {
   occurrence_id: string;
+  list_id: string;
+  priority: PriorityName;
   title: string;
   scheduled_at: number;
   closed_at: number;
@@ -143,8 +153,12 @@ export type Pattern =
 
 export const snapshot = () => invoke<Snapshot>("snapshot");
 /** The create calls return the new reminder's id. */
-export const createReminder = (title: string, fireAt: number, priority: PriorityName) =>
-  invoke<string>("create_reminder", { title, fireAt, priority });
+export const createReminder = (
+  title: string,
+  fireAt: number,
+  priority: PriorityName,
+  listId: string | null,
+) => invoke<string>("create_reminder", { title, fireAt, priority, listId });
 export const priorities = () => invoke<PriorityInfo[]>("priorities");
 export const appVersion = () => invoke<string>("app_version");
 export const inbox = () => invoke<Inbox>("inbox");
@@ -156,7 +170,17 @@ export const createRecurringReminder = (
   time: string,
   zone: string | null,
   priority: PriorityName,
-) => invoke<string>("create_recurring_reminder", { title, pattern, date, time, zone, priority });
+  listId: string | null,
+) =>
+  invoke<string>("create_recurring_reminder", {
+    title,
+    pattern,
+    date,
+    time,
+    zone,
+    priority,
+    listId,
+  });
 /**
  * Creates a reminder that fires a set time after it was last done. `lastDone`
  * is unix seconds, or null for never (it fires at once). No `zone` makes a
@@ -168,6 +192,7 @@ export const createCountdownReminder = (
   lastDone: number | null,
   zone: string | null,
   priority: PriorityName,
+  listId: string | null,
 ) =>
   invoke<string>("create_countdown_reminder", {
     title,
@@ -177,6 +202,7 @@ export const createCountdownReminder = (
     lastDone,
     zone,
     priority,
+    listId,
   });
 /**
  * How an overdue time or an expiry is counted from the scheduled time: a
@@ -211,6 +237,8 @@ export interface ReminderView {
   list_id: string;
   /** The list's name; null for the personal list. */
   list_name: string | null;
+  /** The list's colour, "#rrggbb", if it has one. */
+  list_colour: string | null;
   title: string;
   note: string;
   priority: PriorityName;
@@ -328,6 +356,58 @@ export interface OccurrenceView {
 /** Null once the occurrence has closed. */
 export const alarmView = (occurrenceId: string) =>
   invoke<OccurrenceView | null>("alarm_view", { occurrenceId });
+/** A reminder list this device holds. */
+export interface ListInfo {
+  id: string;
+  /** The personal list has no name of its own. */
+  name: string | null;
+  /** "#rrggbb", if it has been given one. */
+  colour: string | null;
+  /** The account's personal list: the default, and it can't be deleted. */
+  personal: boolean;
+  /** How many reminders it holds, not counting deleted ones. */
+  reminders: number;
+}
+
+/** A reminder that was deleted with its history kept. */
+export interface DeletedReminder {
+  reminder_id: string;
+  list_id: string;
+  title: string;
+  /** Unix seconds. */
+  deleted_at: number;
+  deleted_by: string;
+}
+
+/**
+ * What the sidebar's checkboxes hide, remembered on this device. What is
+ * hidden is listed, so a list or priority made later shows. Alerts never
+ * look at it.
+ */
+export interface Filters {
+  hidden_lists: string[];
+  hidden_priorities: PriorityName[];
+}
+
+export const lists = () => invoke<ListInfo[]>("lists");
+export const createList = (name: string, colour: string | null) =>
+  invoke<string>("create_list", { name, colour });
+export const renameList = (listId: string, name: string) =>
+  invoke<void>("rename_list", { listId, name });
+export const colourList = (listId: string, colour: string) =>
+  invoke<void>("colour_list", { listId, colour });
+/** Only an empty list that isn't the personal one. */
+export const deleteList = (listId: string) => invoke<void>("delete_list", { listId });
+/** Moves a reminder to another list, keeping its history. */
+export const moveReminder = (reminderId: string, listId: string) =>
+  invoke<void>("move_reminder", { reminderId, listId });
+/** `withHistory` forgets everything about it; otherwise its history is kept, marked deleted. */
+export const deleteReminder = (reminderId: string, withHistory: boolean) =>
+  invoke<void>("delete_reminder", { reminderId, withHistory });
+export const deletedReminders = () => invoke<DeletedReminder[]>("deleted_reminders");
+export const filters = () => invoke<Filters>("filters");
+export const setFilters = (f: Filters) => invoke<void>("set_filters", { filters: f });
+
 export const dismissNotice = (id: string) => invoke<void>("dismiss_notice", { id });
 export const onStateChanged = (f: () => void) => listen("state-changed", f);
 /** A notification was clicked: the payload is its occurrence's id. */
