@@ -1,4 +1,5 @@
-import type { Countdown, DelaySpec, Pattern, PriorityName } from "./api";
+import type { Condition, Countdown, DelaySpec, Pattern, PriorityName, SunTrigger } from "./api";
+import { describeConditions, describeSuns } from "./conditions";
 import { describeDelay, describeExpiries, dayName, listDays, ordinalWord, priorityName } from "./delays";
 
 /**
@@ -12,6 +13,8 @@ export type SummaryTrigger =
   | { kind: "once"; date: string; time: string }
   | { kind: "schedule"; pattern: Pattern; time: string }
   | { kind: "countdown"; countdown: Countdown }
+  /** At sun events, such as "30 minutes before sunset". */
+  | { kind: "sun"; suns: SunTrigger[] }
   /** Not filled in yet. */
   | { kind: "incomplete" };
 
@@ -27,6 +30,10 @@ export interface SummaryInput {
   overdue: DelaySpec | null;
   /** The expiries added; none isn't mentioned. */
   expiries: DelaySpec[];
+  /** Time-based conditions: "only on weekdays and in daylight". */
+  conditions?: Condition[];
+  /** It uses the home location and none is set. */
+  needsHome?: boolean;
   /** How long it is paused for ("until 3 March"); left out when it isn't. */
   paused?: string | null;
 }
@@ -83,6 +90,8 @@ function when(t: SummaryTrigger): string {
       return describeSchedule(t.pattern, t.time);
     case "countdown":
       return describeCountdownWhen(t.countdown);
+    case "sun":
+      return t.suns.length ? describeSuns(t.suns) : "at a sun event still to choose";
     case "incomplete":
       return "at a time still to choose";
   }
@@ -100,9 +109,11 @@ export function summarize(i: SummaryInput): string {
   const title = i.title.trim();
   const what = title ? lowerFirst(title) : "…";
   const zone = i.zone ? ` (in ${i.zone} time)` : "";
+  const only = i.conditions?.length ? `, only ${describeConditions(i.conditions)}` : "";
   const parts = [
-    `In ${i.list}, remind me to ${what} ${when(i.trigger)}${zone}, at ${priorityName(i.priority)} priority.`,
+    `In ${i.list}, remind me to ${what} ${when(i.trigger)}${zone}${only}, at ${priorityName(i.priority)} priority.`,
   ];
+  if (i.needsHome) parts.push("It needs your home location, which isn't set yet.");
   if (i.overdue) parts.push(`It goes overdue ${describeDelay(i.overdue)}.`);
   if (i.expiries.length === 1) {
     parts.push(`It expires ${describeExpiries(i.expiries)}.`);

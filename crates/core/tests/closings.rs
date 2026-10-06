@@ -498,7 +498,7 @@ fn undo_and_correct_events_need_a_newer_format() {
         outcome: UndoOutcome::Reopened,
     };
     assert_eq!(ev.format(), 9);
-    assert_eq!(FORMAT_VERSION, 10);
+    assert_eq!(FORMAT_VERSION, 11);
     let ev = Event::OccurrenceCorrected {
         occurrence_id: "o".into(),
         replaces: vec![],

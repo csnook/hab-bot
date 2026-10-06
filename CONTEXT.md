@@ -152,6 +152,10 @@ _Avoid_: Source type, provider, plugin
 A source that is a named area, with a centre and a radius, such as Home or the gym. Like any source it belongs to a reminder list or to one user, so a shared list's Home is one place for everyone using that list.
 _Avoid_: Location (that is where a device is), geofence
 
+**Home location**:
+The user's own Home place, a centre in degrees with the default radius, that sun events and the daylight and darkness conditions use in the first release. It is a personal setting that syncs to all their devices, so desktops evaluate such reminders too, and it is the Home place that places later build on. See ADR 0012.
+_Avoid_: Location (that is where a device is)
+
 **Portable**:
 Said of a device that goes where its user goes, such as a phone, so its connections and location say something about where the user is. Other devices, such as a desktop, are stationary. By default only portable devices count for Wi-Fi and Bluetooth sources.
 

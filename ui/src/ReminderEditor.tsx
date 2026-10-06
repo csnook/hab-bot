@@ -4,13 +4,17 @@ import {
   createRecurringReminder,
   createReminder,
   editReminder,
+  homeLocation,
   lists as loadLists,
   moveReminder,
   pauseReminder,
   priorities,
   reminderView,
   resumeReminder,
+  setHomeLocation,
+  type Condition,
   type ListInfo,
+  type Place,
   type PriorityInfo,
   type PriorityName,
   type ReminderView,
@@ -33,6 +37,7 @@ import {
   buildEdit,
   buildNew,
   buildPause,
+  homeToAsk,
   listMove,
   newExpiry,
   newReminderList,
@@ -42,10 +47,19 @@ import {
   expirySpecs,
   stateFromView,
   summaryInput,
+  takesConditions,
+  usesHome,
   type EditorState,
   type ExpiryForm,
   type OverdueForm,
 } from "./editor";
+import {
+  CONDITION_KINDS,
+  SUN_EVENTS,
+  newCondition,
+  type ConditionKind,
+  type SunForm,
+} from "./conditions";
 import { DeleteDialog } from "./DeleteDialog";
 import { listById, listName as nameOf } from "./lists";
 import { DAYS, REPEATS, type Repeat } from "./repeat";
@@ -61,8 +75,9 @@ const zoneName = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 /**
  * The reminder editor, for a new reminder or (with `reminderId`) an existing
  * one: the live sentence, the always-visible basics, and the folded Overdue,
- * Expiry, Note and (for an existing reminder) Pause sections. Turns, Only if
- * (conditions) and the other triggers arrive with their own tickets.
+ * Expiry, Note and (for an existing reminder) Pause sections, and Only if
+ * (time-based conditions). Turns and the other triggers and conditions arrive
+ * with their own tickets.
  *
  * Type-checked only: the editor has never been run in a real window.
  */
@@ -81,6 +96,10 @@ export function ReminderEditor({
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [home, setHome] = useState<Place | null>(null);
+  const [homeLoaded, setHomeLoaded] = useState(false);
+  const [homeLat, setHomeLat] = useState("");
+  const [homeLon, setHomeLon] = useState("");
 
   useEffect(() => {
     const d = ref.current;
@@ -102,6 +121,13 @@ export function ReminderEditor({
   }, []);
 
   useEffect(() => {
+    homeLocation()
+      .then(setHome)
+      .catch(() => {})
+      .finally(() => setHomeLoaded(true));
+  }, []);
+
+  useEffect(() => {
     if (!reminderId) return;
     reminderView(reminderId)
       .then((v) => {
@@ -118,17 +144,23 @@ export function ReminderEditor({
   const editing = reminderId !== null;
   const chosen = listById(allLists, state.listId);
   const listName = chosen ? nameOf(chosen) : view ? (view.list_name ?? "Personal") : "Personal";
-  const sentence = useMemo(() => summarize(summaryInput(state, listName, zoneName())), [state, listName]);
+  const sentence = useMemo(() => summarize(summaryInput(state, listName, zoneName(), undefined, home !== null || !homeLoaded)),
+    [state, listName, home, homeLoaded],
+  );
 
   const submit = async (e: Event) => {
     e.preventDefault();
     setError("");
     setBusy(true);
     try {
+      // The first time a reminder uses a sun event or daylight, ask for the home location.
+      const ask = homeToAsk(state, home !== null, homeLat, homeLon);
+      if (!ask.ok) return setError(ask.error);
       if (editing) {
         if (!view) return;
         const edit = buildEdit(state, view, zoneName());
         if (!edit.ok) return setError(edit.error);
+        if (ask.value) await setHomeLocation(ask.value.latitude, ask.value.longitude);
         const pause = buildPause(state, view, Math.floor(Date.now() / 1000));
         if (!pause.ok) return setError(pause.error);
         if (Object.keys(edit.value).length) await editReminder(view.reminder_id, edit.value);
@@ -144,6 +176,7 @@ export function ReminderEditor({
       } else {
         const made = buildNew(state, Math.floor(Date.now() / 1000), zoneName());
         if (!made.ok) return setError(made.error);
+        if (ask.value) await setHomeLocation(ask.value.latitude, ask.value.longitude);
         const { plan, priority, extras } = made.value;
         const listId = newReminderList(state);
         let id: string;
@@ -152,9 +185,19 @@ export function ReminderEditor({
         } else if (plan.kind === "schedule") {
           id = await createRecurringReminder(
             plan.title,
-            plan.pattern,
-            plan.date,
-            plan.time,
+            { pattern: plan.pattern, date: plan.date, time: plan.time },
+            [],
+            plan.conditions,
+            plan.zone,
+            priority,
+            listId,
+          );
+        } else if (plan.kind === "sun") {
+          id = await createRecurringReminder(
+            plan.title,
+            null,
+            plan.suns,
+            plan.conditions,
             plan.zone,
             priority,
             listId,
@@ -238,7 +281,7 @@ export function ReminderEditor({
           {state.whenLocked && <p class="muted">{state.whenLocked}</p>}
           {!state.whenLocked && (
             <>
-              {kind !== "countdown" && (
+              {kind !== "countdown" && state.repeat !== "sun" && (
                 <div class="row">
                   <label>
                     {state.repeat === "once" ? "Date" : "Starting"}
@@ -260,20 +303,31 @@ export function ReminderEditor({
                   </label>
                 </div>
               )}
-              {(!editing || kind === "schedules") && (
+              {(!editing || (kind === "schedules" && state.repeat !== "sun")) && (
                 <label>
                   Repeat
                   <select
                     value={state.repeat}
-                    onChange={(e) => setWhen({ repeat: e.currentTarget.value as Repeat })}
+                    onChange={(e) => {
+                      const repeat = e.currentTarget.value as Repeat;
+                      setWhen({
+                        repeat,
+                        suns: repeat === "sun" && !state.suns.length ? [newSunForm()] : state.suns,
+                      });
+                    }}
                   >
-                    {REPEATS.filter(([v]) => !editing || (v !== "once" && v !== "countdown")).map(
+                    {REPEATS.filter(
+                      ([v]) => !editing || (v !== "once" && v !== "countdown" && v !== "sun"),
+                    ).map(
                       ([value, label]) => (
                         <option value={value} key={value}>{label}</option>
                       ),
                     )}
                   </select>
                 </label>
+              )}
+              {state.repeat === "sun" && (
+                <SunList suns={state.suns} onChange={(suns) => setWhen({ suns })} />
               )}
               {state.repeat === "weekly" && (
                 <fieldset>
@@ -367,10 +421,45 @@ export function ReminderEditor({
 
         <fieldset class="only-if">
           <legend>Only if</legend>
-          <p class="muted">
-            No conditions yet: it fires whenever it comes due. Conditions such as being at home
-            arrive in a later version.
-          </p>
+          {takesConditions(state) ? (
+            <ConditionList
+              conditions={state.conditions}
+              onChange={(conditions) => set({ conditions })}
+            />
+          ) : (
+            <p class="muted">
+              Time-based conditions apply to reminders that repeat on a schedule or at a sun event.
+            </p>
+          )}
+          {usesHome(state) && home === null && homeLoaded && (
+            <fieldset class="home-prompt">
+              <legend>Your home location</legend>
+              <p class="muted">
+                Sun events and daylight use where home is. Enter its latitude and longitude, in
+                degrees (north and east are positive). You can change it later in Settings.
+              </p>
+              <div class="row">
+                <label>
+                  Latitude
+                  <input
+                    inputMode="decimal"
+                    placeholder="51.5074"
+                    value={homeLat}
+                    onInput={(e) => setHomeLat(e.currentTarget.value)}
+                  />
+                </label>
+                <label>
+                  Longitude
+                  <input
+                    inputMode="decimal"
+                    placeholder="-0.1278"
+                    value={homeLon}
+                    onInput={(e) => setHomeLon(e.currentTarget.value)}
+                  />
+                </label>
+              </div>
+            </fieldset>
+          )}
         </fieldset>
 
         <details class="fold" aria-label="Overdue">
@@ -779,4 +868,171 @@ function NextEditor({
       />
     </span>
   );
+}
+
+const newSunForm = (): SunForm => ({ event: "sunset", direction: "at", minutes: 30 });
+
+/** The sun events a reminder fires at: each an event, and before, at or after it. */
+function SunList({ suns, onChange }: { suns: SunForm[]; onChange: (s: SunForm[]) => void }) {
+  const change = (i: number, patch: Partial<SunForm>) =>
+    onChange(suns.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  return (
+    <fieldset class="suns">
+      <legend>Sun events</legend>
+      {suns.map((s, i) => (
+        <div class="row" key={i}>
+          {s.direction !== "at" && (
+            <input
+              type="number"
+              min="1"
+              max="720"
+              step="1"
+              aria-label="Minutes"
+              value={s.minutes}
+              onInput={(e) => change(i, { minutes: Number(e.currentTarget.value) })}
+            />
+          )}
+          <select
+            aria-label="Before or after"
+            value={s.direction}
+            onChange={(e) => change(i, { direction: e.currentTarget.value as SunForm["direction"] })}
+          >
+            <option value="at">At</option>
+            <option value="before">Minutes before</option>
+            <option value="after">Minutes after</option>
+          </select>
+          <select
+            aria-label="Sun event"
+            value={s.event}
+            onChange={(e) => change(i, { event: e.currentTarget.value as SunForm["event"] })}
+          >
+            {SUN_EVENTS.map(([value, label]) => (
+              <option value={value} key={value}>{label}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label="Remove sun event"
+            disabled={suns.length < 2}
+            onClick={() => onChange(suns.filter((_, j) => j !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button type="button" onClick={() => onChange([...suns, newSunForm()])}>
+        Add a sun event
+      </button>
+    </fieldset>
+  );
+}
+
+/** The time-based conditions: each a row to fill in, all of which must hold. */
+function ConditionList({
+  conditions,
+  onChange,
+}: {
+  conditions: Condition[];
+  onChange: (c: Condition[]) => void;
+}) {
+  const [adding, setAdding] = useState<ConditionKind>("days");
+  const change = (i: number, c: Condition) => onChange(conditions.map((x, j) => (j === i ? c : x)));
+  return (
+    <>
+      {conditions.length === 0 && (
+        <p class="muted">No conditions: it fires whenever it comes due.</p>
+      )}
+      {conditions.map((c, i) => (
+        <div class="row condition" key={i}>
+          <ConditionFields condition={c} onChange={(n) => change(i, n)} />
+          <button
+            type="button"
+            aria-label="Remove condition"
+            onClick={() => onChange(conditions.filter((_, j) => j !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div class="row">
+        <select
+          aria-label="Condition to add"
+          value={adding}
+          onChange={(e) => setAdding(e.currentTarget.value as ConditionKind)}
+        >
+          {CONDITION_KINDS.map(([value, label]) => (
+            <option value={value} key={value}>{label}</option>
+          ))}
+        </select>
+        <button type="button" onClick={() => onChange([...conditions, newCondition(adding)])}>
+          Add condition
+        </button>
+      </div>
+      <p class="muted">
+        All conditions must hold. A time that falls outside them is skipped, with no alert and no
+        waiting.
+      </p>
+    </>
+  );
+}
+
+function ConditionFields({
+  condition: c,
+  onChange,
+}: {
+  condition: Condition;
+  onChange: (c: Condition) => void;
+}) {
+  switch (c.kind) {
+    case "days":
+      return (
+        <fieldset>
+          <legend>On these days</legend>
+          <DayBoxes days={c.days} onChange={(days) => onChange({ kind: "days", days })} />
+        </fieldset>
+      );
+    case "window":
+      return (
+        <>
+          <label>
+            From
+            <input type="time" value={c.from} onInput={(e) => onChange({ ...c, from: e.currentTarget.value })} />
+          </label>
+          <label>
+            Until
+            <input type="time" value={c.to} onInput={(e) => onChange({ ...c, to: e.currentTarget.value })} />
+          </label>
+        </>
+      );
+    case "dates":
+      return (
+        <>
+          <label>
+            From
+            <input type="date" value={c.from} onInput={(e) => onChange({ ...c, from: e.currentTarget.value })} />
+          </label>
+          <label>
+            To
+            <input type="date" value={c.to} onInput={(e) => onChange({ ...c, to: e.currentTarget.value })} />
+          </label>
+        </>
+      );
+    case "season":
+      return (
+        <>
+          <label>
+            Every year from (MM-DD)
+            <input value={c.from} placeholder="06-01" onInput={(e) => onChange({ ...c, from: e.currentTarget.value })} />
+          </label>
+          <label>
+            to (MM-DD)
+            <input value={c.to} placeholder="08-31" onInput={(e) => onChange({ ...c, to: e.currentTarget.value })} />
+          </label>
+        </>
+      );
+    case "daylight":
+      return <span>In daylight (between sunrise and sunset at home)</span>;
+    case "darkness":
+      return <span>In darkness (between sunset and sunrise at home)</span>;
+  }
 }

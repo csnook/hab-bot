@@ -25,6 +25,11 @@
 //!   left alone. They aren't in the Waiting section either, which is for
 //!   reminders whose conditions aren't met; the Board's Paused column
 //!   ([`hab_core::Core::paused_reminders`]) is where they show.
+//! - **Time-based conditions never put anything in Waiting.** An instant
+//!   outside them (weekdays only, on a Saturday) passes: no occurrence opens,
+//!   so the badge, the tooltip and the menu see nothing, and the Waiting
+//!   section stays empty until conditions that can't be predicted (places,
+//!   weather) exist.
 //! - **Overdue means `overdue_at <= now`,** the Inbox's own test.
 
 use hab_core::{DueItem, Inbox, Priority};
@@ -282,6 +287,48 @@ mod tests {
             .count();
         assert_eq!(rows, 1);
         assert!(!m.contains(&Entry::Heading("Waiting".into())));
+    }
+
+    #[test]
+    fn an_instant_outside_a_time_based_condition_leaves_the_tray_alone() {
+        use hab_core::{Condition, Core, Schedule};
+        // 2026-10-02 is a Friday: these are its 06:00, and 09:00 on the
+        // Friday, Saturday and Monday.
+        let (start, friday, saturday, monday) = (1790920800, 1790931600, 1791018000, 1791190800);
+        let mut c = Core::open_in_memory().unwrap();
+        c.set_device_zone("UTC").unwrap();
+        let list = c.personal_list_id().to_string();
+        c.create_repeating_reminder_in(
+            &list,
+            "Bins",
+            vec![Schedule {
+                start: "2026-10-01T09:00:00".into(),
+                rule: "FREQ=DAILY".into(),
+            }],
+            vec![],
+            vec![Condition::Days {
+                days: vec!["MO".into()],
+            }],
+            Some("UTC"),
+            start,
+        )
+        .unwrap();
+        // Friday and Saturday 09:00 pass: nothing opens, so nothing shows.
+        for t in [friday, saturday] {
+            assert!(c.tick(t).unwrap().is_empty());
+            let i = c.inbox(t);
+            let b = badge(&i);
+            assert_eq!((b.count, b.tone), (0, Tone::Blue));
+            assert_eq!(tooltip(&i), "Nothing due");
+            let m = menu(&i, &[], t, &clock);
+            assert!(!m.iter().any(|e| matches!(e, Entry::Submenu { .. })));
+            assert!(!m.contains(&Entry::Heading("Waiting".into())));
+        }
+        // Monday it fires and counts like any occurrence.
+        assert_eq!(c.tick(monday).unwrap().len(), 1);
+        let i = c.inbox(monday);
+        assert_eq!(badge(&i).count, 1);
+        assert_eq!(tooltip(&i), "1 due");
     }
 
     #[test]

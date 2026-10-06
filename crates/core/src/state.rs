@@ -3,13 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use crate::condition::Condition;
 use crate::countdown::Countdown;
 use crate::delay::Delay;
 use crate::event::{Change, Correction, Event, Setting, StoredEvent, UndoOutcome};
 use crate::hlc::Hlc;
 use crate::pause::{Pause, PauseCause};
+use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
+use crate::sun::SunTrigger;
 
 /// How long before a known expiry the last-chance alert comes: 10 minutes.
 pub const LAST_CHANCE_LEAD: i64 = 600;
@@ -59,6 +62,12 @@ pub struct Reminder {
     /// Set aside for a period, if it is. A reminder in a paused list is also
     /// paused, by the list ([`State::pause_at`]).
     pub pause: Option<Pause>,
+    /// Sun-event triggers, which fire it at a sun event at the user's home,
+    /// as well as its schedules.
+    pub suns: Vec<SunTrigger>,
+    /// Time-based conditions, combined with AND: an instant outside them
+    /// passes, without firing or waiting.
+    pub conditions: Vec<Condition>,
 }
 
 impl Reminder {
@@ -98,13 +107,21 @@ impl Reminder {
             .min()
     }
 
-    /// Fires again and again, on schedules or a countdown.
+    /// Fires again and again, on schedules, sun events or a countdown.
     pub fn repeats(&self) -> bool {
         self.has_schedules() || self.counts_down()
     }
 
+    /// Fires on schedules or sun events (scheduled instances that can be
+    /// predicted), rather than once or after a countdown.
     pub fn has_schedules(&self) -> bool {
-        !self.schedules.is_empty()
+        !self.schedules.is_empty() || !self.suns.is_empty()
+    }
+
+    /// Needs the home location to work out when it fires or whether it may:
+    /// it has a sun event or a daylight or darkness condition.
+    pub fn needs_home(&self) -> bool {
+        !self.suns.is_empty() || self.conditions.iter().any(Condition::needs_home)
     }
 
     pub fn counts_down(&self) -> bool {
@@ -468,6 +485,16 @@ pub struct ListPauseVersion {
     pub recorded_at: i64,
 }
 
+/// One setting or clearing of the user's home location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeVersion {
+    pub event_id: String,
+    pub hlc: Hlc,
+    /// `None` cleared the home location.
+    pub place: Option<Place>,
+    pub recorded_at: i64,
+}
+
 /// The current state, built by applying a stream's events in order.
 #[derive(Debug, Default, Clone)]
 pub struct State {
@@ -491,6 +518,15 @@ pub struct State {
     /// The list's pause now: the latest of them by clock. Reminders in the
     /// list are paused by it for as long as it covers them.
     pub list_pause: Option<Pause>,
+    /// Every setting or clearing of the user's home location this stream
+    /// holds. Only the personal list's count (ADR 0012).
+    pub homes: Vec<HomeVersion>,
+    /// The home location now: the latest of them by clock.
+    pub home: Option<Place>,
+    /// When the latest of them was made (as the device recorded it): sun
+    /// events fire only for instants after it, so setting a home doesn't
+    /// fire what has passed that day.
+    pub home_since: Option<i64>,
     /// The moves into this list, in stream order.
     pub moves_in: Vec<MoveIn>,
     /// Actions on an occurrence this list's stream doesn't have, such as one
@@ -566,6 +602,7 @@ impl State {
                 | Event::ListColoured { .. }
                 | Event::ListDeleted
                 | Event::ListPaused { .. }
+                | Event::HomeSet { .. }
                 | Event::ReminderMovedIn { .. }
                 | Event::ReminderDeleted { .. }
                 | Event::ReminderPurged { .. }
@@ -622,6 +659,8 @@ impl State {
                             countdown: None,
                             countdown_from: None,
                             pause: None,
+                            suns: Vec::new(),
+                            conditions: Vec::new(),
                         },
                     );
                     self.refresh(reminder_id);
@@ -632,12 +671,16 @@ impl State {
                 title,
                 schedules,
                 zone,
+                suns,
+                conditions,
             } => {
                 if self.can_create(reminder_id) {
                     for change in [
                         Change::Title(title.clone()),
                         Change::Schedules(schedules.clone()),
                         Change::Zone(zone.clone()),
+                        Change::SunEvents(suns.clone()),
+                        Change::Conditions(conditions.clone()),
                     ] {
                         self.add_version(reminder_id, Hlc::default(), change, stored);
                     }
@@ -659,6 +702,8 @@ impl State {
                             countdown: None,
                             countdown_from: None,
                             pause: None,
+                            suns: suns.clone(),
+                            conditions: conditions.clone(),
                         },
                     );
                     self.refresh(reminder_id);
@@ -697,6 +742,8 @@ impl State {
                             countdown: Some(countdown.clone()),
                             countdown_from: *last_done,
                             pause: None,
+                            suns: Vec::new(),
+                            conditions: Vec::new(),
                         },
                     );
                     self.refresh(reminder_id);
@@ -916,6 +963,26 @@ impl State {
                     .iter()
                     .max_by(|a, b| a.hlc.cmp(&b.hlc))
                     .and_then(|p| p.pause);
+            }
+            Event::HomeSet { hlc, place } => {
+                if self.homes.iter().any(|h| h.event_id == stored.event_id) {
+                    return;
+                }
+                let hlc = hlc.clamped(stored.recorded_at);
+                if hlc > self.latest_hlc {
+                    self.latest_hlc = hlc.clone();
+                }
+                self.homes.push(HomeVersion {
+                    event_id: stored.event_id.clone(),
+                    hlc,
+                    place: place.clone(),
+                    recorded_at: stored.recorded_at,
+                });
+                // Of several, the latest clock counts, whatever order they
+                // arrive in.
+                let latest = self.homes.iter().max_by(|a, b| a.hlc.cmp(&b.hlc));
+                self.home = latest.and_then(|h| h.place.clone());
+                self.home_since = latest.map(|h| h.recorded_at);
             }
             Event::ReminderMovedIn {
                 reminder_id,
@@ -1439,12 +1506,17 @@ impl State {
             Setting::Expiry,
             Setting::Countdown,
             Setting::Pause,
+            Setting::SunEvents,
+            Setting::Conditions,
         ] {
             let latest = self
                 .versions
                 .get(&(reminder_id.to_string(), setting))
                 .and_then(|v| v.iter().max_by(|a, b| a.hlc.cmp(&b.hlc)));
-            if matches!(setting, Setting::Schedules | Setting::Zone) {
+            if matches!(
+                setting,
+                Setting::Schedules | Setting::Zone | Setting::SunEvents | Setting::Conditions
+            ) {
                 if let Some(v) = latest.filter(|v| v.hlc != Hlc::default()) {
                     active_from = active_from.max(Some(v.recorded_at));
                 }
@@ -1464,6 +1536,8 @@ impl State {
                 Some(Change::Expiry(e)) => r.expiries = e,
                 Some(Change::Countdown(c)) => r.countdown = Some(c),
                 Some(Change::Pause(p)) => r.pause = p,
+                Some(Change::SunEvents(v)) => r.suns = v,
+                Some(Change::Conditions(v)) => r.conditions = v,
                 None => {}
             }
         }

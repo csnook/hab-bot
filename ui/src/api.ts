@@ -256,22 +256,57 @@ export const inbox = () => invoke<Inbox>("inbox");
 /** `date` is "2026-10-03", `time` "09:30". No `zone` makes it floating. */
 export const createRecurringReminder = (
   title: string,
-  pattern: Pattern,
-  date: string,
-  time: string,
+  schedule: { pattern: Pattern; date: string; time: string } | null,
+  suns: SunTrigger[],
+  conditions: Condition[],
   zone: string | null,
   priority: PriorityName,
   listId: string | null,
 ) =>
   invoke<string>("create_recurring_reminder", {
     title,
-    pattern,
-    date,
-    time,
+    pattern: schedule?.pattern ?? null,
+    date: schedule?.date ?? null,
+    time: schedule?.time ?? null,
+    suns,
+    conditions,
     zone,
     priority,
     listId,
   });
+
+/** A moment in the Sun's day. */
+export type SunEvent = "sunrise" | "sunset" | "civil_dawn" | "civil_dusk";
+
+/** A sun event and an offset from it: negative minutes are before it. */
+export interface SunTrigger {
+  event: SunEvent;
+  offset_minutes: number;
+}
+
+/** A time-based condition. `days` are MO..SU, times "HH:MM", dates "2026-12-20", seasons "06-01". */
+export type Condition =
+  | { kind: "days"; days: string[] }
+  | { kind: "window"; from: string; to: string }
+  | { kind: "dates"; from: string; to: string }
+  | { kind: "season"; from: string; to: string }
+  | { kind: "daylight" }
+  | { kind: "darkness" };
+
+/** The user's Home place: a centre and a radius. */
+export interface Place {
+  name: string;
+  latitude: number;
+  longitude: number;
+  radius_metres: number;
+}
+
+/** The home location, or null if none is set. */
+export const homeLocation = () => invoke<Place | null>("home_location");
+/** Sets the home location in degrees, north and east positive. */
+export const setHomeLocation = (latitude: number, longitude: number) =>
+  invoke<void>("set_home_location", { latitude, longitude });
+export const clearHomeLocation = () => invoke<void>("clear_home_location");
 /**
  * Creates a reminder that fires a set time after it was last done. `lastDone`
  * is unix seconds, or null for never (it fires at once). No `zone` makes a
@@ -319,6 +354,8 @@ export type TriggerView =
   | {
       kind: "schedules";
       schedules: Array<{ parts: ScheduleParts | null; start: string; rule: string }>;
+      /** Sun events it also fires at. */
+      suns: SunTrigger[];
     }
   | { kind: "countdown"; countdown: Countdown };
 
@@ -346,6 +383,10 @@ export interface ReminderView {
   pause: Pause | null;
   /** Its list's pause, which also sets it aside. */
   list_pause: Pause | null;
+  /** The time-based conditions it fires only within. */
+  conditions: Condition[];
+  /** It uses a sun event or daylight and no home location is set. */
+  needs_home: boolean;
 }
 
 /** What the editor changed; anything left out stays as it is. */
@@ -365,6 +406,10 @@ export interface EditArgs {
   follow_priority?: boolean;
   /** All the expiries, replacing the reminder's. */
   expiry?: DelaySpec[];
+  /** All the sun events, replacing the reminder's. */
+  suns?: SunTrigger[];
+  /** All the conditions, replacing the reminder's. */
+  conditions?: Condition[];
 }
 export const reminderView = (reminderId: string) =>
   invoke<ReminderView>("reminder_view", { reminderId });

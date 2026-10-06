@@ -595,6 +595,8 @@ fn openings_in_any_order_leave_one_open_occurrence() {
             title: "Bins".into(),
             schedules: vec![schedule("2026-10-01T07:00:00", "FREQ=DAILY")],
             zone: None,
+            suns: vec![],
+            conditions: vec![],
         },
     );
     let open = |n: usize, at: i64| {
@@ -680,6 +682,8 @@ fn recurring_events_need_a_reader_of_the_new_format() {
         title: "t".into(),
         schedules: vec![],
         zone: None,
+        suns: vec![],
+        conditions: vec![],
     };
     assert_eq!(e.format(), 2);
     assert_eq!(

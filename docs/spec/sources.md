@@ -79,6 +79,7 @@ A **source** is something configured that the app watches, such as a specific ca
   - daylight or darkness
 - **They're checked on the device and applied when predicting.**
 - **They never make a reminder wait.** A trigger outside one simply passes.
+- **First release:** they apply to schedules and sun events; one-offs and countdowns take none (see [ADR 0012](../adr/0012-sun-events-and-time-conditions-are-computed-from-a-synced-home-location.md)).
 
 ### Overdue times and expiry delays
 

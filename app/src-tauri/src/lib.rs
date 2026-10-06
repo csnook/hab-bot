@@ -141,6 +141,10 @@ struct EditArgs {
     follow_priority: bool,
     /// All the expiries, replacing the reminder's.
     expiry: Option<Vec<hab_core::DelaySpec>>,
+    /// All the sun-event triggers, replacing the reminder's.
+    suns: Option<Vec<hab_core::SunTrigger>>,
+    /// All the time-based conditions, replacing the reminder's.
+    conditions: Option<Vec<hab_core::Condition>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -197,6 +201,8 @@ fn edit_reminder(
                 overdue,
                 expiry,
                 countdown: edit.countdown,
+                suns: edit.suns,
+                conditions: edit.conditions,
             },
             now(),
         )
@@ -243,28 +249,42 @@ fn create_reminder(
 }
 
 /// A reminder that repeats: a common pattern from a date, at a time of day,
-/// pinned to a time zone or, with none, floating.
+/// and/or at sun events, only where the conditions hold, pinned to a time
+/// zone or, with none, floating. It needs a pattern or a sun event.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn create_recurring_reminder(
     app: tauri::State<'_, App>,
     handle: AppHandle,
     title: String,
-    pattern: hab_core::Pattern,
-    date: String,
-    time: String,
+    pattern: Option<hab_core::Pattern>,
+    date: Option<String>,
+    time: Option<String>,
+    suns: Option<Vec<hab_core::SunTrigger>>,
+    conditions: Option<Vec<hab_core::Condition>>,
     zone: Option<String>,
     priority: Option<hab_core::Priority>,
     list_id: Option<String>,
 ) -> Result<String, String> {
-    let schedule =
-        hab_core::Schedule::from_pattern(&pattern, &date, &time).map_err(|e| e.to_string())?;
+    let schedules = match (&pattern, &date, &time) {
+        (Some(p), Some(d), Some(t)) => vec![hab_core::Schedule::from_pattern(p, d, t)?],
+        (None, _, _) => Vec::new(),
+        _ => return Err("a schedule needs a date and a time".into()),
+    };
     let new_id = {
         let mut core = app.core.lock().unwrap();
         let _ = core.use_system_zone();
         let list = list_or_personal(&core, list_id);
         let id = core
-            .create_recurring_reminder_in(&list, &title, vec![schedule], zone.as_deref(), now())
+            .create_repeating_reminder_in(
+                &list,
+                &title,
+                schedules,
+                suns.unwrap_or_default(),
+                conditions.unwrap_or_default(),
+                zone.as_deref(),
+                now(),
+            )
             .map_err(|e| e.to_string())?;
         set_priority(&mut core, &id, priority)?;
         id
@@ -273,6 +293,42 @@ fn create_recurring_reminder(
     let _ = app.wake.send(());
     let _ = handle.emit(STATE_CHANGED, ());
     Ok(new_id)
+}
+
+/// The user's home location (their Home place), if they have set one.
+#[tauri::command]
+fn home_location(app: tauri::State<'_, App>) -> Option<hab_core::Place> {
+    app.core.lock().unwrap().home()
+}
+
+/// Sets the home location, in degrees north and east. It syncs to the user's
+/// other devices as a personal setting.
+#[tauri::command]
+fn set_home_location(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    latitude: f64,
+    longitude: f64,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_home(latitude, longitude, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Clears the home location.
+#[tauri::command]
+fn clear_home_location(app: tauri::State<'_, App>, handle: AppHandle) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .clear_home(now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
 }
 
 /// A reminder that fires a set time after its last occurrence closed.
@@ -1613,6 +1669,9 @@ pub fn run() {
             reminder_view,
             edit_reminder,
             create_recurring_reminder,
+            home_location,
+            set_home_location,
+            clear_home_location,
             create_countdown_reminder,
             complete_early,
             skip_ahead,

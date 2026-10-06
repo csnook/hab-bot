@@ -603,7 +603,7 @@ fn countdown_events_need_a_reader_of_the_new_format() {
         change: hab_core::Change::Countdown(countdown(1, CountdownUnit::Days, None)),
     };
     assert_eq!(edit.format(), 5);
-    assert_eq!(hab_core::FORMAT_VERSION, 10);
+    assert_eq!(hab_core::FORMAT_VERSION, 11);
     // And they survive a restart: the state rebuilds the same.
     let dir = std::env::temp_dir().join(format!("hab-countdown-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

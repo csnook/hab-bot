@@ -1,4 +1,5 @@
 import type {
+  Condition,
   Countdown,
   CountdownUnit,
   DelaySpec,
@@ -6,7 +7,10 @@ import type {
   Pattern,
   PriorityName,
   ReminderView,
+  SunTrigger,
 } from "./api";
+import { buildConditions, buildSuns, needsHome, sunFormOf, type SunForm } from "./conditions";
+import { parseCoordinates, type Coordinates } from "./home";
 import { countdownFor, hasTimeOfDay, lastDoneSeconds, type LastDone } from "./countdown";
 import {
   durationSeconds,
@@ -68,6 +72,10 @@ export interface EditorState {
   whenTouched: boolean;
   /** The Pause section: only an existing reminder has one. */
   pause: PauseForm;
+  /** The sun events of a reminder that fires at them. */
+  suns: SunForm[];
+  /** The Only if section: time-based conditions, combined with AND. */
+  conditions: Condition[];
 }
 
 export function newState(listId = ""): EditorState {
@@ -91,8 +99,13 @@ export function newState(listId = ""): EditorState {
     whenLocked: null,
     whenTouched: false,
     pause: { mode: "off", date: "" },
+    suns: [],
+    conditions: [],
   };
 }
+
+/** Whether the reminder repeats on time (a schedule or sun events), which is what conditions apply to. */
+export const takesConditions = (s: EditorState) => s.repeat !== "once" && s.repeat !== "countdown";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -156,6 +169,7 @@ export function stateFromView(
     pinned: v.zone !== null,
     overdue: overdueFormOf(v.overdue),
     expiries: v.expiries.map(expiryFormOf),
+    conditions: v.conditions,
   };
   const t = v.trigger;
   if (t.kind === "one_off") {
@@ -168,6 +182,16 @@ export function stateFromView(
       amount: t.countdown.amount,
       unit: t.countdown.unit,
       timeOfDay: t.countdown.at ?? "",
+    };
+  }
+  if (t.schedules.length === 0 && t.suns.length > 0) {
+    return { ...s, repeat: "sun", suns: t.suns.map(sunFormOf) };
+  }
+  if (t.suns.length > 0) {
+    return {
+      ...s,
+      repeat: "daily",
+      whenLocked: "Repeats on a schedule and at sun events, which can't be changed here together.",
     };
   }
   if (t.schedules.length === 1 && t.schedules[0].parts) {
@@ -242,7 +266,16 @@ export const newNextExpiry = (): ExpiryForm => ({
 /** What creating the reminder takes: the trigger, then the settings made after it. */
 export type CreatePlan =
   | { kind: "once"; title: string; fireAt: number }
-  | { kind: "schedule"; title: string; pattern: Pattern; date: string; time: string; zone: string | null }
+  | {
+      kind: "schedule";
+      title: string;
+      pattern: Pattern;
+      date: string;
+      time: string;
+      zone: string | null;
+      conditions: Condition[];
+    }
+  | { kind: "sun"; title: string; suns: SunTrigger[]; zone: string | null; conditions: Condition[] }
   | { kind: "countdown"; title: string; countdown: Countdown; lastDone: number | null; zone: string | null };
 
 export interface NewReminder {
@@ -275,6 +308,19 @@ export function buildNew(
       lastDone: done.value,
       zone: s.pinned && c.value.at ? zoneName : null,
     };
+  } else if (s.repeat === "sun") {
+    const suns = buildSuns(s.suns);
+    if (!suns.ok) return suns;
+    if (!suns.value.length) return { ok: false, error: "Add a sun event to fire at." };
+    const cs = buildConditions(s.conditions);
+    if (!cs.ok) return cs;
+    plan = {
+      kind: "sun",
+      title,
+      suns: suns.value,
+      zone: s.pinned ? zoneName : null,
+      conditions: cs.value,
+    };
   } else {
     const fireAt = toUnixSeconds(s.date, s.time);
     if (fireAt === null) return { ok: false, error: "Pick a date and time." };
@@ -283,6 +329,8 @@ export function buildNew(
     } else {
       const pattern = patternFor(s.repeat, s.date, s.days);
       if (!pattern) return { ok: false, error: "Choose the days it repeats on." };
+      const cs = buildConditions(s.conditions);
+      if (!cs.ok) return cs;
       plan = {
         kind: "schedule",
         title,
@@ -290,6 +338,7 @@ export function buildNew(
         date: s.date,
         time: s.time,
         zone: s.pinned ? zoneName : null,
+        conditions: cs.value,
       };
     }
   }
@@ -351,9 +400,21 @@ export function buildEdit(
   if (!x.ok) return x;
   if (!same(x.value, v.expiries)) edit.expiry = x.value;
 
+  // Conditions apply to reminders that fire on time; a one-off or countdown has none.
+  if (v.trigger.kind === "schedules") {
+    const cs = buildConditions(takesConditions(s) ? s.conditions : []);
+    if (!cs.ok) return cs;
+    if (!same(cs.value, v.conditions)) edit.conditions = cs.value;
+  }
+
   if (s.whenTouched && !s.whenLocked) {
     const t = v.trigger;
-    if (t.kind === "countdown") {
+    if (t.kind === "schedules" && s.repeat === "sun") {
+      const suns = buildSuns(s.suns);
+      if (!suns.ok) return suns;
+      if (!suns.value.length) return { ok: false, error: "Add a sun event to fire at." };
+      if (!same(suns.value, t.suns)) edit.suns = suns.value;
+    } else if (t.kind === "countdown") {
       const c = countdownFor(s.amount, s.unit, s.timeOfDay);
       if (!c.ok) return c;
       if (!same(c.value, t.countdown)) edit.countdown = c.value;
@@ -392,6 +453,10 @@ function summaryTrigger(s: EditorState): SummaryTrigger {
     const c = countdownFor(s.amount, s.unit, s.timeOfDay);
     return c.ok ? { kind: "countdown", countdown: c.value } : { kind: "incomplete" };
   }
+  if (s.repeat === "sun") {
+    const suns = buildSuns(s.suns);
+    return suns.ok ? { kind: "sun", suns: suns.value } : { kind: "incomplete" };
+  }
   if (!s.date || !s.time) return { kind: "incomplete" };
   if (s.repeat === "once") return { kind: "once", date: s.date, time: s.time };
   const pattern = patternFor(s.repeat, s.date, s.days);
@@ -404,6 +469,7 @@ export function summaryInput(
   listName: string,
   zoneName: string | null,
   now = Math.floor(Date.now() / 1000),
+  home = true,
 ): SummaryInput {
   const o = overdueSpec(s.overdue);
   const x = expirySpecs(s.expiries);
@@ -418,5 +484,38 @@ export function summaryInput(
     overdue: o.ok ? o.value : null,
     expiries: x.ok ? x.value : [],
     paused: pauseSummary(s.pause, now),
+    conditions: takesConditions(s) ? validConditions(s) : [],
+    needsHome: usesHome(s) && !home,
   };
+}
+
+/** The conditions that are filled in enough to say, for the sentence. */
+function validConditions(s: EditorState): Condition[] {
+  return s.conditions.filter((c) => buildConditions([c]).ok);
+}
+
+/** Whether the form uses a sun event or a daylight condition, so needs the home location. */
+export function usesHome(s: EditorState): boolean {
+  if (!takesConditions(s)) return false;
+  const suns = s.repeat === "sun" ? s.suns.map(() => ({}) as SunTrigger) : [];
+  return needsHome(s.conditions, suns);
+}
+
+/**
+ * The home location the form needs when none is set: the typed latitude and
+ * longitude, checked. `null` when it needs none or one is already set. The
+ * first time a reminder uses a sun event or a daylight condition the editor
+ * asks for it.
+ */
+export function homeToAsk(
+  s: EditorState,
+  homeIsSet: boolean,
+  lat: string,
+  lon: string,
+): Built<Coordinates | null> {
+  if (homeIsSet || !usesHome(s)) return { ok: true, value: null };
+  const c = parseCoordinates(lat, lon);
+  return c.ok
+    ? c
+    : { ok: false, error: `Set your home location to use sun events and daylight. ${c.error}` };
 }

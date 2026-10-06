@@ -439,7 +439,7 @@ fn the_editor_reads_a_reminder_back() {
             }
         ]
     );
-    let TriggerView::Schedules { schedules } = v.trigger else {
+    let TriggerView::Schedules { schedules, .. } = v.trigger else {
         panic!("a schedule reminder")
     };
     let parts = schedules[0].parts.as_ref().unwrap();

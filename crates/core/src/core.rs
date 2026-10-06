@@ -5,6 +5,7 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::condition::{self, Condition};
 use crate::countdown::Countdown;
 use crate::delay::{Delay, DelaySpec};
 use crate::event::{
@@ -13,6 +14,7 @@ use crate::event::{
 };
 use crate::hlc::Hlc;
 use crate::pause::{Pause, PauseCause};
+use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::{self, Parts, Schedule};
 use crate::state::{
@@ -20,6 +22,7 @@ use crate::state::{
     UpcomingItem,
 };
 use crate::store::Store;
+use crate::sun::SunTrigger;
 use crate::{Error, Result};
 
 /// An occurrence that has just fired, for the platform to alert about.
@@ -239,6 +242,10 @@ pub struct EditReminder {
     pub expiry: Option<Vec<Delay>>,
     /// A new countdown, for a countdown reminder.
     pub countdown: Option<Countdown>,
+    /// All the sun-event triggers, replacing the reminder's.
+    pub suns: Option<Vec<SunTrigger>>,
+    /// All the time-based conditions, replacing the reminder's.
+    pub conditions: Option<Vec<Condition>>,
 }
 
 /// What fires a reminder, as the editor's When shows it.
@@ -252,6 +259,8 @@ pub enum TriggerView {
     /// Fires on schedules.
     Schedules {
         schedules: Vec<ScheduleView>,
+        /// Sun events it also fires at.
+        suns: Vec<SunTrigger>,
     },
     Countdown {
         countdown: Countdown,
@@ -295,6 +304,11 @@ pub struct ReminderView {
     pub pause: Option<Pause>,
     /// Its list's pause, which also sets it aside.
     pub list_pause: Option<Pause>,
+    /// The time-based conditions it fires only within.
+    pub conditions: Vec<Condition>,
+    /// It has a sun event or a daylight or darkness condition and the user
+    /// hasn't set a home location, so those can't work yet.
+    pub needs_home: bool,
 }
 
 /// An occurrence predicted to come due: it becomes an occurrence only if the
@@ -865,6 +879,7 @@ impl Core {
                         rule: s.rule.clone(),
                     })
                     .collect(),
+                suns: r.suns.clone(),
             }
         } else {
             TriggerView::OneOff { fire_at: r.fire_at }
@@ -888,6 +903,8 @@ impl Core {
             expiries: r.expiries.iter().map(Delay::spec).collect(),
             pause: r.pause,
             list_pause: state.list_pause,
+            conditions: r.conditions.clone(),
+            needs_home: r.needs_home() && self.home().is_none(),
         })
     }
 
@@ -955,12 +972,47 @@ impl Core {
         zone: Option<&str>,
         now: i64,
     ) -> Result<String> {
+        self.create_repeating_reminder_in(
+            list_id,
+            title,
+            schedules,
+            Vec::new(),
+            Vec::new(),
+            zone,
+            now,
+        )
+    }
+
+    /// Creates a reminder in the list `list_id` that fires on `schedules` and
+    /// at the sun events `suns` (at least one of them), and only where
+    /// `conditions` hold: an instant outside them passes, with no occurrence
+    /// and no waiting. Sun events and daylight conditions use the user's
+    /// home location ([`Core::set_home`]); with none set a sun event never
+    /// fires and a daylight condition counts as met.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_repeating_reminder_in(
+        &mut self,
+        list_id: &str,
+        title: &str,
+        schedules: Vec<Schedule>,
+        suns: Vec<SunTrigger>,
+        conditions: Vec<Condition>,
+        zone: Option<&str>,
+        now: i64,
+    ) -> Result<String> {
         self.check_list(list_id)?;
         let title = title.trim();
         if title.is_empty() {
             return Err(Error::EmptyTitle);
         }
         check_schedules(&schedules, zone)?;
+        check_suns(&suns)?;
+        check_conditions(&conditions)?;
+        if schedules.is_empty() && suns.is_empty() {
+            return Err(Error::BadSchedule(
+                "a repeating reminder needs a schedule or a sun event".into(),
+            ));
+        }
         let reminder_id = Uuid::new_v4().to_string();
         self.record_in(
             list_id,
@@ -970,6 +1022,8 @@ impl Core {
                 title: title.to_string(),
                 schedules,
                 zone: zone.map(str::to_string),
+                suns,
+                conditions,
             },
         )?;
         Ok(reminder_id)
@@ -1069,17 +1123,108 @@ impl Core {
 
     /// The instants a repeating reminder's schedules have after `after` and
     /// up to `until`, earliest first and without repeats.
+    ///
+    /// These are the reminder's scheduled instants that pass its time-based
+    /// conditions, evaluated here and now as a pure function of the instant,
+    /// the reminder's zone and the user's home location, so every device
+    /// holding the same data agrees. An instant outside the conditions is
+    /// simply absent: it fires nothing, makes nothing wait, and isn't
+    /// predicted. Sun events come from the home location, and only after it
+    /// was set.
     fn instances(&self, r: &Reminder, after: i64, until: i64, max: usize) -> Vec<i64> {
         let zone = self.zone_of(r);
-        let mut v: Vec<i64> = r
-            .schedules
-            .iter()
-            .flat_map(|s| s.instances(&zone, after, until, max))
-            .collect();
-        v.sort_unstable();
-        v.dedup();
-        v.truncate(max);
-        v
+        let home = self.home();
+        let since = self.home_since().unwrap_or(i64::MAX);
+        // What the conditions drop is dropped after the schedules have given
+        // their instants, so they must give more than `max`.
+        let cap = if r.conditions.is_empty() && r.suns.is_empty() {
+            max
+        } else {
+            max.max(MAX_INSTANCES)
+        };
+        let window = |lo: i64, hi: i64| -> Vec<i64> {
+            let mut v: Vec<i64> = r
+                .schedules
+                .iter()
+                .flat_map(|s| s.instances(&zone, lo, hi, cap))
+                .collect();
+            if let Some(h) = &home {
+                // Sun events don't fire for what passed before the home
+                // location was set.
+                let from = lo.max(since.saturating_sub(1));
+                for sun in &r.suns {
+                    v.extend(sun.instants(h.latitude, h.longitude, from, hi));
+                }
+            }
+            v.retain(|t| condition::all_hold(&r.conditions, *t, &zone, home.as_ref()));
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        if r.conditions.is_empty() && r.suns.is_empty() {
+            let mut v = window(after, until);
+            v.truncate(max);
+            return v;
+        }
+        // Conditions and sun events thin out or generate the instants, so
+        // they are found a stretch at a time, growing, until there are
+        // enough or the range is done.
+        let mut out: Vec<i64> = Vec::new();
+        let mut lo = after.max(until.saturating_sub(60 * 366 * DAY));
+        let mut step = 31 * DAY;
+        while lo < until && out.len() < max {
+            let hi = lo.saturating_add(step).min(until);
+            out.extend(window(lo, hi));
+            lo = hi;
+            step = (step * 2).min(366 * DAY);
+        }
+        out.truncate(max);
+        out
+    }
+
+    /// The user's home location, if they have set one: their Home place,
+    /// which syncs to all their devices (ADR 0012).
+    pub fn home(&self) -> Option<Place> {
+        self.state.home.clone()
+    }
+
+    /// When the home location in use was set, in Unix seconds.
+    fn home_since(&self) -> Option<i64> {
+        self.state.home.as_ref().and(self.state.home_since)
+    }
+
+    /// Sets the user's home location, the centre of their Home place with
+    /// the default radius, in degrees (north and east are positive). It is a
+    /// personal setting: it syncs to all their devices. Sun events fire for
+    /// instants after this.
+    pub fn set_home(&mut self, latitude: f64, longitude: f64, now: i64) -> Result<()> {
+        let place = Place::home(latitude, longitude).map_err(Error::BadHome)?;
+        if self.state.home.as_ref() == Some(&place) {
+            return Ok(());
+        }
+        let list_id = self.list_id.clone();
+        let hlc = self.next_hlc(&list_id, now);
+        self.record_in(
+            &list_id,
+            now,
+            Event::HomeSet {
+                hlc,
+                place: Some(place),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Clears the home location: sun events stop firing and daylight and
+    /// darkness conditions count as met.
+    pub fn clear_home(&mut self, now: i64) -> Result<()> {
+        if self.state.home.is_none() {
+            return Ok(());
+        }
+        let list_id = self.list_id.clone();
+        let hlc = self.next_hlc(&list_id, now);
+        self.record_in(&list_id, now, Event::HomeSet { hlc, place: None })?;
+        Ok(())
     }
 
     /// Fires every reminder whose time has come, opening an occurrence for
@@ -2046,6 +2191,9 @@ impl Core {
         let list_id = self.list_of_reminder(reminder_id)?;
         let current = self.state_of(&list_id).unwrap().reminders[reminder_id].clone();
         let mut changes = Vec::new();
+        let schedules_after = edit.schedules.clone().unwrap_or(current.schedules.clone());
+        let suns_after = edit.suns.clone().unwrap_or(current.suns.clone());
+        let repeats_on_time = !schedules_after.is_empty() || !suns_after.is_empty();
         if let Some(title) = edit.title {
             let title = title.trim().to_string();
             if title.is_empty() {
@@ -2088,6 +2236,29 @@ impl Core {
         if let Some(zone) = edit.zone.filter(|z| *z != current.zone) {
             check_schedules(&current.schedules, zone.as_deref())?;
             changes.push(Change::Zone(zone));
+        }
+        if let Some(suns) = edit.suns.filter(|s| *s != current.suns) {
+            if current.counts_down() {
+                return Err(Error::BadSunEvent(
+                    "a countdown reminder has no sun events".into(),
+                ));
+            }
+            check_suns(&suns)?;
+            if suns.is_empty() && schedules_after.is_empty() && current.has_schedules() {
+                return Err(Error::BadSunEvent(
+                    "a repeating reminder needs a schedule or a sun event".into(),
+                ));
+            }
+            changes.push(Change::SunEvents(suns));
+        }
+        if let Some(conditions) = edit.conditions.filter(|c| *c != current.conditions) {
+            if !conditions.is_empty() && (current.counts_down() || !repeats_on_time) {
+                return Err(Error::BadCondition(
+                    "time-based conditions apply to reminders that repeat on a schedule or at a sun event".into(),
+                ));
+            }
+            check_conditions(&conditions)?;
+            changes.push(Change::Conditions(conditions));
         }
         if let Some(p) = edit.priority.filter(|p| *p != current.priority) {
             changes.push(Change::Priority(p));
@@ -2959,6 +3130,19 @@ fn check_delay(d: &Delay) -> Result<()> {
         return Err(Error::BadDuration);
     }
     d.validate().map_err(Error::BadDelay)
+}
+
+/// Checks sun-event triggers can be used.
+fn check_suns(suns: &[SunTrigger]) -> Result<()> {
+    suns.iter()
+        .try_for_each(|s| s.validate().map_err(Error::BadSunEvent))
+}
+
+/// Checks time-based conditions can be used.
+fn check_conditions(conditions: &[Condition]) -> Result<()> {
+    conditions
+        .iter()
+        .try_for_each(|c| c.validate().map_err(Error::BadCondition))
 }
 
 /// Checks a reminder's schedules and zone can be used.

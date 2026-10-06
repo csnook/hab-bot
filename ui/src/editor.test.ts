@@ -5,6 +5,7 @@ import {
   buildNew,
   buildPause,
   expirySpecs,
+  homeToAsk,
   newExpiry,
   newNextExpiry,
   listMove,
@@ -13,6 +14,8 @@ import {
   overdueSpec,
   stateFromView,
   summaryInput,
+  takesConditions,
+  usesHome,
   type EditorState,
 } from "./editor";
 import { summarize } from "./summary";
@@ -45,6 +48,7 @@ const view = (patch: Partial<ReminderView> = {}): ReminderView => ({
         rule: "FREQ=WEEKLY;BYDAY=WE",
       },
     ],
+    suns: [],
   },
   zone: null,
   default_overdue_seconds: 3600,
@@ -52,6 +56,8 @@ const view = (patch: Partial<ReminderView> = {}): ReminderView => ({
   pause: null,
   list_pause: null,
   expiries: [],
+  conditions: [],
+  needs_home: false,
   ...patch,
 });
 
@@ -174,6 +180,7 @@ describe("reading an existing reminder into the form", () => {
       trigger: {
         kind: "schedules",
         schedules: [{ parts: null, start: "2026-10-07T18:00:00", rule: "FREQ=YEARLY" }],
+        suns: [],
       },
       overdue: { kind: "other", rule: "FREQ=YEARLY" },
       expiries: [{ kind: "other", rule: "FREQ=YEARLY" }],
@@ -189,7 +196,7 @@ describe("reading an existing reminder into the form", () => {
   test("several schedules lock the When too", () => {
     const sch = view().trigger;
     if (sch.kind !== "schedules") throw new Error();
-    const s = stateFromView(view({ trigger: { kind: "schedules", schedules: [...sch.schedules, ...sch.schedules] } }));
+    const s = stateFromView(view({ trigger: { kind: "schedules", schedules: [...sch.schedules, ...sch.schedules], suns: [] } }));
     expect(s.whenLocked).toMatch(/2 schedules/);
   });
 
@@ -400,3 +407,172 @@ describe("the Pause section", () => {
     expect(buildPause(s, v, now).ok).toBe(false);
   });
 });
+
+describe("time-based conditions and sun events", () => {
+  test("a weekly reminder takes its conditions to the core when made", () => {
+    const r = buildNew(
+      filled({
+        repeat: "weekdays",
+        conditions: [{ kind: "window", from: "08:00", to: "20:00" }],
+      }),
+      NOW,
+      ZONE,
+    );
+    expect(r.ok && r.value.plan).toMatchObject({
+      kind: "schedule",
+      conditions: [{ kind: "window", from: "08:00", to: "20:00" }],
+    });
+  });
+
+  test("a sun reminder needs no date or time, only an event", () => {
+    const r = buildNew(
+      newTitled({
+        repeat: "sun",
+        suns: [{ event: "sunset", direction: "before", minutes: 30 }],
+        conditions: [{ kind: "days", days: ["SA", "SU"] }],
+        pinned: true,
+      }),
+      NOW,
+      ZONE,
+    );
+    expect(r.ok && r.value.plan).toEqual({
+      kind: "sun",
+      title: "Take the bins out",
+      suns: [{ event: "sunset", offset_minutes: -30 }],
+      zone: ZONE,
+      conditions: [{ kind: "days", days: ["SA", "SU"] }],
+    });
+    expect(buildNew(newTitled({ repeat: "sun" }), NOW, ZONE)).toEqual({
+      ok: false,
+      error: "Add a sun event to fire at.",
+    });
+  });
+
+  test("a bad condition stops it being made", () => {
+    const r = buildNew(
+      filled({ repeat: "daily", conditions: [{ kind: "days", days: [] }] }),
+      NOW,
+      ZONE,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test("a one-off and a countdown ignore conditions left in the form", () => {
+    const r = buildNew(filled({ conditions: [{ kind: "daylight" }] }), NOW, ZONE);
+    expect(r.ok && r.value.plan.kind).toBe("once");
+    expect(takesConditions(filled())).toBe(false);
+    expect(takesConditions(filled({ repeat: "countdown" }))).toBe(false);
+    expect(takesConditions(filled({ repeat: "sun" }))).toBe(true);
+    expect(takesConditions(filled({ repeat: "weekly" }))).toBe(true);
+  });
+
+  test("an existing reminder shows its conditions and changes only what differs", () => {
+    const v = view({ conditions: [{ kind: "days", days: ["MO"] }] });
+    const s = stateFromView(v);
+    expect(s.conditions).toEqual([{ kind: "days", days: ["MO"] }]);
+    expect(buildEdit(s, v, ZONE)).toEqual({ ok: true, value: {} });
+    const changed = buildEdit({ ...s, conditions: [] }, v, ZONE);
+    expect(changed).toEqual({ ok: true, value: { conditions: [] } });
+    const added = buildEdit({ ...s, conditions: [...s.conditions, { kind: "daylight" }] }, v, ZONE);
+    expect(added).toEqual({
+      ok: true,
+      value: { conditions: [{ kind: "days", days: ["MO"] }, { kind: "daylight" }] },
+    });
+  });
+
+  test("a sun reminder comes back as one and edits its events", () => {
+    const v = view({
+      trigger: {
+        kind: "schedules",
+        schedules: [],
+        suns: [{ event: "sunrise", offset_minutes: -15 }],
+      },
+    });
+    const s = stateFromView(v);
+    expect(s.repeat).toBe("sun");
+    expect(s.suns).toEqual([{ event: "sunrise", direction: "before", minutes: 15 }]);
+    expect(buildEdit({ ...s, whenTouched: true }, v, ZONE)).toEqual({ ok: true, value: {} });
+    const r = buildEdit(
+      { ...s, whenTouched: true, suns: [{ event: "sunset", direction: "at", minutes: 30 }] },
+      v,
+      ZONE,
+    );
+    expect(r).toEqual({ ok: true, value: { suns: [{ event: "sunset", offset_minutes: 0 }] } });
+    // Taking the last event away is refused.
+    expect(buildEdit({ ...s, whenTouched: true, suns: [] }, v, ZONE).ok).toBe(false);
+  });
+
+  test("a reminder with both a schedule and sun events locks the When", () => {
+    const sch = view().trigger;
+    if (sch.kind !== "schedules") throw new Error();
+    const s = stateFromView(
+      view({
+        trigger: { ...sch, suns: [{ event: "sunset", offset_minutes: 0 }] },
+      }),
+    );
+    expect(s.whenLocked).toMatch(/sun events/);
+  });
+
+  test("the home location is asked for the first time it is needed", () => {
+    const sun = newTitled({
+      repeat: "sun",
+      suns: [{ event: "sunset", direction: "at", minutes: 30 }],
+    });
+    // Needed and not set: the typed coordinates, or why not.
+    expect(homeToAsk(sun, false, "51.5", "-0.12")).toEqual({
+      ok: true,
+      value: { latitude: 51.5, longitude: -0.12 },
+    });
+    const missing = homeToAsk(sun, false, "", "");
+    expect(!missing.ok && missing.error).toMatch(/home location/);
+    // Already set, or not needed: nothing to ask.
+    expect(homeToAsk(sun, true, "", "")).toEqual({ ok: true, value: null });
+    expect(homeToAsk(filled({ repeat: "daily" }), false, "", "")).toEqual({
+      ok: true,
+      value: null,
+    });
+    const daylight = filled({ repeat: "daily", conditions: [{ kind: "daylight" }] });
+    expect(homeToAsk(daylight, false, "", "").ok).toBe(false);
+    // A one-off ignores a leftover daylight condition.
+    expect(homeToAsk(filled({ conditions: [{ kind: "daylight" }] }), false, "", "")).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(usesHome(daylight)).toBe(true);
+  });
+
+  test("the sentence says the sun events and the conditions", () => {
+    const s = newTitled({
+      title: "Close the chickens in",
+      repeat: "sun",
+      suns: [{ event: "sunset", direction: "before", minutes: 30 }],
+      conditions: [
+        { kind: "days", days: ["MO", "TU", "WE", "TH", "FR"] },
+        { kind: "daylight" },
+      ],
+    });
+    expect(summarize(summaryInput(s, "Personal", null, NOW))).toBe(
+      "In Personal, remind me to close the chickens in 30 minutes before sunset, only on weekdays and in daylight, at Medium priority.",
+    );
+    expect(summarize(summaryInput(s, "Personal", null, NOW, false))).toMatch(
+      /It needs your home location, which isn't set yet\.$/,
+    );
+  });
+
+  test("the sentence puts conditions after a schedule and leaves half-made ones out", () => {
+    const s = filled({
+      repeat: "daily",
+      conditions: [
+        { kind: "window", from: "22:00", to: "06:00" },
+        { kind: "days", days: [] },
+      ],
+    });
+    expect(summarize(summaryInput(s, "Personal", null, NOW))).toBe(
+      "In Personal, remind me to take the bins out every day at 18:00, only between 22:00 and 06:00, at Medium priority.",
+    );
+  });
+});
+
+function newTitled(patch: Partial<EditorState> = {}): EditorState {
+  return { ...newState(), title: "Take the bins out", ...patch };
+}

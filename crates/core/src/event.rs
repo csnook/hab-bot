@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use crate::condition::Condition;
 use crate::countdown::Countdown;
 use crate::delay::{expiries, Delay};
 use crate::hlc::Hlc;
 use crate::pause::Pause;
+use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
 use crate::schedule::Schedule;
+use crate::sun::SunTrigger;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -28,11 +31,20 @@ pub enum Event {
     /// zone `zone` or, if that is `None`, wherever the device is (floating).
     /// Format 2: an app that only reads format 1 keeps it without applying it,
     /// rather than mistaking it for a one-off.
+    ///
+    /// `suns` and `conditions` are sun-event triggers and time-based
+    /// conditions it was made with. A reminder made with either is format
+    /// 11, so an older app keeps it without applying it, rather than firing
+    /// it with no conditions or never.
     RecurringReminderCreated {
         reminder_id: String,
         title: String,
         schedules: Vec<Schedule>,
         zone: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suns: Vec<SunTrigger>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditions: Vec<Condition>,
     },
     /// A countdown reminder was created: it fires `countdown` after its last
     /// occurrence closed. `last_done` is when it was last done, which starts
@@ -146,6 +158,11 @@ pub enum Event {
     /// aside for the period (ADR 0011). Of several, the one with the latest
     /// `hlc` counts. Format 10.
     ListPaused { hlc: Hlc, pause: Option<Pause> },
+    /// The user's home location, or none with `None`: their Home place, in
+    /// their personal settings, which sun events and the daylight conditions
+    /// use. Only the personal list's counts. Of several, the one with the
+    /// latest `hlc` counts (ADR 0012). Format 11.
+    HomeSet { hlc: Hlc, place: Option<Place> },
     /// The reminder moved into this list from `from_list_id`, keeping its
     /// settings, occurrences and history, which this device finds in the list
     /// it came from. Of several moves of one reminder, the one with the latest
@@ -222,6 +239,10 @@ pub enum Setting {
     Countdown,
     /// Whether the reminder is paused, and until when.
     Pause,
+    /// The sun-event triggers, all of them as one value.
+    SunEvents,
+    /// The time-based conditions, all of them as one value.
+    Conditions,
 }
 
 /// A new value for one setting.
@@ -243,6 +264,10 @@ pub enum Change {
     Countdown(Countdown),
     /// `None` is not paused: resumed.
     Pause(Option<Pause>),
+    /// All the sun-event triggers; empty is none.
+    SunEvents(Vec<SunTrigger>),
+    /// All the time-based conditions, combined with AND; empty is none.
+    Conditions(Vec<Condition>),
 }
 
 impl Change {
@@ -258,6 +283,8 @@ impl Change {
             Change::Expiry(_) => Setting::Expiry,
             Change::Countdown(_) => Setting::Countdown,
             Change::Pause(_) => Setting::Pause,
+            Change::SunEvents(_) => Setting::SunEvents,
+            Change::Conditions(_) => Setting::Conditions,
         }
     }
 }
@@ -267,6 +294,17 @@ impl Event {
     /// still format 1, so apps that read only that keep working with them.
     pub fn format(&self) -> u32 {
         match self {
+            // Sun events, conditions and the home location arrived in format
+            // 11: an older app keeps them without applying them, so it goes
+            // on firing a reminder whose conditions it hasn't heard of.
+            Event::RecurringReminderCreated {
+                suns, conditions, ..
+            } if !suns.is_empty() || !conditions.is_empty() => 11,
+            Event::HomeSet { .. }
+            | Event::ReminderEdited {
+                change: Change::SunEvents(_) | Change::Conditions(_),
+                ..
+            } => 11,
             Event::RecurringReminderCreated { .. }
             | Event::ReminderEdited {
                 change: Change::Schedules(_) | Change::Zone(_),

@@ -10,16 +10,19 @@
 //! server has numbered, which it hasn't, and which are in a format it can't read.
 
 mod alerter;
+mod condition;
 mod core;
 mod countdown;
 mod delay;
 mod event;
 mod hlc;
 mod pause;
+mod place;
 mod priority;
 mod schedule;
 mod state;
 mod store;
+mod sun;
 
 pub use crate::core::{
     ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem,
@@ -31,6 +34,7 @@ pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
     ACTION_DONE, ACTION_OPEN, ACTION_SKIP, ACTION_SNOOZE,
 };
+pub use condition::{all_hold, Condition};
 pub use countdown::{Countdown, CountdownUnit};
 pub use delay::{Delay, DelaySpec};
 pub use event::{
@@ -39,6 +43,7 @@ pub use event::{
 };
 pub use hlc::{Hlc, MAX_AHEAD_MS};
 pub use pause::{Pause, PauseCause};
+pub use place::{Place, DEFAULT_RADIUS_METRES};
 pub use priority::{
     built_in_priorities, AlertStyle, EscalationStep, Priority, PriorityInfo, PrioritySettings,
 };
@@ -49,6 +54,7 @@ pub use state::{
     SnoozeView, State, Undo, UpcomingItem, LAST_CHANCE_LEAD,
 };
 pub use store::{HeldEvent, Store};
+pub use sun::{event_time, is_daylight, SunEvent, SunTrigger, MAX_OFFSET_MINUTES};
 
 /// Errors from the core.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +109,12 @@ pub enum Error {
     SameList,
     #[error("a pause has to end in the future")]
     PauseInThePast,
+    #[error("the condition can't be used: {0}")]
+    BadCondition(String),
+    #[error("the sun event can't be used: {0}")]
+    BadSunEvent(String),
+    #[error("the home location can't be used: {0}")]
+    BadHome(String),
     #[error("an event from the server could not be read: {0}")]
     BadEvent(&'static str),
 }
