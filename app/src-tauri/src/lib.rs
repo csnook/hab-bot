@@ -551,6 +551,31 @@ fn agenda(app: tauri::State<'_, App>) -> hab_core::Agenda {
     core.agenda(now())
 }
 
+/// Every live reminder as a Board card, unfiltered.
+#[tauri::command]
+fn board(app: tauri::State<'_, App>) -> Vec<hab_core::BoardCard> {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.board(now())
+}
+
+/// Copies a reminder in its list; returns the copy's id.
+#[tauri::command]
+fn duplicate_reminder(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    reminder_id: String,
+) -> Result<String, String> {
+    let id = app
+        .core
+        .lock()
+        .unwrap()
+        .duplicate_reminder(&reminder_id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(id)
+}
+
 /// The view the window was last left on (Inbox the first time).
 #[tauri::command]
 fn view(app: tauri::State<'_, App>) -> String {
@@ -1938,6 +1963,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             agenda,
+            board,
+            duplicate_reminder,
             view,
             set_view,
             view_tip_seen,

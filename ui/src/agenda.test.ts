@@ -184,14 +184,14 @@ describe("the view switcher", () => {
   });
 
   test("a view this window doesn't have yet opens as Inbox", () => {
-    for (const v of ["board", "calendar", "history", "nonsense"]) {
+    for (const v of ["calendar", "history", "nonsense"]) {
       expect(isView(v)).toBe(false);
       expect(openingView(v)).toBe("inbox");
     }
   });
 
-  test("lists Inbox then Agenda, with titles", () => {
-    expect(VIEWS.map((v) => v.label)).toEqual(["Inbox", "Agenda"]);
+  test("lists Inbox, Agenda then Board, with titles", () => {
+    expect(VIEWS.map((v) => v.label)).toEqual(["Inbox", "Agenda", "Board"]);
     expect(viewTitle("agenda")).toBe("Agenda");
   });
 

@@ -13,6 +13,8 @@ import {
   type ListInfo,
   dismissNotice,
   agenda as loadAgenda,
+  board as loadBoard,
+  type BoardCard,
   inbox,
   setView as saveView,
   setViewTipSeen,
@@ -44,6 +46,8 @@ import { OccurrencePanel, type PanelTarget } from "./OccurrencePanel";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
 import { Agenda } from "./Agenda";
+import { Board } from "./Board";
+import { hiddenCards } from "./board";
 import { openingView, tipText, viewTitle, VIEWS, type View } from "./views";
 import { SnoozeAllChips, SnoozeAllDialog } from "./SnoozeAll";
 import { quietLine } from "./quiet";
@@ -208,6 +212,7 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
     expected: [],
     closed: [],
   });
+  const [boardCards, setBoardCards] = useState<BoardCard[]>([]);
   const [snap, setSnap] = useState<Snapshot>({
     due: [],
     upcoming: [],
@@ -254,6 +259,7 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
     loadQuietHours().then(setQuiet).catch(() => {});
     snapshot().then(setSnap).catch((e) => setError(String(e)));
     loadAgenda().then(setAgendaData).catch((e) => setError(String(e)));
+    loadBoard().then(setBoardCards).catch((e) => setError(String(e)));
     inbox().then(setSections).catch((e) => setError(String(e)));
     loadLists().then(setLists).catch((e) => setError(String(e)));
     deletedReminders().then(setDeleted).catch(() => {});
@@ -276,7 +282,8 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
 
   const shown = filterInbox(filters, sections);
   const shownSnap = filterSnapshot(filters, snap);
-  const hidden = hiddenCount(filters, sections);
+  const hidden =
+    view === "board" ? hiddenCards(filters, boardCards) : hiddenCount(filters, sections);
   const dot = (listId: string) => {
     const l = listById(lists, listId);
     return l ? <ListDot list={l} lists={lists} /> : null;
@@ -344,7 +351,11 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
       {isFiltering(filters) && (
         <p class="muted" role="status">
           Filtered by the sidebar
-          {hidden > 0 ? `: ${hidden} open ${hidden === 1 ? "reminder is" : "reminders are"} hidden, and still alert` : ""}.
+          {hidden > 0
+            ? view === "board"
+              ? `: ${hidden} ${hidden === 1 ? "reminder is" : "reminders are"} hidden, and still alert`
+              : `: ${hidden} open ${hidden === 1 ? "reminder is" : "reminders are"} hidden, and still alert`
+            : ""}.
           <button type="button" onClick={() => changeFilters(noFilters())}>Show everything</button>
         </p>
       )}
@@ -359,6 +370,9 @@ function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
           onEdit={edit}
           onError={setError}
         />
+      )}
+      {view === "board" && (
+        <Board cards={boardCards} filters={filters} lists={lists} dot={dot} onOpen={setPanel} />
       )}
       {view === "inbox" && (
         <>

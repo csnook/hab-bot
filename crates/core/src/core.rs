@@ -503,6 +503,37 @@ pub struct PausedReminder {
     pub has_open: bool,
 }
 
+/// How easily a trigger or condition can be faked, from the spec's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Faking {
+    None,
+    Difficult,
+    Moderate,
+    Easy,
+}
+
+/// A reminder as a Board card: the facts the window sorts into columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoardCard {
+    pub reminder_id: String,
+    pub list_id: String,
+    pub title: String,
+    pub priority: Priority,
+    /// It repeats (schedule, sun event or countdown) rather than firing once.
+    pub repeats: bool,
+    /// Its open occurrence, if it has one, whether or not it is paused.
+    pub open: Option<DueItem>,
+    /// Its next expected occurrence, when nothing of it is open. Not
+    /// adjusted for a pause: a paused reminder's next may fall inside it.
+    pub next: Option<ExpectedItem>,
+    /// What pauses it now, its own pause or its list's.
+    pub pause: Option<PauseCause>,
+    /// When its latest occurrence was closed, if it has been.
+    pub last_closed_at: Option<i64>,
+    pub faking: Faking,
+}
+
 /// Instances kept when a device was away long enough to pass many: the most
 /// recent ones. Older ones are not recorded.
 const MAX_LATE_INSTANCES: usize = 50;
@@ -2462,7 +2493,6 @@ impl Core {
     /// the one-offs yet to fire and the instances of every schedule. The
     /// views ask for the range they show.
     pub fn expected(&self, now: i64, until: i64) -> Vec<ExpectedItem> {
-        let device = &self.device_tz();
         let mut out = Vec::new();
         for (_, s) in self.states() {
             for r in s.reminders.values() {
@@ -2492,21 +2522,131 @@ impl Core {
                     .filter(|t| s.pause_at(r, *t).is_none())
                     .collect();
                 let next = self.next_expected(s, r, now).ok();
-                out.extend(times.into_iter().map(|t| ExpectedItem {
-                    can_close_early: next == Some(t),
-                    reminder_id: r.id.clone(),
-                    list_id: r.list_id.clone(),
-                    priority: r.priority,
-                    title: r.title.clone(),
-                    note: r.note.clone(),
-                    scheduled_at: t,
-                    snoozed_until: s.expected_snooze(&r.id, t),
-                    expires_at: r.expires_at(t, device),
-                }));
+                out.extend(
+                    times
+                        .into_iter()
+                        .map(|t| self.expected_item(s, r, t, next == Some(t))),
+                );
             }
         }
         out.sort_by(|a, b| (a.scheduled_at, &a.reminder_id).cmp(&(b.scheduled_at, &b.reminder_id)));
         out
+    }
+
+    /// One expected occurrence of `r` at `t`.
+    fn expected_item(
+        &self,
+        s: &State,
+        r: &Reminder,
+        t: i64,
+        can_close_early: bool,
+    ) -> ExpectedItem {
+        ExpectedItem {
+            can_close_early,
+            reminder_id: r.id.clone(),
+            list_id: r.list_id.clone(),
+            priority: r.priority,
+            title: r.title.clone(),
+            note: r.note.clone(),
+            scheduled_at: t,
+            snoozed_until: s.expected_snooze(&r.id, t),
+            expires_at: r.expires_at(t, &self.device_tz()),
+        }
+    }
+
+    /// Every live reminder as a card for the Board, unfiltered (the window
+    /// applies the sidebar's filters), by title. The core gives the facts;
+    /// which column a card belongs in is the window's to say (board.ts):
+    /// there is no waiting state yet, as conditions never make a reminder
+    /// wait (ADR 0012), and no event triggers, so nothing is "watching".
+    pub fn board(&self, now: i64) -> Vec<BoardCard> {
+        let device = self.device_tz();
+        let mut cards: Vec<BoardCard> = Vec::new();
+        for (_, s) in self.states() {
+            let due = s.due(&device);
+            for r in s.reminders.values() {
+                let mut open = due.iter().find(|d| d.reminder_id == r.id).cloned();
+                if let Some(d) = open.as_mut() {
+                    self.hold_open(std::slice::from_mut(d), now);
+                }
+                let next = if open.is_some() {
+                    None
+                } else {
+                    self.next_expected(s, r, now)
+                        .ok()
+                        .map(|t| self.expected_item(s, r, t, true))
+                };
+                let last_closed_at = s
+                    .latest_occurrence(&r.id)
+                    .filter(|o| !o.unfired)
+                    .and_then(|o| o.closing.as_ref())
+                    .map(|c| c.at);
+                cards.push(BoardCard {
+                    reminder_id: r.id.clone(),
+                    list_id: r.list_id.clone(),
+                    title: r.title.clone(),
+                    priority: r.priority,
+                    repeats: r.repeats(),
+                    open,
+                    next,
+                    pause: s.pause_at(r, now),
+                    last_closed_at,
+                    faking: r.faking(),
+                });
+            }
+        }
+        cards.sort_by(|a, b| (&a.title, &a.reminder_id).cmp(&(&b.title, &b.reminder_id)));
+        cards
+    }
+
+    /// Makes a copy of a reminder in its list, called "<title> (copy)", with
+    /// the same triggers, conditions, priority, overdue time, expiries and
+    /// note. It isn't paused, and none of the original's occurrences come
+    /// with it. A copy of a one-off whose time has passed fires an hour from
+    /// now; a copy of a countdown starts counting from now. Returns its id.
+    pub fn duplicate_reminder(&mut self, reminder_id: &str, now: i64) -> Result<String> {
+        let list_id = self.list_of_reminder(reminder_id)?;
+        let r = self.state_of(&list_id).unwrap().reminders[reminder_id].clone();
+        let title = format!("{} (copy)", r.title);
+        let id = if let Some(countdown) = r.countdown.clone() {
+            self.create_countdown_reminder_in(
+                &list_id,
+                &title,
+                countdown,
+                r.zone.as_deref(),
+                Some(now),
+                now,
+            )?
+        } else if r.has_schedules() {
+            self.create_repeating_reminder_in(
+                &list_id,
+                &title,
+                r.schedules.clone(),
+                r.suns.clone(),
+                r.conditions.clone(),
+                r.zone.as_deref(),
+                now,
+            )?
+        } else {
+            let fire_at = if r.fire_at > now {
+                r.fire_at
+            } else {
+                now + 3_600
+            };
+            self.create_reminder_in(&list_id, &title, fire_at, now)?
+        };
+        self.edit_reminder(
+            &id,
+            EditReminder {
+                note: Some(r.note.clone()),
+                priority: Some(r.priority),
+                overdue: Some(r.overdue_override.clone()),
+                expiry: Some(r.expiries.clone()),
+                ..EditReminder::default()
+            },
+            now,
+        )?;
+        Ok(id)
     }
 
     /// Occurrences closed at or after `start` and before `end`, latest

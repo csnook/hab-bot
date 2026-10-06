@@ -125,6 +125,14 @@ impl Reminder {
         !self.suns.is_empty() || self.conditions.iter().any(Condition::needs_home)
     }
 
+    /// How easily its triggers and conditions can be faked. Every kind in
+    /// this release (a time, a schedule, a countdown, a sun event, a time of
+    /// day or daylight) is worked out from the clock and the home location,
+    /// so none can be; sensed kinds (Wi-Fi, Bluetooth, a webhook) will say.
+    pub fn faking(&self) -> crate::core::Faking {
+        crate::core::Faking::None
+    }
+
     pub fn counts_down(&self) -> bool {
         self.countdown.is_some()
     }

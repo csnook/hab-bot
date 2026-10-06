@@ -147,3 +147,16 @@ dialog.snooze-all form { display: grid; gap: 8px; max-width: 28em; }
 .now-rule { display: flex; align-items: center; gap: 8px; color: #c33; font-size: 0.8rem; margin: 2px 0; }
 .now-rule::before, .now-rule::after { content: ""; height: 1px; background: #c33; flex: 1; }
 .now-rule::before { flex: 0 0 8px; }
+
+/* The Board (#53). */
+.board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+.board-column { flex: 0 0 16em; min-width: 14em; }
+.board-column h2 { font-size: 1rem; margin: 0 0 6px; }
+.board-column ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.board-card { border: 1px solid #8886; border-radius: 6px; }
+.board-column.overdue .board-card { border-left: 3px solid #c33; }
+.board-column.paused .board-card, .board-column.finished .board-card { opacity: 0.75; }
+.card-main { display: grid; gap: 2px; width: 100%; text-align: left; background: none; border: 0; padding: 8px; font: inherit; cursor: pointer; }
+.card-main .title { font-weight: 600; }
+.card-main .status { color: #888; font-size: 0.9rem; }
+.card-main .meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 0.8rem; color: #888; }

@@ -162,6 +162,27 @@ export interface PausedReminder {
   has_open: boolean;
 }
 
+export type Faking = "none" | "difficult" | "moderate" | "easy";
+
+/** A reminder as a Board card: the facts the window sorts into columns (board.ts). */
+export interface BoardCard {
+  reminder_id: string;
+  list_id: string;
+  title: string;
+  priority: PriorityName;
+  /** It repeats (schedule, sun event or countdown) rather than firing once. */
+  repeats: boolean;
+  /** Its open occurrence, if any, paused or not. */
+  open: DueItem | null;
+  /** Its next expected occurrence, when nothing of it is open. */
+  next: ExpectedItem | null;
+  /** What pauses it now. */
+  pause: PauseCause | null;
+  /** When its latest occurrence was closed. */
+  last_closed_at: number | null;
+  faking: Faking;
+}
+
 export interface EarlierItem {
   occurrence_id: string;
   list_id: string;
@@ -266,6 +287,11 @@ export const createReminder = (
 export const priorities = () => invoke<PriorityInfo[]>("priorities");
 export const appVersion = () => invoke<string>("app_version");
 export const inbox = () => invoke<Inbox>("inbox");
+/** Every live reminder as a Board card, unfiltered. */
+export const board = () => invoke<BoardCard[]>("board");
+/** Copies a reminder in its list; returns the copy's id. */
+export const duplicateReminder = (reminderId: string) =>
+  invoke<string>("duplicate_reminder", { reminderId });
 export const agenda = () => invoke<Agenda>("agenda");
 /** The view the window was last left on ("inbox" the first time). */
 export const view = () => invoke<string>("view");

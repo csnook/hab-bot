@@ -27,11 +27,11 @@ mod store;
 mod sun;
 
 pub use crate::core::{
-    Agenda, ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice,
-    EarlierItem, EditReminder, ExpectedItem, Filters, Fired, Inbox, ListInfo, OccurrenceView,
-    Outcome, PausedOpen, PausedReminder, ReconciliationNotice, ReminderView, ScheduleView,
-    SecurityNotice, SignInNotice, Snapshot, SnoozeAllChoice, SnoozeAllView, SnoozeKind,
-    SnoozeOption, SnoozePicker, TriggerView,
+    Agenda, BoardCard, ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice,
+    EarlierItem, EditReminder, ExpectedItem, Faking, Filters, Fired, Inbox, ListInfo,
+    OccurrenceView, Outcome, PausedOpen, PausedReminder, ReconciliationNotice, ReminderView,
+    ScheduleView, SecurityNotice, SignInNotice, Snapshot, SnoozeAllChoice, SnoozeAllView,
+    SnoozeKind, SnoozeOption, SnoozePicker, TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,

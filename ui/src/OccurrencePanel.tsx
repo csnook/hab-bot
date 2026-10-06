@@ -4,11 +4,15 @@ import {
   completeEarly,
   completeOccurrence,
   correctOccurrence,
+  duplicateReminder,
   pauseReminder,
   recentSkipNotes,
+  resumeList,
+  resumeReminder,
   skipAhead,
   skipOccurrence,
   undoOccurrence,
+  type BoardCard,
   type ClosedView,
   type DueItem,
   type EarlierItem,
@@ -26,13 +30,19 @@ import {
   undoMessage,
 } from "./closing";
 import { nextWeekOf, pauseUntil, tomorrowOf } from "./pause";
+import { fakingText, pauseOffer, statusLine } from "./board";
 import { formatTime } from "./time";
 
-/** What the panel is about: an open, expected or closed occurrence. */
+/**
+ * What the panel is about: an open, expected or closed occurrence, or a
+ * reminder's Board card (its own buttons, with those of its open or next
+ * expected occurrence below).
+ */
 export type PanelTarget =
   | { state: "open"; item: DueItem }
   | { state: "expected"; item: ExpectedItem }
-  | { state: "closed"; item: EarlierItem };
+  | { state: "closed"; item: EarlierItem }
+  | { state: "reminder"; card: BoardCard };
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
@@ -50,7 +60,7 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
  * it has never been run in a real window.
  */
 export function OccurrencePanel({
-  target,
+  target: asked,
   onClose,
   onEdit,
 }: {
@@ -58,6 +68,16 @@ export function OccurrencePanel({
   onClose: () => void;
   onEdit: (reminderId: string) => void;
 }) {
+  // A card shows its reminder's buttons, then those of what it has open or
+  // expected, which leave out the Pause and Edit the card already has.
+  const card = asked.state === "reminder" ? asked.card : null;
+  const target: Exclude<PanelTarget, { state: "reminder" }> | null = card
+    ? card.open
+      ? { state: "open", item: card.open }
+      : card.next
+        ? { state: "expected", item: card.next }
+        : null
+    : (asked as Exclude<PanelTarget, { state: "reminder" }>);
   const ref = useRef<HTMLDialogElement>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -85,10 +105,10 @@ export function OccurrencePanel({
     recentSkipNotes().then(setRecent).catch(() => {});
   }, []);
   useEffect(() => {
-    if (target.state === "closed") {
+    if (target?.state === "closed") {
       closedOccurrence(target.item.occurrence_id).then(setClosed).catch(() => {});
     }
-  }, [target]);
+  }, [asked]);
 
   const run = (what: Promise<unknown>, then?: (r: unknown) => void) =>
     what
@@ -160,10 +180,13 @@ export function OccurrencePanel({
 
   let title = "";
   let body: preact.ComponentChild = null;
-  if (target.state === "open") {
+  if (card) title = card.title;
+  if (target?.state === "open") {
     const d = target.item;
     title = d.title;
     const buttons = buttonsFor("open");
+    // On a card, Pause and Edit reminder are the card's own buttons.
+    const more = card ? [buttons.more[0]] : buttons.more;
     body = (
       <>
         <p class="muted">Due {formatTime(d.scheduled_at)}</p>
@@ -173,12 +196,12 @@ export function OccurrencePanel({
           <button onClick={() => setForm(form === "skip" ? null : "skip")}>{buttons.main[2]}</button>
           <details>
             <summary>{buttons.main[3]}</summary>
-            <button onClick={() => setForm("correct")}>{buttons.more[0]}</button>
-            <button onClick={() => setForm(form === "pause" ? null : "pause")}>{buttons.more[1]}</button>
-            <button onClick={() => { onEdit(d.reminder_id); onClose(); }}>{buttons.more[2]}</button>
+            <button onClick={() => setForm("correct")}>{more[0]}</button>
+            {!card && <button onClick={() => setForm(form === "pause" ? null : "pause")}>{buttons.more[1]}</button>}
+            {!card && <button onClick={() => { onEdit(d.reminder_id); onClose(); }}>{buttons.more[2]}</button>}
           </details>
         </div>
-        {form === "pause" && pauseForm(d.reminder_id)}
+        {!card && form === "pause" && pauseForm(d.reminder_id)}
         {form === "skip" && (
           <form onSubmit={(e) => { e.preventDefault(); run(skipOccurrence(d.occurrence_id, cleanNote(note))); }}>
             {noteField()}
@@ -199,7 +222,7 @@ export function OccurrencePanel({
         )}
       </>
     );
-  } else if (target.state === "expected") {
+  } else if (target?.state === "expected") {
     const e = target.item;
     title = e.title;
     body = (
@@ -217,10 +240,10 @@ export function OccurrencePanel({
             label="Snooze ahead"
             onError={setError}
           />
-          <button onClick={() => setForm(form === "pause" ? null : "pause")}>Pause</button>
-          <button onClick={() => { onEdit(e.reminder_id); onClose(); }}>Edit reminder</button>
+          {!card && <button onClick={() => setForm(form === "pause" ? null : "pause")}>Pause</button>}
+          {!card && <button onClick={() => { onEdit(e.reminder_id); onClose(); }}>Edit reminder</button>}
         </div>
-        {form === "pause" && pauseForm(e.reminder_id)}
+        {!card && form === "pause" && pauseForm(e.reminder_id)}
         {form === "correct" && (
           <form
             onSubmit={(ev) => {
@@ -246,7 +269,7 @@ export function OccurrencePanel({
         )}
       </>
     );
-  } else {
+  } else if (target?.state === "closed") {
     const c = target.item;
     title = c.title;
     const buttons = buttonsFor("closed", { canUndo: c.can_undo });
@@ -314,6 +337,37 @@ export function OccurrencePanel({
         <h2 id="panel-title">{title}</h2>
         <button type="button" aria-label="Close" onClick={onClose}>×</button>
       </header>
+      {card && (
+        <>
+          <p class="muted">
+            {statusLine(card, nowSeconds())} · {card.priority} priority · {fakingText(card.faking)}
+          </p>
+          <div class="alarm-row">
+            <button onClick={() => { onEdit(card.reminder_id); onClose(); }}>Edit reminder…</button>
+            {(() => {
+              const offer = pauseOffer(card, nowSeconds());
+              if (offer.kind === "pause") {
+                return <button onClick={() => setForm(form === "pause" ? null : "pause")}>Pause</button>;
+              }
+              if (offer.kind === "resume-list") {
+                return <button onClick={() => run(resumeList(offer.listId))}>Resume list</button>;
+              }
+              return <button onClick={() => run(resumeReminder(card.reminder_id))}>Resume</button>;
+            })()}
+            <button
+              onClick={() =>
+                run(duplicateReminder(card.reminder_id), (id) => {
+                  onClose();
+                  onEdit(id as string);
+                })
+              }
+            >
+              Duplicate
+            </button>
+          </div>
+          {form === "pause" && pauseForm(card.reminder_id)}
+        </>
+      )}
       {message && <p role="status">{message}</p>}
       {error && <p class="error" role="alert">{error}</p>}
       {body}
