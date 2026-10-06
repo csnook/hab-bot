@@ -188,7 +188,7 @@ impl AlarmWindows for TauriWindows {
 }
 
 /// Brings the window to the front, giving GTK the activation token first.
-fn raise(window: &WebviewWindow, token: Option<&str>) {
+pub fn raise(window: &WebviewWindow, token: Option<&str>) {
     use gtk::prelude::GtkWindowExt;
     let _ = window.show();
     let _ = window.unminimize();

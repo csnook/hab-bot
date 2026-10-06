@@ -414,6 +414,13 @@ export const onStateChanged = (f: () => void) => listen("state-changed", f);
 export const onOpenOccurrence = (f: (occurrenceId: string) => void) =>
   listen<string>("open-occurrence", (e) => f(e.payload));
 
+/** The tray's Settings entry (or a second `--settings` launch): open Settings. */
+export const onOpenSettings = (f: () => void) => listen("open-settings", f);
+
+/** Settings → This device: whether the app starts at login (an XDG autostart entry). */
+export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
+export const setAutostart = (enabled: boolean) => invoke<void>("set_autostart", { enabled });
+
 export interface Profile {
   server_address: string;
   server_fingerprint: string;

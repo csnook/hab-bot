@@ -15,8 +15,6 @@ use hab_client::{
 };
 use hab_core::{Alerter, Core, Snapshot};
 use serde::Serialize;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tokio::sync::{watch, Notify};
 
@@ -27,12 +25,20 @@ const STATE_CHANGED: &str = "state-changed";
 /// Sent to the window when a notification is clicked; the payload is the
 /// occurrence's id.
 const OPEN_OCCURRENCE: &str = "open-occurrence";
+const OPEN_SETTINGS: &str = "open-settings";
 
 mod alarm;
+mod autostart;
+mod badge;
+mod launch;
 mod notify;
 mod sound;
+mod tray;
+mod tray_model;
 mod wayland;
 use notify::{Delivery, UserAction};
+use tray::Tray;
+use tray_model::TrayAction;
 
 /// What the alarm windows need to tell the alarm they were closed.
 struct AlarmState {
@@ -641,12 +647,45 @@ fn alarm_view(
     app.core.lock().unwrap().occurrence_view(&occurrence_id)
 }
 
-fn show_window(app: &AppHandle) {
+/// Brings the main window forward. `token` is an xdg-activation token from
+/// the click that asked (the tray's panel gives one), which Wayland needs
+/// before it lets the window take focus.
+fn show_window(app: &AppHandle, token: Option<&str>) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
+        alarm::raise(&w, token);
     }
+}
+
+/// Whether Settings → This device has the app starting at login.
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    autostart::Autostart::for_this_device().is_some_and(|a| a.is_enabled())
+}
+
+/// Turns starting at login on or off for this device.
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    let autostart = autostart::Autostart::for_this_device()
+        .ok_or_else(|| "this device has no autostart folder".to_string())?;
+    autostart.set(enabled).map_err(|e| e.to_string())
+}
+
+/// What the tray shows now: the badge, its tooltip and the menu.
+fn tray_view(core: &Core, now: i64) -> (tray_model::Badge, String, Vec<tray_model::Entry>) {
+    let inbox = core.inbox(now);
+    let zone = hab_core::zone(&core.device_zone());
+    let clock = move |at: i64| {
+        zone.as_ref()
+            .map(|z| hab_core::clock_time(z, at))
+            .unwrap_or_default()
+    };
+    (
+        tray_model::badge(&inbox),
+        tray_model::tooltip(&inbox),
+        // Nothing waits yet: conditions aren't built, so there are no
+        // waiting reminders to list.
+        tray_model::menu(&inbox, &[], now, &clock),
+    )
 }
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -1257,6 +1296,7 @@ fn run_scheduler(
     woken: mpsc::Receiver<()>,
     delivery: Arc<Delivery>,
     checks: Arc<Checks>,
+    tray: Option<Arc<Tray>>,
 ) {
     // When an open occurrence next goes overdue: the window then has to move
     // it from Due to Overdue.
@@ -1265,7 +1305,7 @@ fn run_scheduler(
     loop {
         // Asked of the notification server before taking the core's lock.
         let inhibited = delivery.inhibited();
-        let (fired, next, next_overdue, pass) = {
+        let (fired, next, next_overdue, pass, tray_view) = {
             let mut core = core.lock().unwrap();
             // The user may have travelled: floating reminders follow.
             let _ = core.use_system_zone();
@@ -1279,13 +1319,21 @@ fn run_scheduler(
                     eprintln!("alerting failed: {e}");
                     Default::default()
                 });
+            // The tray follows every pass: a firing, a snooze ending, an
+            // occurrence going overdue (the pass is scheduled for it) and
+            // any action or synced change (which wake the scheduler).
+            let view = tray.as_ref().map(|_| tray_view(&core, now()));
             (
                 fired,
                 core.next_fire_at(),
                 core.next_overdue_at(now()),
                 pass,
+                view,
             )
         };
+        if let (Some(tray), Some((badge, tooltip, menu))) = (&tray, tray_view) {
+            tray.update(badge, tooltip, menu);
+        }
         let went_overdue = overdue_at.is_some_and(|t| t <= now());
         overdue_at = next_overdue;
         if went_overdue {
@@ -1338,7 +1386,7 @@ fn act_on_notification(
             // An alarm opens its own window, with the click's token so that
             // Wayland lets it take focus; anything else opens the app.
             if !delivery.raise_alarm(id) {
-                show_window(app);
+                show_window(app, None);
                 let _ = app.emit(OPEN_OCCURRENCE, id);
             }
             return;
@@ -1355,10 +1403,61 @@ fn act_on_notification(
     let _ = app.emit(STATE_CHANGED, ());
 }
 
+/// A later launch of the app, handed to the running one by the
+/// single-instance plugin (see [`launch`]): bring the window forward, at an
+/// occurrence or Settings if it asked. An autostart launch (`--hidden`) asks
+/// for nothing.
+fn later_launch(app: &AppHandle, args: &[String]) {
+    let launch = launch::parse(args);
+    if launch.hidden && launch.open.is_none() && !launch.settings {
+        return;
+    }
+    // The plugin forwards only the arguments, not the launcher's
+    // XDG_ACTIVATION_TOKEN, so on Wayland this raise carries no token.
+    show_window(app, None);
+    if let Some(id) = &launch.open {
+        let _ = app.emit(OPEN_OCCURRENCE, id);
+    }
+    if launch.settings {
+        let _ = app.emit(OPEN_SETTINGS, ());
+    }
+}
+
+/// What a click on the tray or its menu does.
+fn act_on_tray(
+    action: TrayAction,
+    token: Option<&str>,
+    app: &AppHandle,
+    core: &Mutex<Core>,
+    sync_wake: &Notify,
+    wake: &Sender<()>,
+    delivery: &Delivery,
+) {
+    let on_occurrence = match action {
+        TrayAction::OpenWindow => return show_window(app, token),
+        TrayAction::OpenOccurrence(id) => {
+            show_window(app, token);
+            let _ = app.emit(OPEN_OCCURRENCE, id);
+            return;
+        }
+        TrayAction::Settings => {
+            show_window(app, token);
+            let _ = app.emit(OPEN_SETTINGS, ());
+            return;
+        }
+        TrayAction::Quit => return app.exit(0),
+        TrayAction::Done(id) => UserAction::Done(id),
+        TrayAction::Snooze(id) => UserAction::Snooze(id),
+        TrayAction::Skip(id) => UserAction::Skip(id),
+    };
+    act_on_notification(on_occurrence, app, core, sync_wake, wake, delivery);
+}
+
 pub fn run() {
+    let hidden = launch::parse(&std::env::args().collect::<Vec<_>>()).hidden;
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            later_launch(app, &args);
         }))
         .invoke_handler(tauri::generate_handler![
             snapshot,
@@ -1411,9 +1510,11 @@ pub fn run() {
             list_devices,
             remove_device,
             change_password,
-            key_store_name
+            key_store_name,
+            autostart_enabled,
+            set_autostart
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let db = db_path(&handle)?;
             let core = Arc::new(Mutex::new(Core::open(&db)?));
@@ -1421,6 +1522,7 @@ pub fn run() {
             let setup = SetupFile::in_dir(&data_dir).load()?;
             let (wake, woken) = mpsc::channel();
             let wake_scheduler = wake.clone();
+            let wake_scheduler_for_tray = wake.clone();
             let wake_for_sync = wake.clone();
             // A device with a server starts out about to connect: a firing it
             // missed while the app was closed checks with the server before
@@ -1472,21 +1574,18 @@ pub fn run() {
                 pending: Mutex::new(None),
             });
 
-            let open = MenuItem::with_id(app, "open", "Open Reminders", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-            let mut tray = TrayIconBuilder::new()
-                .tooltip("Reminders")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" => show_window(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
+            // Started at login (`--hidden`): the tray and no window. Otherwise
+            // the window opens, as it is created hidden (tauri.conf.json) so
+            // that a login start never flashes it.
+            if !hidden {
+                show_window(&handle, None);
             }
-            tray.build(app)?;
+            // The entry follows the program if it moved (an update).
+            if let Some(a) = autostart::Autostart::for_this_device() {
+                if let Err(e) = a.repair() {
+                    eprintln!("could not repair the autostart entry: {e}");
+                }
+            }
 
             let registry = Arc::new(alarm::Registry::default());
             let delivery = Arc::new(Delivery::new(
@@ -1519,8 +1618,39 @@ pub fn run() {
                     }
                 })?;
             }
+            // The tray is our own StatusNotifierItem (see `tray`). Without a
+            // session bus the app still runs, just without it.
+            let tray = {
+                let (handle, core, sync_wake, wake, delivery) = (
+                    handle.clone(),
+                    core.clone(),
+                    sync_wake.clone(),
+                    wake_scheduler_for_tray,
+                    delivery.clone(),
+                );
+                match Tray::start(
+                    None,
+                    Arc::new(move |action, token| {
+                        act_on_tray(
+                            action,
+                            token.as_deref(),
+                            &handle,
+                            &core,
+                            &sync_wake,
+                            &wake,
+                            &delivery,
+                        )
+                    }),
+                ) {
+                    Ok(t) => Some(Arc::new(t)),
+                    Err(e) => {
+                        eprintln!("no tray: {e}");
+                        None
+                    }
+                }
+            };
             std::thread::spawn(move || {
-                run_scheduler(handle, core, sync_wake, woken, delivery, checks)
+                run_scheduler(handle, core, sync_wake, woken, delivery, checks, tray)
             });
             Ok(())
         })

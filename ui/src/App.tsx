@@ -15,6 +15,7 @@ import {
   inbox,
   type Inbox as InboxSections,
   onOpenOccurrence,
+  onOpenSettings,
   onStateChanged,
   skipOccurrence,
   snapshot,
@@ -24,7 +25,7 @@ import { formatTime, signInNoticeText } from "./time";
 import { setupState, type Setup } from "./api";
 import { describeCountdown } from "./countdown";
 import { ReminderEditor } from "./ReminderEditor";
-import { Settings } from "./Settings";
+import { Settings, type Section } from "./Settings";
 import { SnoozeMenu } from "./SnoozeMenu";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
@@ -34,9 +35,17 @@ import { listById, listColour, listName } from "./lists";
 /** The first start asks how to use this device, then the app opens. */
 export function App() {
   const [setup, setSetup] = useState<Setup | null | undefined>(undefined);
-  const [settings, setSettings] = useState<"priorities" | "account" | "about" | null>(null);
+  const [settings, setSettings] = useState<Section | null>(null);
   // The device a "Not you? Remove it" notice was about, until it is dealt with.
   const [removing, setRemoving] = useState<string | null>(null);
+
+  // The tray's Settings entry.
+  useEffect(() => {
+    const unlisten = onOpenSettings(() => setSettings((s) => s ?? "priorities"));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     setupState().then(setSetup).catch(() => setSetup({ mode: "standalone" }));

@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { appVersion, priorities, type PriorityInfo, type Setup } from "./api";
+import {
+  appVersion,
+  autostartEnabled,
+  priorities,
+  setAutostart,
+  type PriorityInfo,
+  type Setup,
+} from "./api";
 import { Account } from "./Account";
 import { formatInterval, overdueStyles, styleName } from "./priorities";
 
-type Section = "priorities" | "account" | "about";
+export type Section = "priorities" | "device" | "account" | "about";
 const SECTIONS: Array<[Section, string]> = [
   ["priorities", "Priorities"],
+  ["device", "This device"],
   ["account", "Account"],
   ["about", "About"],
 ];
@@ -50,9 +58,44 @@ export function Settings({
         ))}
       </nav>
       {section === "priorities" && <Priorities />}
+      {section === "device" && <ThisDevice />}
       {section === "account" && <Account setup={setup} removing={removing} />}
       {section === "about" && <About setup={setup} />}
     </dialog>
+  );
+}
+
+/** What belongs to this device alone: not synced, and not the account's. */
+function ThisDevice() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    autostartEnabled().then(setOn).catch(() => setOn(false));
+  }, []);
+  const change = (enabled: boolean) => {
+    setError("");
+    setAutostart(enabled)
+      .then(() => setOn(enabled))
+      .catch((e) => setError(String(e)));
+  };
+  return (
+    <section aria-labelledby="device">
+      <h2 id="device">This device</h2>
+      <label>
+        <input
+          type="checkbox"
+          checked={on === true}
+          disabled={on === null}
+          onChange={(e) => change((e.currentTarget as HTMLInputElement).checked)}
+        />{" "}
+        Start at login
+      </label>
+      <p class="muted">
+        Starts Reminders in the tray with no window, so reminders fire after you sign in. Closing
+        the window keeps it running there.
+      </p>
+      {error && <p role="alert">{error}</p>}
+    </section>
   );
 }
 

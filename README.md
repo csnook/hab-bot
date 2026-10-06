@@ -21,10 +21,10 @@ This is the walking skeleton: on the Linux desktop, with no server, you can crea
 
   ```sh
   sudo apt-get install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
-    libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libdbus-1-dev
+    librsvg2-dev libsoup-3.0-dev libdbus-1-dev
   ```
 
-- For the tray on GNOME, the AppIndicator extension. KDE Plasma shows it natively.
+- For the tray on GNOME, the AppIndicator extension. KDE Plasma shows it natively. The tray is our own StatusNotifierItem over D-Bus, so no appindicator library is needed.
 - For the alarm's looping sound, any one of `pw-play` (PipeWire), `paplay`, `aplay`, `ffplay` or `canberra-gtk-play`; nothing to build. Without one the alarm still shows its critical notification and window, silently.
 
 ## Commands
@@ -55,7 +55,17 @@ Alerts are our own `org.freedesktop.Notifications` calls through `zbus` (Tauri's
 - **History:** the first alert and each change of style are written to the list as `OccurrenceAlerted` events (format 4) with the device that alerted. Repeats aren't.
 - **Alarm** (#42) isn't built: where the alerter decides on an alarm it is delivered as an insistent notification, with `Notification::style` still `Alarm` for the alarm code to act on.
 
-Closing the window hides it and leaves the app running in the tray, where reminders still fire. Use **Quit** in the tray menu to exit. On Linux Tauri doesn't report tray clicks, so use **Open Reminders** in the tray menu to bring the window back. Starting the app a second time raises the running one.
+## The tray
+
+The code is in `app/src-tauri/src/tray.rs` (D-Bus), `tray_model.rs` (what the badge counts and what the menu holds), `badge.rs` (the icon's pixels) and `autostart.rs`.
+
+Closing the window hides it and leaves the app running in the tray, where reminders still fire. **Use Quit in the tray menu to exit.**
+
+- **Our own StatusNotifierItem.** Tauri's tray reports no clicks on Linux and can't be switched to the `ksni` backend that does, so the tray is `org.kde.StatusNotifierItem` plus a `com.canonical.dbusmenu` menu, served with `zbus`. A left click calls `Activate` (Plasma does that because `ItemIsMenu` is false) and opens the window; Plasma's `ProvideXdgActivationToken` token is passed on so that Wayland lets the window take focus. At login the watcher (`org.kde.StatusNotifierWatcher`) may not exist yet, so the app checks every 3 s and registers when it appears, and again if it restarts. GNOME needs the AppIndicator extension; it shows the menu on click, where **Open Reminders** opens the window.
+- **The badge** is drawn at run time as pixels sent in `IconPixmap` (a disc with the count in white, 22 to 64 px; a ring when there is nothing to count), so there is no icon file. It counts **due and overdue occurrences of Low priority and above**, red when something Medium or above is overdue and blue otherwise. Minimum never counts. It follows the spec exactly and decides three things the spec doesn't: the window's sidebar filters do **not** apply (they only hide things from the window; alerts still come), a **snoozed** occurrence still counts (it is open until it closes, and its menu row says when the snooze ends), and 100 or more shows as 99.
+- **The menu:** Open Reminders; each open occurrence (every priority, overdue first) as a submenu with **Done**, **Snooze** (the priority's snooze length, as the notification's button) and **Skip**; a **Waiting** section (nothing fills it yet: conditions aren't built); Settings; Quit. After 12 occurrences it ends in "N more…". Snooze all and Quiet this device are added by their own tickets.
+- **Start at login** (Settings → This device) writes `$XDG_CONFIG_HOME/autostart/io.github.csnook.hab-bot.desktop` (`~/.config/autostart/` otherwise) running `<this program> --hidden`: the tray and no window. It is off until switched on. The file is the setting: it is per device and doesn't sync. If the program has moved when the app starts, the entry is rewritten to match. `tauri-plugin-autostart` isn't used: it ignores `XDG_CONFIG_HOME` and would add a dependency for the few lines of the file.
+- **Starting it again** hands the new command line to the running app (the single-instance plugin) and exits: the window comes forward. `--open <occurrence>` opens that occurrence, `--settings` opens Settings, and `--hidden` does nothing. Wayland's token from the launcher doesn't reach the running app, so the raise there may only flag the window for attention.
 
 Every change is stored as an event in the personal list's stream in `~/.local/share/io.github.csnook.hab-bot/hab-bot.db` (set `HAB_BOT_DB` to use another file). On start the state is rebuilt from the stream, and a reminder whose time passed while the app was closed fires then.
 
