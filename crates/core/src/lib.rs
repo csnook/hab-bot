@@ -14,6 +14,7 @@ mod condition;
 mod core;
 mod countdown;
 mod delay;
+mod device;
 mod event;
 mod hlc;
 mod pause;
@@ -39,6 +40,7 @@ pub use alerter::{
 pub use condition::{all_hold, Condition};
 pub use countdown::{Countdown, CountdownUnit};
 pub use delay::{Delay, DelaySpec};
+pub use device::{DeviceLimits, DeviceQuiet, LoudestAlert};
 pub use event::{
     Change, Correction, Event, Outgoing, Payload, Setting, StoredEvent, UndoOutcome,
     FORMAT_VERSION, UPDATE_NOTICE,

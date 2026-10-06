@@ -593,6 +593,39 @@ export const onOpenSettings = (f: () => void) => listen("open-settings", f);
 export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
 export const setAutostart = (enabled: boolean) => invoke<void>("set_autostart", { enabled });
 
+/** "Quiet this device until…": silent here until then. Never synced; not a snooze. */
+export interface DeviceQuiet {
+  until: number;
+  include_maximum: boolean;
+}
+
+/** The loudest alert style this device uses; Maximum is exempt unless `caps_maximum`. */
+export interface LoudestAlert {
+  style: AlertStyle;
+  caps_maximum: boolean;
+}
+
+/** Settings → This device. The name and portable are the user's, the rest stays here. */
+export interface ThisDevice {
+  name: string;
+  portable: boolean;
+  loudest: LoudestAlert;
+  quiet: DeviceQuiet | null;
+}
+
+export const thisDevice = () => invoke<ThisDevice>("this_device");
+export const setDeviceName = (name: string) => invoke<void>("set_device_name", { name });
+export const setDevicePortable = (portable: boolean) =>
+  invoke<void>("set_device_portable", { portable });
+export const setLoudestAlert = (style: AlertStyle, capsMaximum: boolean) =>
+  invoke<void>("set_loudest_alert", { style, capsMaximum });
+/** Quiet this device until `until` (unix seconds). Other devices still alert. */
+export const quietDevice = (until: number, includeMaximum: boolean) =>
+  invoke<void>("quiet_device", { until, includeMaximum });
+export const endQuietDevice = () => invoke<void>("end_quiet_device");
+/** The tray's "Quiet this device… More choices…": open Settings → This device. */
+export const onOpenThisDevice = (f: () => void) => listen("open-this-device", f);
+
 export interface Profile {
   server_address: string;
   server_fingerprint: string;

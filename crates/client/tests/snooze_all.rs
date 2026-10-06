@@ -289,6 +289,6 @@ async fn quiet_hours_set_on_one_device_hold_alerts_on_the_other() {
         let holding = c.holding(t + 5 * MIN);
         assert_eq!(holding[0].source, Source::QuietHours);
     }
-    assert_eq!(FORMAT_VERSION, 12);
+    assert_eq!(FORMAT_VERSION, 13);
     p.server.shutdown().await;
 }

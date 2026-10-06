@@ -39,9 +39,16 @@
 //!   or until tomorrow morning; "More choices…" opens the dialog for one list,
 //!   a time of day or "include maximum". While one holds, each is listed to
 //!   end early. Quiet hours aren't in the menu: they are set in Settings.
+//! - **Quiet this device is a submenu after Snooze all,** with the same
+//!   lengths, Maximum left out. It is not a snooze, so nothing in the menu's
+//!   rows or the badge changes with it. While it is in force its first entry
+//!   ends it; "More choices…" opens Settings → This device, which also has a
+//!   time of day and "include maximum".
 //! - **Overdue means `overdue_at <= now`,** the Inbox's own test.
 
-use hab_core::{DueItem, Inbox, Priority, Scope, SnoozeAllChoice, SnoozeAllView, Source};
+use hab_core::{
+    DeviceQuiet, DueItem, Inbox, Priority, Scope, SnoozeAllChoice, SnoozeAllView, Source,
+};
 
 /// The badge's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +128,13 @@ pub enum TrayAction {
     EndSnoozeAll(String),
     /// Open the window at the Snooze all dialog.
     SnoozeAllDialog,
+    /// Quiet this device for a length, Maximum left out. Not a snooze: other
+    /// devices still alert.
+    QuietDevice(SnoozeAllChoice),
+    /// End "Quiet this device" early.
+    EndQuietDevice,
+    /// Open Settings → This device, for a time of day or to include Maximum.
+    QuietDeviceDialog,
     Settings,
     Quit,
 }
@@ -225,19 +239,61 @@ fn snooze_all_menu(holding: &[SnoozeAllView], clock: &dyn Fn(i64) -> String) -> 
     }
 }
 
+/// The Quiet this device submenu: ending the one in force, then the
+/// lengths, then Settings → This device for the rest.
+fn quiet_device_menu(quiet: Option<DeviceQuiet>, clock: &dyn Fn(i64) -> String) -> Entry {
+    let mut children = Vec::new();
+    if let Some(q) = quiet {
+        children.push(Entry::Item {
+            label: format!(
+                "End: quiet until {}{}",
+                clock(q.until),
+                if q.include_maximum {
+                    ", Maximum too"
+                } else {
+                    ""
+                }
+            ),
+            action: TrayAction::EndQuietDevice,
+        });
+        children.push(Entry::Separator);
+    }
+    for (label, choice) in [
+        ("For 30 minutes", SnoozeAllChoice::Minutes(30)),
+        ("For 1 hour", SnoozeAllChoice::Minutes(60)),
+        ("For 2 hours", SnoozeAllChoice::Minutes(120)),
+        ("Until tomorrow morning", SnoozeAllChoice::TomorrowMorning),
+    ] {
+        children.push(Entry::Item {
+            label: label.into(),
+            action: TrayAction::QuietDevice(choice),
+        });
+    }
+    children.push(Entry::Separator);
+    children.push(Entry::Item {
+        label: "More choices…".into(),
+        action: TrayAction::QuietDeviceDialog,
+    });
+    Entry::Submenu {
+        label: "Quiet this device until…".into(),
+        children,
+    }
+}
+
 /// The menu: Open Reminders; each open occurrence as a submenu with Done,
 /// Snooze and its third button (overdue first, highest priority first, then
-/// the Inbox's Due order); a Waiting section; Snooze all; Settings; Quit.
+/// the Inbox's Due order); a Waiting section; Snooze all; Quiet this device
+/// until…; Settings; Quit.
 ///
 /// Every open occurrence is listed, Minimum included (only the badge skips
 /// those). `clock` writes a time of day for "snoozed until".
 ///
-/// Quiet this device is added by its own ticket, after Snooze all (see the
-/// spec's menu order).
+/// `quiet` is "Quiet this device" if in force, to be ended from the menu.
 pub fn menu(
     inbox: &Inbox,
     waiting: &[WaitingItem],
     holding: &[SnoozeAllView],
+    quiet: Option<DeviceQuiet>,
     now: i64,
     clock: &dyn Fn(i64) -> String,
 ) -> Vec<Entry> {
@@ -274,6 +330,7 @@ pub fn menu(
     }
     entries.push(Entry::Separator);
     entries.push(snooze_all_menu(holding, clock));
+    entries.push(quiet_device_menu(quiet, clock));
     entries.push(Entry::Item {
         label: "Settings".into(),
         action: TrayAction::Settings,
@@ -324,9 +381,11 @@ mod tests {
     }
 
     /// The submenus that are an occurrence's row (not Snooze all).
+    const QUIET_LABEL: &str = "Quiet this device until…";
+
     fn rows(m: &[Entry]) -> Vec<&Entry> {
         m.iter()
-            .filter(|e| matches!(e, Entry::Submenu { label, .. } if label != "Snooze all"))
+            .filter(|e| matches!(e, Entry::Submenu { label, .. } if label != "Snooze all" && label != QUIET_LABEL))
             .collect()
     }
 
@@ -345,7 +404,7 @@ mod tests {
         let b = badge(&i);
         assert_eq!((b.count, b.tone), (1, Tone::Blue));
         assert_eq!(tooltip(&i), "1 due");
-        let m = menu(&i, &[], &[], 10, &clock);
+        let m = menu(&i, &[], &[], None, 10, &clock);
         assert_eq!(rows(&m).len(), 1);
         assert!(!m.contains(&Entry::Heading("Waiting".into())));
     }
@@ -381,7 +440,7 @@ mod tests {
             let b = badge(&i);
             assert_eq!((b.count, b.tone), (0, Tone::Blue));
             assert_eq!(tooltip(&i), "Nothing due");
-            let m = menu(&i, &[], &[], t, &clock);
+            let m = menu(&i, &[], &[], None, t, &clock);
             assert!(rows(&m).is_empty());
             assert!(!m.contains(&Entry::Heading("Waiting".into())));
         }
@@ -443,7 +502,7 @@ mod tests {
             vec![item("o", Priority::High)],
             vec![item("d", Priority::Minimum)],
         );
-        let m = menu(&i, &[], &[], 10, &clock);
+        let m = menu(&i, &[], &[], None, 10, &clock);
         assert_eq!(
             m.first(),
             Some(&Entry::Item {
@@ -497,7 +556,7 @@ mod tests {
             reminder_id: "r1".into(),
             title: "Water the plants".into(),
         }];
-        let m = menu(&inbox(vec![], vec![]), &w, &[], 0, &clock);
+        let m = menu(&inbox(vec![], vec![]), &w, &[], None, 0, &clock);
         let at = m
             .iter()
             .position(|e| *e == Entry::Heading("Waiting".into()))
@@ -528,7 +587,7 @@ mod tests {
         let mut s = item("a", Priority::Medium);
         s.snoozed_until = Some(500);
         s.title = "x".repeat(100);
-        let m = menu(&inbox(vec![], vec![s]), &[], &[], 10, &clock);
+        let m = menu(&inbox(vec![], vec![s]), &[], &[], None, 10, &clock);
         let Entry::Submenu { label, .. } = &m[2] else {
             panic!("{m:?}")
         };
@@ -541,7 +600,7 @@ mod tests {
         let many: Vec<DueItem> = (0..15)
             .map(|n| item(&n.to_string(), Priority::Low))
             .collect();
-        let m = menu(&inbox(vec![], many), &[], &[], 0, &clock);
+        let m = menu(&inbox(vec![], many), &[], &[], None, 0, &clock);
         assert_eq!(rows(&m).len(), MAX_ROWS);
         assert!(m.contains(&Entry::Item {
             label: "3 more…".into(),
@@ -583,7 +642,7 @@ mod tests {
             reminder_id: "r1".into(),
             title: "Water".into(),
         }];
-        let m = menu(&inbox(vec![], vec![]), &w, &[], 0, &clock);
+        let m = menu(&inbox(vec![], vec![]), &w, &[], None, 0, &clock);
         let at = |f: &dyn Fn(&Entry) -> bool| m.iter().position(f).unwrap();
         let waiting = at(&|e| *e == Entry::Heading("Waiting".into()));
         let snooze = at(&|e| matches!(e, Entry::Submenu { label, .. } if label == "Snooze all"));
@@ -596,7 +655,9 @@ mod tests {
                 }
             )
         });
-        assert!(waiting < snooze && snooze + 1 == settings);
+        let quiet = at(&|e| matches!(e, Entry::Submenu { label, .. } if label == QUIET_LABEL));
+        // Quiet this device follows Snooze all and comes before Settings.
+        assert!(waiting < snooze && snooze + 1 == quiet && quiet + 1 == settings);
         let actions: Vec<TrayAction> = snooze_all_children(&m)
             .into_iter()
             .filter_map(|e| match e {
@@ -628,7 +689,7 @@ mod tests {
             ),
             holding_view(None, Source::QuietHours, Scope::All, None),
         ];
-        let m = menu(&inbox(vec![], vec![]), &[], &holding, 0, &clock);
+        let m = menu(&inbox(vec![], vec![]), &[], &holding, None, 0, &clock);
         let children = snooze_all_children(&m);
         assert_eq!(
             children[..3],
@@ -678,7 +739,7 @@ mod tests {
         c.tick(t).unwrap();
         let sa = c.snooze_all(Scope::All, t + 3_600, false, t + 1).unwrap();
         let i = c.inbox(t + 2);
-        let m = menu(&i, &[], &c.holding(t + 2), t + 2, &clock);
+        let m = menu(&i, &[], &c.holding(t + 2), None, t + 2, &clock);
         let Entry::Submenu { label, .. } = &m[2] else {
             panic!("{m:?}")
         };
@@ -688,5 +749,106 @@ mod tests {
             action: TrayAction::EndSnoozeAll(sa)
         }));
         let _ = id;
+    }
+
+    fn quiet_children(m: &[Entry]) -> Vec<Entry> {
+        m.iter()
+            .find_map(|e| match e {
+                Entry::Submenu { label, children } if label == QUIET_LABEL => {
+                    Some(children.clone())
+                }
+                _ => None,
+            })
+            .expect("a Quiet this device submenu")
+    }
+
+    #[test]
+    fn quiet_this_device_offers_lengths_and_the_settings_dialog() {
+        let m = menu(&inbox(vec![], vec![]), &[], &[], None, 0, &clock);
+        let actions: Vec<TrayAction> = quiet_children(&m)
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item { action, .. } => Some(action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                TrayAction::QuietDevice(SnoozeAllChoice::Minutes(30)),
+                TrayAction::QuietDevice(SnoozeAllChoice::Minutes(60)),
+                TrayAction::QuietDevice(SnoozeAllChoice::Minutes(120)),
+                TrayAction::QuietDevice(SnoozeAllChoice::TomorrowMorning),
+                TrayAction::QuietDeviceDialog,
+            ]
+        );
+    }
+
+    #[test]
+    fn while_quiet_the_first_entry_ends_it() {
+        let quiet = DeviceQuiet {
+            until: 900,
+            include_maximum: false,
+        };
+        let m = menu(&inbox(vec![], vec![]), &[], &[], Some(quiet), 0, &clock);
+        let children = quiet_children(&m);
+        assert_eq!(
+            children[..2],
+            [
+                Entry::Item {
+                    label: "End: quiet until t900".into(),
+                    action: TrayAction::EndQuietDevice
+                },
+                Entry::Separator
+            ]
+        );
+        let m = menu(
+            &inbox(vec![], vec![]),
+            &[],
+            &[],
+            Some(DeviceQuiet {
+                include_maximum: true,
+                ..quiet
+            }),
+            0,
+            &clock,
+        );
+        assert!(matches!(&quiet_children(&m)[0],
+            Entry::Item { label, .. } if label == "End: quiet until t900, Maximum too"));
+        // Not quiet: nothing to end.
+        let m = menu(&inbox(vec![], vec![]), &[], &[], None, 0, &clock);
+        assert!(!quiet_children(&m).iter().any(|e| matches!(
+            e,
+            Entry::Item {
+                action: TrayAction::EndQuietDevice,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn quiet_this_device_is_not_a_snooze_so_rows_and_the_badge_are_unchanged() {
+        use hab_core::Core;
+        let t = 1_790_000_000;
+        let mut c = Core::open_in_memory().unwrap();
+        c.set_device_zone("UTC").unwrap();
+        c.create_reminder("Bins", t, t - 100).unwrap();
+        c.tick(t).unwrap();
+        let before = menu(&c.inbox(t + 1), &[], &c.holding(t + 1), None, t + 1, &clock);
+        c.quiet_device_for(SnoozeAllChoice::Minutes(60), false, t + 1)
+            .unwrap();
+        let i = c.inbox(t + 2);
+        assert_eq!(badge(&i).count, 1);
+        let m = menu(
+            &i,
+            &[],
+            &c.holding(t + 2),
+            c.device_quiet(t + 2),
+            t + 2,
+            &clock,
+        );
+        assert_eq!(rows(&m), rows(&before));
+        assert!(matches!(&quiet_children(&m)[0],
+            Entry::Item { action: TrayAction::EndQuietDevice, label } if label.starts_with("End: quiet until")));
     }
 }

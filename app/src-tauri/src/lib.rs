@@ -27,6 +27,8 @@ const STATE_CHANGED: &str = "state-changed";
 const OPEN_OCCURRENCE: &str = "open-occurrence";
 const OPEN_SETTINGS: &str = "open-settings";
 const OPEN_SNOOZE_ALL: &str = "open-snooze-all";
+/// Sent to the window to open Settings at This device (the tray's "More choices…").
+const OPEN_THIS_DEVICE: &str = "open-this-device";
 
 mod alarm;
 mod autostart;
@@ -34,6 +36,7 @@ mod badge;
 mod launch;
 mod notify;
 mod sound;
+mod this_device;
 mod tray;
 mod tray_model;
 mod wayland;
@@ -910,6 +913,119 @@ fn show_window(app: &AppHandle, token: Option<&str>) {
     }
 }
 
+/// What this device was set up with, before it said anything in the personal
+/// list: its name and whether it is portable (the profile's, or the host name
+/// and a check for a battery on a standalone device).
+fn device_defaults(app: &App) -> (String, bool) {
+    match &*app.setup.lock().unwrap() {
+        Some(Setup::Joined(p)) => (p.device_name.clone(), p.portable),
+        _ => (
+            device_name(),
+            this_device::detect_portable(std::path::Path::new(this_device::POWER_SUPPLY_DIR)),
+        ),
+    }
+}
+
+/// Settings → This device: its name, portable or stationary, loudest alert
+/// and "Quiet this device until…".
+#[tauri::command]
+fn this_device(app: tauri::State<'_, App>) -> this_device::ThisDevice {
+    let (name, portable) = device_defaults(&app);
+    this_device::view(&app.core.lock().unwrap(), &name, portable, now())
+}
+
+/// Renames this device. The name is in the user's personal settings, so
+/// their other devices see it.
+#[tauri::command]
+fn set_device_name(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let kept = this_device::rename(&mut app.core.lock().unwrap(), &name, now())?;
+    // The sign-in profile says what the device is called too.
+    let mut setup = app.setup.lock().unwrap();
+    if let Some(Setup::Joined(p)) = setup.as_mut() {
+        p.device_name = kept;
+        if let Err(e) = SetupFile::in_dir(&app.data_dir).save(&Setup::Joined(p.clone())) {
+            eprintln!("could not save the device's new name: {e}");
+        }
+    }
+    drop(setup);
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Says whether this device is portable, in the user's personal settings.
+#[tauri::command]
+fn set_device_portable(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    portable: bool,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_portable(portable, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Caps the loudest alert style this device uses. Stays on this device.
+#[tauri::command]
+fn set_loudest_alert(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    style: hab_core::AlertStyle,
+    caps_maximum: bool,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_loudest_alert(hab_core::LoudestAlert {
+            style,
+            caps_maximum,
+        })
+        .map_err(|e| e.to_string())?;
+    // Alerts standing in a louder style are replaced at the next look.
+    let _ = app.wake.send(());
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
+}
+
+/// Quiets everything on this device until `until` (unix seconds). Maximum is
+/// left out unless `include_maximum`. Not a snooze: other devices still alert.
+#[tauri::command]
+fn quiet_device(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    until: i64,
+    include_maximum: bool,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .quiet_device(until, include_maximum, now())
+        .map_err(|e| e.to_string())?;
+    let _ = app.wake.send(());
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
+}
+
+/// Ends "Quiet this device" early.
+#[tauri::command]
+fn end_quiet_device(app: tauri::State<'_, App>, handle: AppHandle) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .end_quiet_device()
+        .map_err(|e| e.to_string())?;
+    let _ = app.wake.send(());
+    let _ = handle.emit(STATE_CHANGED, ());
+    Ok(())
+}
+
 /// Whether Settings → This device has the app starting at login.
 #[tauri::command]
 fn autostart_enabled() -> bool {
@@ -938,7 +1054,14 @@ fn tray_view(core: &Core, now: i64) -> (tray_model::Badge, String, Vec<tray_mode
         tray_model::tooltip(&inbox),
         // Nothing waits yet: conditions aren't built, so there are no
         // waiting reminders to list.
-        tray_model::menu(&inbox, &[], &core.holding(now), now, &clock),
+        tray_model::menu(
+            &inbox,
+            &[],
+            &core.holding(now),
+            core.device_quiet(now),
+            now,
+            &clock,
+        ),
     )
 }
 
@@ -1744,6 +1867,19 @@ fn act_on_tray(
             let result = core.lock().unwrap().end_snooze_all(&id, now());
             return finished_tray_action(result, app, sync_wake, wake);
         }
+        TrayAction::QuietDevice(choice) => {
+            let result = core.lock().unwrap().quiet_device_for(choice, false, now());
+            return finished_tray_action(result, app, sync_wake, wake);
+        }
+        TrayAction::EndQuietDevice => {
+            let result = core.lock().unwrap().end_quiet_device();
+            return finished_tray_action(result, app, sync_wake, wake);
+        }
+        TrayAction::QuietDeviceDialog => {
+            show_window(app, token);
+            let _ = app.emit(OPEN_THIS_DEVICE, ());
+            return;
+        }
         TrayAction::Quit => return app.exit(0),
         TrayAction::Done(id) => UserAction::Done(id),
         TrayAction::Snooze(id) => UserAction::Snooze(id),
@@ -1828,7 +1964,13 @@ pub fn run() {
             change_password,
             key_store_name,
             autostart_enabled,
-            set_autostart
+            set_autostart,
+            this_device,
+            set_device_name,
+            set_device_portable,
+            set_loudest_alert,
+            quiet_device,
+            end_quiet_device
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

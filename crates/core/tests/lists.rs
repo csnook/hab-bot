@@ -549,7 +549,7 @@ fn an_old_app_that_cannot_read_a_move_keeps_the_reminder_in_the_old_list() {
         hlc: Default::default(),
     };
     assert_eq!(ev.format(), 8);
-    assert_eq!(FORMAT_VERSION, 12);
+    assert_eq!(FORMAT_VERSION, 13);
     for e in [
         Event::ListColoured {
             colour: "#000000".into(),

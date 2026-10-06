@@ -583,6 +583,8 @@ pub struct State {
     pub occurrences: BTreeMap<String, Occurrence>,
     /// What each device (by id) calls itself.
     pub device_names: BTreeMap<String, String>,
+    /// Whether each device (by id) says it is portable.
+    pub device_portable: BTreeMap<String, bool>,
     /// Devices that signed in, in stream order.
     pub sign_ins: Vec<SignIn>,
     /// Devices (by id) that were removed from the account.
@@ -656,6 +658,7 @@ impl State {
                 | Event::ReminderDeleted { .. }
                 | Event::ReminderPurged { .. }
                 | Event::DeviceNamed { .. }
+                | Event::DevicePortable { .. }
                 | Event::DeviceSignedIn { .. }
                 | Event::DeviceRemoved { .. } => {}
             }
@@ -1135,6 +1138,10 @@ impl State {
             Event::DeviceNamed { name } => {
                 self.device_names
                     .insert(stored.device_id.clone(), name.clone());
+            }
+            Event::DevicePortable { portable } => {
+                self.device_portable
+                    .insert(stored.device_id.clone(), *portable);
             }
             Event::DeviceRemoved { device_id } => {
                 self.removed_devices.insert(device_id.clone());

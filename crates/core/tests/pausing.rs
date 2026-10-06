@@ -696,7 +696,7 @@ fn devices_pausing_and_resuming_a_list_out_of_touch_converge() {
 
 #[test]
 fn pausing_is_format_ten_and_what_came_before_is_not() {
-    assert_eq!(FORMAT_VERSION, 12);
+    assert_eq!(FORMAT_VERSION, 13);
     let pause = Pause {
         from: 1,
         until: None,

@@ -23,3 +23,6 @@ gtk = "0.18"
 # (no library passes one on to the window).
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+[dev-dependencies]
+tempfile = "3"

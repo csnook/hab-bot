@@ -306,7 +306,11 @@ impl Syncer {
             .map(|d| DeviceInfo {
                 id: d.id,
                 name: core.device_name(&d.id.to_string()).map(str::to_string),
-                portable: d.record.portable,
+                // What the device says in the personal settings counts; the
+                // vouched record only says what it was when it joined.
+                portable: core
+                    .device_portable(&d.id.to_string())
+                    .unwrap_or(d.record.portable),
                 last_synced: d.last_synced,
                 this_device: d.id == self.device_id,
             })

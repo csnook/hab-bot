@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::condition::{self, Condition};
 use crate::countdown::Countdown;
 use crate::delay::{Delay, DelaySpec};
+use crate::device::{DeviceLimits, DeviceQuiet, LoudestAlert};
 use crate::event::{
     Change, Correction, Event, Outgoing, Payload, Setting, StoredEvent, UndoOutcome,
     FORMAT_VERSION, UPDATE_NOTICE,
@@ -203,6 +204,12 @@ pub struct Filters {
 }
 
 const FILTERS: &str = "filters";
+/// The loudest alert style this device uses, as its snake_case name.
+const LOUDEST_STYLE: &str = "loudest_style";
+/// "1" when the loudest style caps Maximum too.
+const LOUDEST_CAPS_MAXIMUM: &str = "loudest_caps_maximum";
+/// "Quiet this device until…", as JSON ([`DeviceQuiet`]).
+const QUIET_DEVICE: &str = "quiet_device";
 
 /// "5 failed sign-ins to your account", from the server. The server has no
 /// device to author an event, so these are not in the list's stream: each
@@ -3084,6 +3091,120 @@ impl Core {
             },
         )?;
         Ok(())
+    }
+
+    /// The loudest alert style this device uses. An alarm, which caps
+    /// nothing, until it is set. Stays on this device (spec: Sync → What
+    /// syncs where).
+    pub fn loudest_alert(&self) -> LoudestAlert {
+        let style = self
+            .device_setting(LOUDEST_STYLE)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok())
+            .unwrap_or(AlertStyle::Alarm);
+        let caps_maximum = matches!(
+            self.device_setting(LOUDEST_CAPS_MAXIMUM)
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("1")
+        );
+        LoudestAlert {
+            style,
+            caps_maximum,
+        }
+    }
+
+    /// Caps the loudest style this device uses. Louder alerts are downgraded
+    /// on this device only; Maximum still gets through unless
+    /// `caps_maximum`. Nothing is written to any list: it never syncs.
+    pub fn set_loudest_alert(&self, loudest: LoudestAlert) -> Result<()> {
+        let name = match serde_json::to_value(loudest.style)? {
+            serde_json::Value::String(s) => s,
+            _ => return Ok(()),
+        };
+        self.set_device_setting(LOUDEST_STYLE, &name)?;
+        self.set_device_setting(
+            LOUDEST_CAPS_MAXIMUM,
+            if loudest.caps_maximum { "1" } else { "0" },
+        )
+    }
+
+    /// "Quiet this device until…" if it is in force at `now`.
+    pub fn device_quiet(&self, now: i64) -> Option<DeviceQuiet> {
+        self.device_setting(QUIET_DEVICE)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<DeviceQuiet>(&v).ok())
+            .filter(|q| q.until > now)
+    }
+
+    /// Both per-device limits, for the alerter.
+    pub fn device_limits(&self, now: i64) -> DeviceLimits {
+        DeviceLimits {
+            loudest: self.loudest_alert(),
+            quiet: self.device_quiet(now),
+        }
+    }
+
+    /// Quiets everything on this device until `until`: alerts here are silent
+    /// (Maximum left out unless `include_maximum`). It isn't a snooze: no
+    /// occurrence records it, it never syncs, and other devices still alert.
+    pub fn quiet_device(&self, until: i64, include_maximum: bool, now: i64) -> Result<()> {
+        if until <= now {
+            return Err(Error::SnoozeInThePast);
+        }
+        self.set_device_setting(
+            QUIET_DEVICE,
+            &serde_json::to_string(&DeviceQuiet {
+                until,
+                include_maximum,
+            })?,
+        )
+    }
+
+    /// [`quiet_device`](Self::quiet_device) for a length a menu offers.
+    pub fn quiet_device_for(
+        &self,
+        choice: SnoozeAllChoice,
+        include_maximum: bool,
+        now: i64,
+    ) -> Result<()> {
+        let until = match choice {
+            SnoozeAllChoice::Minutes(m) => now + m * 60,
+            SnoozeAllChoice::TomorrowMorning => {
+                schedule::tomorrow_at(&self.device_tz(), now, TOMORROW_MORNING_HOUR)
+                    .ok_or(Error::SnoozeInThePast)?
+            }
+        };
+        self.quiet_device(until, include_maximum, now)
+    }
+
+    /// Ends "Quiet this device" early: alerts here come at their current
+    /// level.
+    pub fn end_quiet_device(&self) -> Result<()> {
+        self.set_device_setting(QUIET_DEVICE, "")
+    }
+
+    /// Records that this device is `portable` or stationary, in the personal
+    /// list beside its name. Recorded only when it changes.
+    pub fn set_portable(&mut self, portable: bool, now: i64) -> Result<()> {
+        if self.state.device_portable.get(&self.device_id) == Some(&portable) {
+            return Ok(());
+        }
+        self.record(now, Event::DevicePortable { portable })?;
+        Ok(())
+    }
+
+    /// Whether `device_id` says it is portable, if it has said.
+    pub fn device_portable(&self, device_id: &str) -> Option<bool> {
+        self.state.device_portable.get(device_id).copied()
+    }
+
+    /// This device's name as recorded in the personal list.
+    pub fn own_device_name(&self) -> Option<&str> {
+        self.device_name(&self.device_id)
     }
 
     /// Records that this device has just signed in to the account as `name`,

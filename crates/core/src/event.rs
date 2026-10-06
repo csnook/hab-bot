@@ -13,7 +13,7 @@ use crate::sun::SunTrigger;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -197,6 +197,11 @@ pub enum Event {
     /// here, in the user's encrypted personal list, so the server never
     /// reads them. The first device says it when it joins.
     DeviceNamed { name: String },
+    /// The device that made this event is portable (goes where its user
+    /// goes, so its connections say where they are) or stationary. Of
+    /// several from one device, the latest counts. It lives in the user's
+    /// personal list beside the device's name. Format 13.
+    DevicePortable { portable: bool },
     /// The device that made this event has just signed in to the account,
     /// and is called `name`. The user's other devices show it as a notice.
     DeviceSignedIn { name: String },
@@ -306,6 +311,9 @@ impl Event {
     /// still format 1, so apps that read only that keep working with them.
     pub fn format(&self) -> u32 {
         match self {
+            // Whether a device is portable arrived in format 13: an older
+            // app keeps it without applying it.
+            Event::DevicePortable { .. } => 13,
             // Snooze all and quiet hours arrived in format 12: an older app
             // keeps them without applying them, so it goes on alerting
             // through them until it is updated.

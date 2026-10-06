@@ -933,6 +933,59 @@ mod tests {
         assert_eq!(platform.events().last().unwrap(), "window close o1");
     }
 
+    /// A High reminder, whose due style is an alarm, open in a real core.
+    fn high_core() -> (hab_core::Core, i64) {
+        let mut core = hab_core::Core::open_in_memory().unwrap();
+        let t0 = 1_790_000_000;
+        let id = core.create_reminder("Medicine", t0, t0 - 60).unwrap();
+        core.edit_reminder(
+            &id,
+            hab_core::EditReminder {
+                priority: Some(hab_core::Priority::High),
+                ..Default::default()
+            },
+            t0 - 60,
+        )
+        .unwrap();
+        core.tick(t0).unwrap();
+        (core, t0)
+    }
+
+    #[test]
+    fn a_loudest_style_cap_keeps_the_alarm_window_and_sound_from_starting() {
+        let (mut core, t0) = high_core();
+        core.set_loudest_alert(hab_core::LoudestAlert {
+            style: AlertStyle::Insistent,
+            caps_maximum: false,
+        })
+        .unwrap();
+        let (d, fake, platform) = delivery_with_platform(None);
+        let pass = hab_core::Alerter::new().pass(&mut core, t0, false).unwrap();
+        d.apply(&pass.commands);
+        let shown = fake.0.lock().unwrap().shown.clone();
+        assert_eq!(shown.len(), 1);
+        assert!(!platform.playing(), "no alarm sound");
+        assert!(platform.events().is_empty(), "no alarm window");
+    }
+
+    #[test]
+    fn quiet_this_device_ends_a_ringing_alarm_and_the_end_of_it_rings_again() {
+        let (mut core, t0) = high_core();
+        let (d, _, platform) = delivery_with_platform(None);
+        let mut alerter = hab_core::Alerter::new();
+        d.apply(&alerter.pass(&mut core, t0, false).unwrap().commands);
+        assert!(platform.playing());
+        core.quiet_device(t0 + 600, false, t0 + 1).unwrap();
+        let pass = alerter.pass(&mut core, t0 + 2, false).unwrap();
+        // The next look is when the quiet ends.
+        assert!(pass.next_at.is_some_and(|t| t <= t0 + 600));
+        d.apply(&pass.commands);
+        assert!(!platform.playing(), "the quiet device stops ringing");
+        let pass = alerter.pass(&mut core, t0 + 600, false).unwrap();
+        d.apply(&pass.commands);
+        assert!(platform.playing(), "and rings again when the quiet ends");
+    }
+
     #[test]
     fn clicking_an_alarm_raises_its_window_with_the_clicks_token() {
         let (d, _, platform) = delivery_with_platform(Some("fresh-token"));

@@ -16,6 +16,7 @@ import {
   type Inbox as InboxSections,
   onOpenOccurrence,
   onOpenSettings,
+  onOpenThisDevice,
   onOpenSnoozeAll,
   holding as loadHolding,
   quietHours as loadQuietHours,
@@ -53,8 +54,11 @@ export function App() {
   // The tray's Settings entry.
   useEffect(() => {
     const unlisten = onOpenSettings(() => setSettings((s) => s ?? "priorities"));
+    // The tray's "Quiet this device until… → More choices…".
+    const device = onOpenThisDevice(() => setSettings("device"));
     return () => {
       unlisten.then((f) => f());
+      device.then((f) => f());
     };
   }, []);
 

@@ -3,14 +3,23 @@ import {
   appVersion,
   autostartEnabled,
   clearHomeLocation,
+  endQuietDevice,
   homeLocation,
   lists as loadLists,
+  onStateChanged,
+  quietDevice,
   priorities,
   quietHours as loadQuietHours,
   setQuietHours,
   setAutostart,
+  setDeviceName,
+  setDevicePortable,
   setHomeLocation,
+  setLoudestAlert,
+  thisDevice,
+  type AlertStyle,
   type ListInfo,
+  type ThisDevice as ThisDeviceInfo,
   type Place,
   type QuietHours,
   type PriorityInfo,
@@ -18,10 +27,22 @@ import {
 } from "./api";
 import { Account } from "./Account";
 import { coordinateText, describePlace, parseCoordinates } from "./home";
+import {
+  LOUDEST_CHOICES,
+  checkDeviceName,
+  describeLoudest,
+  describeQuiet,
+  isCapped,
+  portableNote,
+  quietNow,
+} from "./device";
 import { listName } from "./lists";
 import { formatInterval, overdueStyles, styleName } from "./priorities";
 import {
   DAYS,
+  LENGTHS,
+  lengthEnd,
+  type Length,
   checkQuietHours,
   describeQuietHours,
   newQuietHours,
@@ -307,12 +328,41 @@ function QuietHoursEditor() {
   );
 }
 
-/** What belongs to this device alone: not synced, and not the account's. */
+/**
+ * What belongs to this device. Its name and whether it is portable are your
+ * own settings, so your other devices see them; the loudest alert and "Quiet
+ * this device until…" stay on this device and never sync.
+ */
 function ThisDevice() {
   const [on, setOn] = useState<boolean | null>(null);
+  const [device, setDevice] = useState<ThisDeviceInfo | null>(null);
+  const [name, setName] = useState("");
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+  const [choice, setChoice] = useState(1);
+  const [time, setTime] = useState("");
+  const [includeMax, setIncludeMax] = useState(false);
+
+  const load = (keepName = true) => {
+    setNow(Math.floor(Date.now() / 1000));
+    thisDevice()
+      .then((d) => {
+        setDevice(d);
+        if (!keepName) setName(d.name);
+      })
+      .catch(() => {});
+  };
   useEffect(() => {
     autostartEnabled().then(setOn).catch(() => setOn(false));
+    load(false);
+    // The quiet setting ends by itself: look again as time passes.
+    const unlisten = onStateChanged(() => load());
+    const timer = setInterval(() => load(), 30_000);
+    return () => {
+      unlisten.then((f) => f());
+      clearInterval(timer);
+    };
   }, []);
   const change = (enabled: boolean) => {
     setError("");
@@ -320,9 +370,145 @@ function ThisDevice() {
       .then(() => setOn(enabled))
       .catch((e) => setError(String(e)));
   };
+  const run = (what: string, f: Promise<void>) => {
+    setError("");
+    setSaved("");
+    f.then(() => {
+      setSaved(what);
+      load();
+    }).catch((e) => setError(String(e)));
+  };
+  const saveName = (e: Event) => {
+    e.preventDefault();
+    const why = checkDeviceName(name);
+    if (why) return setError(why);
+    run("Saved.", setDeviceName(name));
+  };
+
+  const OWN = LENGTHS.length;
+  const length: Length = choice === OWN ? { kind: "time", time } : LENGTHS[choice][1];
+  const until = lengthEnd(length, now);
+  const quiet = device ? quietNow(device, now) : null;
+
   return (
     <section aria-labelledby="device">
       <h2 id="device">This device</h2>
+      {device && (
+        <>
+          <form onSubmit={saveName} aria-label="Device name">
+            <label>
+              Name
+              <input value={name} onInput={(e) => setName(e.currentTarget.value)} />
+            </label>
+            <button type="submit" disabled={name.trim() === device.name}>Save name</button>
+            <p class="muted">Your other devices show this name. It is one of your own settings.</p>
+          </form>
+          <fieldset>
+            <legend>Does this device go where you go?</legend>
+            <label class="radio">
+              <input
+                type="radio"
+                name="device-portable"
+                checked={device.portable}
+                onChange={() => run("Saved.", setDevicePortable(true))}
+              />
+              Portable, like a laptop
+            </label>
+            <label class="radio">
+              <input
+                type="radio"
+                name="device-portable"
+                checked={!device.portable}
+                onChange={() => run("Saved.", setDevicePortable(false))}
+              />
+              Stationary, like a desktop
+            </label>
+            <p class="muted">
+              {portableNote(device.portable)} It starts as stationary unless this computer has a
+              battery, and it is one of your own settings.
+            </p>
+          </fieldset>
+          <fieldset>
+            <legend>Loudest alert</legend>
+            <label>
+              The loudest style this device uses
+              <select
+                value={device.loudest.style}
+                onChange={(e) =>
+                  run("Saved.", setLoudestAlert(e.currentTarget.value as AlertStyle, device.loudest.caps_maximum))
+                }
+              >
+                {LOUDEST_CHOICES.map(([style, label]) => (
+                  <option key={style} value={style}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={device.loudest.caps_maximum}
+                disabled={!isCapped(device.loudest)}
+                onChange={(e) => run("Saved.", setLoudestAlert(device.loudest.style, e.currentTarget.checked))}
+              />
+              Cap Maximum too
+            </label>
+            <p class="muted" role="status">
+              {describeLoudest(device.loudest)}. Louder alerts are downgraded on this device only,
+              such as no alarms on the desktop; your other devices alert as they are set. This
+              stays on this device.
+            </p>
+          </fieldset>
+          <fieldset>
+            <legend>Quiet this device until…</legend>
+            {quiet && (
+              <p class="chip" role="status">
+                {describeQuiet(quiet, now)} ·{" "}
+                <button type="button" onClick={() => run("", endQuietDevice())}>
+                  End now
+                </button>
+              </p>
+            )}
+            {LENGTHS.map(([label], i) => (
+              <label class="radio" key={label}>
+                <input type="radio" name="quiet-device-length" checked={choice === i} onChange={() => setChoice(i)} />
+                {label}
+              </label>
+            ))}
+            <label class="radio">
+              <input type="radio" name="quiet-device-length" checked={choice === OWN} onChange={() => setChoice(OWN)} />
+              A time
+              <input
+                type="time"
+                aria-label="Quiet this device until a time"
+                value={time}
+                onFocus={() => setChoice(OWN)}
+                onInput={(e) => {
+                  setTime(e.currentTarget.value);
+                  setChoice(OWN);
+                }}
+              />
+            </label>
+            <label class="check">
+              <input type="checkbox" checked={includeMax} onChange={(e) => setIncludeMax(e.currentTarget.checked)} />
+              Include maximum
+            </label>
+            <button
+              type="button"
+              disabled={until === null}
+              onClick={() => until !== null && run("", quietDevice(until, includeMax))}
+            >
+              Quiet this device
+            </button>
+            <p class="muted">
+              Everything on this device is silent until then; Maximum priority still alerts unless
+              you include it. It isn't a snooze: your other devices still alert, and reminders go
+              overdue on schedule. It stays on this device.
+            </p>
+          </fieldset>
+        </>
+      )}
       <label>
         <input
           type="checkbox"
@@ -336,6 +522,7 @@ function ThisDevice() {
         Starts Reminders in the tray with no window, so reminders fire after you sign in. Closing
         the window keeps it running there.
       </p>
+      {saved && <p role="status">{saved}</p>}
       {error && <p role="alert">{error}</p>}
     </section>
   );

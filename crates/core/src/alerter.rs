@@ -13,10 +13,19 @@
 //! - downgraded to silent while the notification server is inhibited (Do Not
 //!   Disturb), unless the priority breaks it; the occurrence then catches up
 //!   at its current level once the inhibition ends;
+//! - capped to the device's loudest style and made silent while the device
+//!   is quiet (`Core::device_limits`, spec: Alerts → Settings per device),
+//!   Maximum exempt from each unless included; this is the device's own
+//!   downgrade, never a snooze, and it never reaches another device;
 //! - nothing while the occurrence is snoozed or acknowledged; a snooze that
 //!   ends alerts again at the current level;
 //! - an alert at first sight, at each change of style, and, for insistent,
 //!   repeated every interval until the occurrence closes.
+//!
+//! The style recorded in the history is the one this device alerted in, after
+//! Do Not Disturb and the device's limits: it is the history of this device's
+//! alerts. The last-chance alert is limited the same way (a quiet device
+//! shows it silently), and the server check is made as for any alert.
 //!
 //! The first alert and each change of style are written to the history with
 //! the device that alerted; repeats and catching up at the same style are not.
@@ -280,6 +289,10 @@ impl Alerter {
         server: &dyn ServerCheck,
     ) -> Result<Pass> {
         let inbox = core.inbox(now);
+        // This device's own limits: its loudest style and "Quiet this
+        // device". They only change the style it alerts in; nothing is
+        // written as a snooze, and other devices alert in full.
+        let limits = core.device_limits(now);
         let open: Vec<_> = inbox.overdue.iter().chain(inbox.due.iter()).collect();
         let mut out = Pass::default();
         let soonest = |t: i64, out: &mut Pass| {
@@ -296,6 +309,11 @@ impl Alerter {
             if let Some(until) = p.pause.until {
                 soonest(until, &mut out);
             }
+        }
+
+        // "Quiet this device" ending is a moment to look again.
+        if let Some(t) = limits.next_change(now) {
+            soonest(t, &mut out);
         }
 
         // Quiet hours starting or ending change what is held: a moment to
@@ -370,6 +388,7 @@ impl Alerter {
                         } else {
                             style
                         };
+                        let style = limits.limit(d.priority, style, now);
                         if tracked.recorded != Some(style) {
                             core.record_alert(&d.occurrence_id, style, now)?;
                             tracked.recorded = Some(style);
@@ -410,6 +429,7 @@ impl Alerter {
             } else {
                 wanted
             };
+            let style = limits.limit(d.priority, style, now);
             let repeats = matches!(style, AlertStyle::Insistent | AlertStyle::Alarm);
             let repeat_at = tracked.last_at + settings.repeat_every();
             let alert = match tracked.standing {

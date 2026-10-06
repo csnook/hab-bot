@@ -705,7 +705,7 @@ fn old_apps_keep_these_events_without_applying_them() {
         .format(),
         12
     );
-    assert_eq!(FORMAT_VERSION, 12);
+    assert_eq!(FORMAT_VERSION, 13);
     // The wire form is stable and readable back.
     let json = serde_json::to_string(&d).unwrap();
     assert!(json.contains("\"type\":\"snooze_all_started\""), "{json}");
