@@ -35,6 +35,7 @@ export function Sidebar({
   onFilters,
   onChanged,
   onError,
+  quietLine,
 }: {
   lists: ListInfo[];
   filters: Filters;
@@ -42,6 +43,8 @@ export function Sidebar({
   /** A list was made, renamed, coloured or deleted. */
   onChanged: () => void;
   onError: (message: string) => void;
+  /** The footer's line about quiet hours. */
+  quietLine: string;
 }) {
   const [adding, setAdding] = useState(false);
   const [managing, setManaging] = useState<string | null>(null);
@@ -123,6 +126,9 @@ export function Sidebar({
           ))}
         </ul>
       </section>
+      <footer class="side-footer">
+        <p class="muted">{quietLine}</p>
+      </footer>
     </aside>
   );
 }

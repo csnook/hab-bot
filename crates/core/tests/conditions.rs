@@ -880,7 +880,7 @@ fn a_sun_event_alerts_like_any_other_occurrence() {
 
 #[test]
 fn sun_events_conditions_and_the_home_are_format_eleven_and_a_plain_reminder_is_not() {
-    assert_eq!(FORMAT_VERSION, 11);
+    assert_eq!(FORMAT_VERSION, 12);
     let plain = Event::RecurringReminderCreated {
         reminder_id: "r".into(),
         title: "t".into(),

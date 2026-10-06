@@ -26,6 +26,7 @@ const STATE_CHANGED: &str = "state-changed";
 /// occurrence's id.
 const OPEN_OCCURRENCE: &str = "open-occurrence";
 const OPEN_SETTINGS: &str = "open-settings";
+const OPEN_SNOOZE_ALL: &str = "open-snooze-all";
 
 mod alarm;
 mod autostart;
@@ -326,6 +327,70 @@ fn clear_home_location(app: tauri::State<'_, App>, handle: AppHandle) -> Result<
         .lock()
         .unwrap()
         .clear_home(now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// Snoozes all of the user's reminders, or one list's, until `until` (unix
+/// seconds). Maximum is left out unless `include_maximum`. A personal setting:
+/// it holds on all of the user's devices. Returns its id.
+#[tauri::command]
+fn snooze_all(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    list_id: Option<String>,
+    until: i64,
+    include_maximum: bool,
+) -> Result<String, String> {
+    let scope = list_id.map_or(hab_core::Scope::All, hab_core::Scope::List);
+    let id = app
+        .core
+        .lock()
+        .unwrap()
+        .snooze_all(scope, until, include_maximum, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(id)
+}
+
+/// Ends a snooze-all early: what it held back alerts at its current level.
+#[tauri::command]
+fn end_snooze_all(app: tauri::State<'_, App>, handle: AppHandle, id: String) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .end_snooze_all(&id, now())
+        .map_err(|e| e.to_string())?;
+    changed(&app, &handle);
+    Ok(())
+}
+
+/// What holds alerts now: snooze-alls not yet over, and quiet hours in
+/// progress.
+#[tauri::command]
+fn holding(app: tauri::State<'_, App>) -> Vec<hab_core::SnoozeAllView> {
+    app.core.lock().unwrap().holding(now())
+}
+
+/// The user's quiet hours.
+#[tauri::command]
+fn quiet_hours(app: tauri::State<'_, App>) -> Vec<hab_core::QuietHours> {
+    app.core.lock().unwrap().quiet_hours()
+}
+
+/// Sets the user's quiet hours (all the rules; none clears them). A personal
+/// setting: it holds on all of the user's devices.
+#[tauri::command]
+fn set_quiet_hours(
+    app: tauri::State<'_, App>,
+    handle: AppHandle,
+    rules: Vec<hab_core::QuietHours>,
+) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_quiet_hours(rules, now())
         .map_err(|e| e.to_string())?;
     changed(&app, &handle);
     Ok(())
@@ -873,7 +938,7 @@ fn tray_view(core: &Core, now: i64) -> (tray_model::Badge, String, Vec<tray_mode
         tray_model::tooltip(&inbox),
         // Nothing waits yet: conditions aren't built, so there are no
         // waiting reminders to list.
-        tray_model::menu(&inbox, &[], now, &clock),
+        tray_model::menu(&inbox, &[], &core.holding(now), now, &clock),
     )
 }
 
@@ -1490,11 +1555,14 @@ fn run_scheduler(
     // When an open occurrence next goes overdue: the window then has to move
     // it from Due to Overdue.
     let mut overdue_at: Option<i64> = None;
+    // What held alerts at the last pass: when a snooze-all ends, or quiet
+    // hours start or stop, the window's chip and footer follow.
+    let mut held: Vec<(Option<String>, i64)> = Vec::new();
     let mut alerter = Alerter::new();
     loop {
         // Asked of the notification server before taking the core's lock.
         let inhibited = delivery.inhibited();
-        let (fired, next, next_overdue, pass, tray_view) = {
+        let (fired, next, next_overdue, pass, tray_view, now_held) = {
             let mut core = core.lock().unwrap();
             // The user may have travelled: floating reminders follow.
             let _ = core.use_system_zone();
@@ -1512,16 +1580,26 @@ fn run_scheduler(
             // occurrence going overdue (the pass is scheduled for it) and
             // any action or synced change (which wake the scheduler).
             let view = tray.as_ref().map(|_| tray_view(&core, now()));
+            let now_held: Vec<(Option<String>, i64)> = core
+                .holding(now())
+                .into_iter()
+                .map(|h| (h.id, h.until))
+                .collect();
             (
                 fired,
                 core.next_fire_at(),
                 core.next_overdue_at(now()),
                 pass,
                 view,
+                now_held,
             )
         };
         if let (Some(tray), Some((badge, tooltip, menu))) = (&tray, tray_view) {
             tray.update(badge, tooltip, menu);
+        }
+        if now_held != held {
+            held = now_held;
+            let _ = app.emit(STATE_CHANGED, ());
         }
         let went_overdue = overdue_at.is_some_and(|t| t <= now());
         overdue_at = next_overdue;
@@ -1612,6 +1690,22 @@ fn later_launch(app: &AppHandle, args: &[String]) {
     }
 }
 
+/// After a tray action on the core: sync, and wake the scheduler so that
+/// alerts, the badge and the menu follow at once.
+fn finished_tray_action(
+    result: hab_core::Result<()>,
+    app: &AppHandle,
+    sync_wake: &Notify,
+    wake: &Sender<()>,
+) {
+    if let Err(e) = result {
+        eprintln!("tray action failed: {e}");
+    }
+    sync_wake.notify_one();
+    let _ = wake.send(());
+    let _ = app.emit(STATE_CHANGED, ());
+}
+
 /// What a click on the tray or its menu does.
 fn act_on_tray(
     action: TrayAction,
@@ -1634,6 +1728,22 @@ fn act_on_tray(
             let _ = app.emit(OPEN_SETTINGS, ());
             return;
         }
+        TrayAction::SnoozeAllDialog => {
+            show_window(app, token);
+            let _ = app.emit(OPEN_SNOOZE_ALL, ());
+            return;
+        }
+        TrayAction::SnoozeAll(choice) => {
+            let result =
+                core.lock()
+                    .unwrap()
+                    .snooze_all_for(hab_core::Scope::All, choice, false, now());
+            return finished_tray_action(result.map(|_| ()), app, sync_wake, wake);
+        }
+        TrayAction::EndSnoozeAll(id) => {
+            let result = core.lock().unwrap().end_snooze_all(&id, now());
+            return finished_tray_action(result, app, sync_wake, wake);
+        }
         TrayAction::Quit => return app.exit(0),
         TrayAction::Done(id) => UserAction::Done(id),
         TrayAction::Snooze(id) => UserAction::Snooze(id),
@@ -1650,6 +1760,11 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            snooze_all,
+            end_snooze_all,
+            holding,
+            quiet_hours,
+            set_quiet_hours,
             lists,
             create_list,
             rename_list,

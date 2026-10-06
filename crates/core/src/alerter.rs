@@ -46,6 +46,12 @@
 //! gentle, titled "Last chance: ..." with "Expires at 23:59". An occurrence
 //! snoozed ahead of time opens already snoozed, so it fires quietly.
 //!
+//! Snooze all and quiet hours: the core holds what they cover as a snooze
+//! until their end (`Core::inbox` puts it in `snoozed_until`), with no moment
+//! it was set, so the last-chance alert comes through them as it does through
+//! any snooze, even when they began after it was due (ADR 0013). The alerter
+//! looks again when quiet hours start or end.
+//!
 //! Pausing: an open occurrence of a paused reminder (or one in a paused list)
 //! is not alerted about, and an alert standing for it is closed on the next
 //! pass. Its alerts begin again when the pause ends (ADR 0011).
@@ -290,6 +296,17 @@ impl Alerter {
             if let Some(until) = p.pause.until {
                 soonest(until, &mut out);
             }
+        }
+
+        // Quiet hours starting or ending change what is held: a moment to
+        // look again. (A snooze-all's end is a snooze's: see below.)
+        if let Some(t) = core.next_quiet_boundary(now) {
+            soonest(t, &mut out);
+        }
+        // So is the end of a snooze-all, even with nothing held by it: the
+        // window's chip comes down then.
+        for h in core.holding(now) {
+            soonest(h.until, &mut out);
         }
 
         // Occurrences that closed or were paused: their notifications go.

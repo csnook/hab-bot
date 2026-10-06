@@ -43,7 +43,7 @@ pub enum Condition {
     Darkness,
 }
 
-fn weekday(code: &str) -> Option<Weekday> {
+pub(crate) fn weekday(code: &str) -> Option<Weekday> {
     Some(match code {
         "MO" => Weekday::Monday,
         "TU" => Weekday::Tuesday,
@@ -57,7 +57,7 @@ fn weekday(code: &str) -> Option<Weekday> {
 }
 
 /// Minutes after midnight of `HH:MM`.
-fn minutes_of(s: &str) -> Option<i32> {
+pub(crate) fn minutes_of(s: &str) -> Option<i32> {
     let (h, m) = s.split_once(':')?;
     if h.len() != 2 || m.len() != 2 {
         return None;

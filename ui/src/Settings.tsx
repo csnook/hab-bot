@@ -4,16 +4,31 @@ import {
   autostartEnabled,
   clearHomeLocation,
   homeLocation,
+  lists as loadLists,
   priorities,
+  quietHours as loadQuietHours,
+  setQuietHours,
   setAutostart,
   setHomeLocation,
+  type ListInfo,
   type Place,
+  type QuietHours,
   type PriorityInfo,
   type Setup,
 } from "./api";
 import { Account } from "./Account";
 import { coordinateText, describePlace, parseCoordinates } from "./home";
+import { listName } from "./lists";
 import { formatInterval, overdueStyles, styleName } from "./priorities";
+import {
+  DAYS,
+  checkQuietHours,
+  describeQuietHours,
+  newQuietHours,
+  scopeOfValue,
+  toggleDay,
+  valueOfScope,
+} from "./quiet";
 
 export type Section = "you" | "priorities" | "device" | "account" | "about";
 const SECTIONS: Array<[Section, string]> = [
@@ -73,9 +88,9 @@ export function Settings({
 }
 
 /**
- * What belongs to the user, on all their devices. In this release that is the
- * home location (their Home place): where sun events and daylight are worked
- * out. It syncs with the account, so a change here reaches every device.
+ * What belongs to the user, on all their devices: quiet hours, and the home
+ * location (their Home place), where sun events and daylight are worked out.
+ * Both sync with the account, so a change here reaches every device.
  */
 function You() {
   const [home, setHome] = useState<Place | null>(null);
@@ -124,6 +139,7 @@ function You() {
   return (
     <section aria-labelledby="you">
       <h2 id="you">You</h2>
+      <QuietHoursEditor />
       <form onSubmit={save} aria-label="Home location">
         <h3>Home location</h3>
         <p class="muted">
@@ -164,6 +180,130 @@ function You() {
         {error && <p role="alert">{error}</p>}
       </form>
     </section>
+  );
+}
+
+/**
+ * Quiet hours: a snooze-all that recurs, such as 22:00 to 07:00 on weeknights,
+ * for all reminders or one list, leaving out Maximum unless included. They
+ * are your own setting, so they hold on all your devices; the times are read
+ * in the time zone each device is in.
+ */
+function QuietHoursEditor() {
+  const [rules, setRules] = useState<QuietHours[]>([]);
+  const [lists, setLists] = useState<ListInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    loadQuietHours()
+      .then(setRules)
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+    loadLists().then(setLists).catch(() => {});
+  }, []);
+  const change = (i: number, patch: Partial<QuietHours>) => {
+    setSaved(false);
+    setRules(rules.map((r, n) => (n === i ? { ...r, ...patch } : r)));
+  };
+  const nameOf = (r: QuietHours) => {
+    const l = r.scope.kind === "list" ? lists.find((l) => l.id === (r.scope as { list_id: string }).list_id) : undefined;
+    return l ? listName(l) : null;
+  };
+  const save = (e: Event) => {
+    e.preventDefault();
+    setError("");
+    setSaved(false);
+    for (const r of rules) {
+      const why = checkQuietHours(r);
+      if (why) return setError(why);
+    }
+    setQuietHours(rules)
+      .then(() => setSaved(true))
+      .catch((err) => setError(String(err)));
+  };
+  return (
+    <form onSubmit={save} aria-label="Quiet hours">
+      <h3>Quiet hours</h3>
+      <p class="muted">
+        A snooze-all that repeats. While quiet hours last, what is open and anything that fires is
+        quiet on all your devices. Reminders still go overdue on schedule, and last-chance alerts
+        still come. Maximum priority is left out unless you include it.
+      </p>
+      {loaded && rules.length === 0 && <p>No quiet hours.</p>}
+      {rules.map((r, i) => (
+        <fieldset key={i} class="quiet-rule">
+          <legend>{describeQuietHours(r, nameOf(r))}</legend>
+          <div class="row">
+            <label>
+              From
+              <input type="time" value={r.from} onInput={(e) => change(i, { from: e.currentTarget.value })} />
+            </label>
+            <label>
+              To
+              <input type="time" value={r.to} onInput={(e) => change(i, { to: e.currentTarget.value })} />
+            </label>
+          </div>
+          <div class="row" role="group" aria-label="Nights it starts on">
+            {DAYS.map(([code, name]) => (
+              <label key={code} class="check">
+                <input
+                  type="checkbox"
+                  checked={r.days.includes(code)}
+                  onChange={(e) => change(i, { days: toggleDay(r.days, code, e.currentTarget.checked) })}
+                />
+                {name}
+              </label>
+            ))}
+          </div>
+          <label>
+            For
+            <select
+              value={valueOfScope(r.scope)}
+              onChange={(e) => change(i, { scope: scopeOfValue(e.currentTarget.value) })}
+            >
+              <option value="">All reminders</option>
+              {lists.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {listName(l)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={r.include_maximum}
+              onChange={(e) => change(i, { include_maximum: e.currentTarget.checked })}
+            />
+            Include maximum
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              setSaved(false);
+              setRules(rules.filter((_, n) => n !== i));
+            }}
+          >
+            Remove
+          </button>
+        </fieldset>
+      ))}
+      <div class="row">
+        <button
+          type="button"
+          onClick={() => {
+            setSaved(false);
+            setRules([...rules, newQuietHours()]);
+          }}
+        >
+          Add quiet hours
+        </button>
+        <button type="submit">Save quiet hours</button>
+      </div>
+      {saved && <p role="status">Saved.</p>}
+      {error && <p role="alert">{error}</p>}
+    </form>
   );
 }
 

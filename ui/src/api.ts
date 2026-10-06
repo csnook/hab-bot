@@ -718,3 +718,44 @@ export const pendingApproval = (link: string) =>
   invoke<PendingDevice | null>("pending_approval", { link });
 /** Existing device: the user confirmed the device pendingApproval showed. */
 export const approvePending = () => invoke<void>("approve_pending");
+
+/** What a snooze-all or quiet hours cover: everything, or one list. */
+export type Scope = { kind: "all" } | { kind: "list"; list_id: string };
+
+/** A snooze-all or a stretch of quiet hours holding alerts now. */
+export interface SnoozeAllView {
+  /** What ends a snooze-all early; quiet hours have none. */
+  id: string | null;
+  source: "snooze_all" | "quiet_hours";
+  scope: Scope;
+  /** The list's name for a list scope. */
+  list_name: string | null;
+  include_maximum: boolean;
+  from: number;
+  /** When alerts resume, in unix seconds. */
+  until: number;
+}
+
+/**
+ * Quiet hours: a snooze-all that recurs. `days` are the days a stretch starts
+ * on (`MO`..`SU`); `from` and `to` are times of day (`22:00`, `07:00`), and a
+ * `to` that is not later than `from` runs into the next morning.
+ */
+export interface QuietHours {
+  days: string[];
+  from: string;
+  to: string;
+  scope: Scope;
+  include_maximum: boolean;
+}
+
+/** Snoozes everything (or one list) until `until`, in unix seconds. Returns its id. */
+export const snoozeAll = (listId: string | null, until: number, includeMaximum: boolean) =>
+  invoke<string>("snooze_all", { listId, until, includeMaximum });
+export const endSnoozeAll = (id: string) => invoke<void>("end_snooze_all", { id });
+/** What holds alerts now: snooze-alls not yet over, and quiet hours in progress. */
+export const holding = () => invoke<SnoozeAllView[]>("holding");
+export const quietHours = () => invoke<QuietHours[]>("quiet_hours");
+export const setQuietHours = (rules: QuietHours[]) => invoke<void>("set_quiet_hours", { rules });
+/** The tray's Snooze all, More choices…: open the Snooze all dialog. */
+export const onOpenSnoozeAll = (f: () => void) => listen("open-snooze-all", f);

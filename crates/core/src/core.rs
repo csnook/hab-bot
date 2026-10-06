@@ -16,6 +16,7 @@ use crate::hlc::Hlc;
 use crate::pause::{Pause, PauseCause};
 use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
+use crate::quiet::{QuietHours, Scope, SnoozeAll, Source};
 use crate::schedule::{self, Parts, Schedule};
 use crate::state::{
     last_chance_at, ClosingKind, DueItem, HistoryWhat, Occurrence, Reminder, SnoozeView, State,
@@ -131,6 +132,30 @@ pub struct SnoozePicker {
     pub ahead: bool,
     /// What the choices count from: now, or an expected occurrence's time.
     pub from: i64,
+}
+
+/// How long a snooze-all made from a menu lasts (the dialog also takes any
+/// time of the user's choosing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnoozeAllChoice {
+    Minutes(i64),
+    /// 08:00 the next day.
+    TomorrowMorning,
+}
+
+/// A snooze-all or stretch of quiet hours holding now, for the toolbar chip
+/// and the sidebar footer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnoozeAllView {
+    /// What ends a snooze-all early; quiet hours have none.
+    pub id: Option<String>,
+    pub source: Source,
+    pub scope: Scope,
+    /// The list's name for a list scope; `None` for the personal list's too.
+    pub list_name: Option<String>,
+    pub include_maximum: bool,
+    pub from: i64,
+    pub until: i64,
 }
 
 /// The hour tomorrow morning means, in the device's time zone.
@@ -2035,13 +2060,38 @@ impl Core {
     /// on and how it actually ended (ran out, was replaced by another, or the
     /// occurrence closed first).
     pub fn snooze_history(&self, occurrence_id: &str, now: i64) -> Vec<SnoozeView> {
-        self.states()
-            .find(|(_, s)| {
-                let id = s.resolve(occurrence_id);
-                s.snoozes.iter().any(|z| z.occurrence_id == id)
-            })
-            .map(|(_, s)| s.snoozes_of(occurrence_id, now))
-            .unwrap_or_default()
+        let zone = self.device_tz();
+        let Some((_, s)) = self
+            .states()
+            .find(|(_, s)| s.occurrences.contains_key(s.resolve(occurrence_id)))
+        else {
+            return Vec::new();
+        };
+        let id = s.resolve(occurrence_id).to_string();
+        let mut out = s.snoozes_of(&id, now);
+        if let Some((o, r)) = s
+            .occurrences
+            .get(&id)
+            .and_then(|o| Some((o, s.reminders.get(&o.reminder_id)?)))
+        {
+            // What a snooze-all or quiet hours held of it, which the
+            // personal settings say (ADR 0013).
+            let closed_at = o.closing.as_ref().map(|c| c.at);
+            let mut held = self.state.holds_over(
+                &zone,
+                &r.list_id,
+                r.priority,
+                o.scheduled_at,
+                closed_at,
+                now,
+            );
+            for v in &mut held {
+                v.occurrence_id = id.clone();
+            }
+            out.extend(held);
+            out.sort_by_key(|v| (v.set_at, v.until));
+        }
+        out
     }
 
     /// The snooze menu for an open occurrence: the priority's current
@@ -2469,6 +2519,7 @@ impl Core {
                 }
             }
         }
+        self.hold_open(&mut open, now);
         paused.sort_by(|a, b| {
             (a.item.fired_at, &a.item.occurrence_id).cmp(&(b.item.fired_at, &b.item.occurrence_id))
         });
@@ -2494,6 +2545,186 @@ impl Core {
             later_today: self.expected(now, end - 1),
             earlier_today: earlier,
             paused,
+        }
+    }
+
+    // ---- Snooze all and quiet hours (ADR 0013) ----
+
+    /// Snoozes all of the user's reminders, or one list, until `until`: what
+    /// is open now and anything that fires before then is quiet, except
+    /// Maximum unless `include_maximum`. Occurrences still go overdue on
+    /// schedule and last-chance alerts still come. A snooze-all of the same
+    /// scope already holding is ended first. It is a personal setting, so it
+    /// holds on all of the user's devices. Returns its id.
+    pub fn snooze_all(
+        &mut self,
+        scope: Scope,
+        until: i64,
+        include_maximum: bool,
+        now: i64,
+    ) -> Result<String> {
+        if until <= now {
+            return Err(Error::SnoozeInThePast);
+        }
+        if let Scope::List(list_id) = &scope {
+            if self.state_of(list_id).is_none() {
+                return Err(Error::NoList(list_id.clone()));
+            }
+        }
+        let replaced: Vec<String> = self
+            .state
+            .snooze_alls
+            .iter()
+            .filter(|r| {
+                r.snooze.scope == scope && r.snooze.from <= now && now < r.effective_until()
+            })
+            .map(|r| r.snooze.id.clone())
+            .collect();
+        for id in replaced {
+            self.record(now, Event::SnoozeAllEnded { snooze_id: id })?;
+        }
+        let id = Uuid::new_v4().to_string();
+        self.record(
+            now,
+            Event::SnoozeAllStarted {
+                snooze: SnoozeAll {
+                    id: id.clone(),
+                    scope,
+                    include_maximum,
+                    from: now,
+                    until,
+                },
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// [`snooze_all`](Self::snooze_all) for a length a menu offers.
+    pub fn snooze_all_for(
+        &mut self,
+        scope: Scope,
+        choice: SnoozeAllChoice,
+        include_maximum: bool,
+        now: i64,
+    ) -> Result<String> {
+        let until = match choice {
+            SnoozeAllChoice::Minutes(m) => now + m * 60,
+            SnoozeAllChoice::TomorrowMorning => {
+                schedule::tomorrow_at(&self.device_tz(), now, TOMORROW_MORNING_HOUR)
+                    .ok_or(Error::SnoozeInThePast)?
+            }
+        };
+        self.snooze_all(scope, until, include_maximum, now)
+    }
+
+    /// Ends a snooze-all early: everything it held back alerts at its
+    /// current level. Ending one that has ended already does nothing.
+    pub fn end_snooze_all(&mut self, id: &str, now: i64) -> Result<()> {
+        let Some(r) = self.state.snooze_alls.iter().find(|r| r.snooze.id == id) else {
+            return Err(Error::NoSnoozeAll(id.to_string()));
+        };
+        if r.effective_until() <= now {
+            return Ok(());
+        }
+        self.record(
+            now,
+            Event::SnoozeAllEnded {
+                snooze_id: id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// What holds now: each snooze-all not yet over, then each stretch of
+    /// quiet hours in progress. A snooze-all and a stretch that are the same
+    /// thing to the user (the same scope) are both listed.
+    pub fn holding(&self, now: i64) -> Vec<SnoozeAllView> {
+        let zone = self.device_tz();
+        let list_name = |scope: &Scope| match scope {
+            Scope::List(l) => self.state_of(l).and_then(|s| s.list_name.clone()),
+            Scope::All => None,
+        };
+        let mut out: Vec<SnoozeAllView> = self
+            .state
+            .snooze_alls
+            .iter()
+            .filter(|r| r.snooze.from <= now && now < r.effective_until())
+            .map(|r| SnoozeAllView {
+                id: Some(r.snooze.id.clone()),
+                source: Source::SnoozeAll,
+                scope: r.snooze.scope.clone(),
+                list_name: list_name(&r.snooze.scope),
+                include_maximum: r.snooze.include_maximum,
+                from: r.snooze.from,
+                until: r.effective_until(),
+            })
+            .collect();
+        out.sort_by_key(|v| (v.from, v.until));
+        for q in &self.state.quiet_hours {
+            if let Some((from, until)) = q.stretch_at(&zone, now) {
+                out.push(SnoozeAllView {
+                    id: None,
+                    source: Source::QuietHours,
+                    scope: q.scope.clone(),
+                    list_name: list_name(&q.scope),
+                    include_maximum: q.include_maximum,
+                    from,
+                    until,
+                });
+            }
+        }
+        out
+    }
+
+    /// The user's quiet hours.
+    pub fn quiet_hours(&self) -> Vec<QuietHours> {
+        self.state.quiet_hours.clone()
+    }
+
+    /// Sets the user's quiet hours: all the rules at once, none to clear
+    /// them. A personal setting, so it holds on all of their devices; of two
+    /// changes made out of touch, the later clock wins. The times are read in
+    /// the zone each device is in.
+    pub fn set_quiet_hours(&mut self, rules: Vec<QuietHours>, now: i64) -> Result<()> {
+        for r in &rules {
+            r.validate().map_err(Error::BadQuietHours)?;
+        }
+        if rules == self.state.quiet_hours {
+            return Ok(());
+        }
+        let list_id = self.list_id.clone();
+        let hlc = self.next_hlc(&list_id, now);
+        self.record(now, Event::QuietHoursSet { hlc, rules })?;
+        Ok(())
+    }
+
+    /// The next moment after `now` that quiet hours start or end, so the
+    /// alerter looks again then.
+    pub fn next_quiet_boundary(&self, now: i64) -> Option<i64> {
+        let zone = self.device_tz();
+        self.state
+            .quiet_hours
+            .iter()
+            .filter_map(|q| q.boundary_after(&zone, now))
+            .min()
+    }
+
+    /// Quiets the open occurrences a snooze-all or quiet hours hold at `now`:
+    /// their snooze runs to the end of the hold (and so has no last-chance
+    /// alert of its own set at a moment, which is why `snoozed_at` is
+    /// `None`; see [`last_chance_at`]).
+    fn hold_open(&self, items: &mut [DueItem], now: i64) {
+        let zone = self.device_tz();
+        for d in items {
+            if let Some(h) = self
+                .state
+                .hold_on(&zone, &d.list_id, d.priority, d.scheduled_at, now)
+            {
+                if d.snoozed_until.is_none_or(|u| u < h.until) {
+                    d.snoozed_until = Some(h.until);
+                    d.snoozed_at = None;
+                }
+            }
         }
     }
 

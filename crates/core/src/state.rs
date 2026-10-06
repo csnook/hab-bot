@@ -11,6 +11,7 @@ use crate::hlc::Hlc;
 use crate::pause::{Pause, PauseCause};
 use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
+use crate::quiet::{self, Hold, QuietHours, SnoozeAll, Source};
 use crate::schedule::Schedule;
 use crate::sun::SunTrigger;
 
@@ -368,6 +369,8 @@ pub enum SnoozeEnd {
     Replaced,
     /// The occurrence was closed first.
     Closed,
+    /// The snooze-all it was part of was ended early.
+    Ended,
 }
 
 /// One snooze, in the history: what it was set to end on and, once it has,
@@ -397,6 +400,10 @@ pub struct SnoozeView {
     pub set_at: i64,
     pub until: i64,
     pub ahead: bool,
+    /// `None` for a snooze made on the occurrence; otherwise what held it: a
+    /// snooze-all or quiet hours, worked out from the settings
+    /// ([`State::holds_over`]).
+    pub via: Option<Source>,
     /// `None` while it still holds.
     pub ended_at: Option<i64>,
     pub ended: Option<SnoozeEnd>,
@@ -495,6 +502,35 @@ pub struct HomeVersion {
     pub recorded_at: i64,
 }
 
+/// A snooze-all, as the personal list's stream says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnoozeAllRecord {
+    pub event_id: String,
+    pub snooze: SnoozeAll,
+    pub by: String,
+    pub device_id: String,
+    pub recorded_at: i64,
+    /// When it was ended early, if it was.
+    pub ended: Option<i64>,
+}
+
+impl SnoozeAllRecord {
+    /// When it stops holding: its end, or the time it was ended if earlier.
+    pub fn effective_until(&self) -> i64 {
+        self.ended
+            .map_or(self.snooze.until, |e| e.min(self.snooze.until))
+    }
+}
+
+/// One setting of the user's quiet hours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuietHoursVersion {
+    pub event_id: String,
+    pub hlc: Hlc,
+    pub rules: Vec<QuietHours>,
+    pub recorded_at: i64,
+}
+
 /// The current state, built by applying a stream's events in order.
 #[derive(Debug, Default, Clone)]
 pub struct State {
@@ -527,6 +563,16 @@ pub struct State {
     /// events fire only for instants after it, so setting a home doesn't
     /// fire what has passed that day.
     pub home_since: Option<i64>,
+    /// Every snooze-all this stream holds, in stream order. Only the personal
+    /// list's count (ADR 0013).
+    pub snooze_alls: Vec<SnoozeAllRecord>,
+    /// When each snooze-all was ended, by id, including ones whose start
+    /// hasn't been seen.
+    snooze_all_ends: BTreeMap<String, i64>,
+    /// Every setting of the user's quiet hours this stream holds.
+    pub quiet_versions: Vec<QuietHoursVersion>,
+    /// The quiet hours now: the latest setting by clock.
+    pub quiet_hours: Vec<QuietHours>,
     /// The moves into this list, in stream order.
     pub moves_in: Vec<MoveIn>,
     /// Actions on an occurrence this list's stream doesn't have, such as one
@@ -603,6 +649,9 @@ impl State {
                 | Event::ListDeleted
                 | Event::ListPaused { .. }
                 | Event::HomeSet { .. }
+                | Event::SnoozeAllStarted { .. }
+                | Event::SnoozeAllEnded { .. }
+                | Event::QuietHoursSet { .. }
                 | Event::ReminderMovedIn { .. }
                 | Event::ReminderDeleted { .. }
                 | Event::ReminderPurged { .. }
@@ -984,6 +1033,66 @@ impl State {
                 self.home = latest.and_then(|h| h.place.clone());
                 self.home_since = latest.map(|h| h.recorded_at);
             }
+            Event::SnoozeAllStarted { snooze } => {
+                if self
+                    .snooze_alls
+                    .iter()
+                    .any(|r| r.event_id == stored.event_id)
+                {
+                    return;
+                }
+                self.snooze_alls.push(SnoozeAllRecord {
+                    event_id: stored.event_id.clone(),
+                    snooze: snooze.clone(),
+                    by: stored.author.clone(),
+                    device_id: stored.device_id.clone(),
+                    recorded_at: stored.recorded_at,
+                    ended: self.snooze_all_ends.get(&snooze.id).copied(),
+                });
+            }
+            Event::SnoozeAllEnded { snooze_id } => {
+                // Of several ends, the first counts.
+                let at = self
+                    .snooze_all_ends
+                    .entry(snooze_id.clone())
+                    .and_modify(|e| *e = (*e).min(stored.recorded_at))
+                    .or_insert(stored.recorded_at);
+                let at = *at;
+                for r in self
+                    .snooze_alls
+                    .iter_mut()
+                    .filter(|r| &r.snooze.id == snooze_id)
+                {
+                    r.ended = Some(at);
+                }
+            }
+            Event::QuietHoursSet { hlc, rules } => {
+                if self
+                    .quiet_versions
+                    .iter()
+                    .any(|q| q.event_id == stored.event_id)
+                {
+                    return;
+                }
+                let hlc = hlc.clamped(stored.recorded_at);
+                if hlc > self.latest_hlc {
+                    self.latest_hlc = hlc.clone();
+                }
+                self.quiet_versions.push(QuietHoursVersion {
+                    event_id: stored.event_id.clone(),
+                    hlc,
+                    rules: rules.clone(),
+                    recorded_at: stored.recorded_at,
+                });
+                // Of several, the latest clock counts, whatever order they
+                // arrive in.
+                self.quiet_hours = self
+                    .quiet_versions
+                    .iter()
+                    .max_by(|a, b| a.hlc.cmp(&b.hlc))
+                    .map(|q| q.rules.clone())
+                    .unwrap_or_default();
+            }
             Event::ReminderMovedIn {
                 reminder_id,
                 from_list_id,
@@ -1147,6 +1256,118 @@ impl State {
         });
     }
 
+    /// The snooze-all or quiet hours stretch holding an occurrence of
+    /// `priority` in `list_id`, scheduled at `scheduled_at` and open at `now`,
+    /// if one does. Of several, the one that ends last. Only the personal
+    /// list's state has any (ADR 0013).
+    pub fn hold_on(
+        &self,
+        zone: &TimeZone,
+        list_id: &str,
+        priority: Priority,
+        scheduled_at: i64,
+        now: i64,
+    ) -> Option<Hold> {
+        let all = self
+            .snooze_alls
+            .iter()
+            .filter(|r| r.snooze.reaches(list_id, priority))
+            .filter(|r| {
+                let until = r.effective_until();
+                r.snooze.from <= now && now < until && scheduled_at < until
+            })
+            .map(|r| Hold {
+                since: r.snooze.from,
+                until: r.effective_until(),
+                source: Source::SnoozeAll,
+            })
+            .max_by_key(|h| h.until);
+        let quiet = quiet::quiet_hold(&self.quiet_hours, zone, list_id, priority, now);
+        match (all, quiet) {
+            (Some(a), Some(q)) => Some(if q.until > a.until { q } else { a }),
+            (a, q) => a.or(q),
+        }
+    }
+
+    /// The snoozes the settings put on an occurrence, as the history shows
+    /// them: one for each snooze-all or stretch of quiet hours it was open
+    /// during, oldest first. `closed_at` is when it was closed, if it has
+    /// been. Quiet hours are read as they stand now.
+    pub fn holds_over(
+        &self,
+        zone: &TimeZone,
+        list_id: &str,
+        priority: Priority,
+        scheduled_at: i64,
+        closed_at: Option<i64>,
+        now: i64,
+    ) -> Vec<SnoozeView> {
+        let open_at = |from: i64| closed_at.is_none_or(|c| c > from);
+        // How a hold of `until` that began for this occurrence at `set_at`
+        // ended, if it has.
+        let ending = |until: i64, early: Option<i64>| -> (Option<i64>, Option<SnoozeEnd>) {
+            match (closed_at, early) {
+                (Some(c), _) if c < until && early.is_none_or(|e| c <= e) => {
+                    (Some(c), Some(SnoozeEnd::Closed))
+                }
+                (_, Some(e)) if e < until => (Some(e), Some(SnoozeEnd::Ended)),
+                _ if until <= now => (Some(until), Some(SnoozeEnd::Elapsed)),
+                _ => (None, None),
+            }
+        };
+        let mut out = Vec::new();
+        for r in self
+            .snooze_alls
+            .iter()
+            .filter(|r| r.snooze.reaches(list_id, priority))
+        {
+            let s = &r.snooze;
+            let until = r.effective_until();
+            if s.from > now || scheduled_at >= until || !open_at(s.from) {
+                continue;
+            }
+            let (ended_at, ended) = ending(s.until, r.ended);
+            out.push(SnoozeView {
+                occurrence_id: String::new(),
+                set_at: s.from.max(scheduled_at),
+                until: s.until,
+                ahead: false,
+                via: Some(Source::SnoozeAll),
+                ended_at,
+                ended,
+            });
+        }
+        let horizon = closed_at.unwrap_or(now).min(now);
+        let mut seen = BTreeSet::new();
+        for rule in self
+            .quiet_hours
+            .iter()
+            .filter(|q| q.reaches(list_id, priority))
+        {
+            for (start, end) in rule.stretches(zone, scheduled_at, horizon.saturating_add(1), 400) {
+                if start > now
+                    || scheduled_at >= end
+                    || !open_at(start)
+                    || !seen.insert((start, end))
+                {
+                    continue;
+                }
+                let (ended_at, ended) = ending(end, None);
+                out.push(SnoozeView {
+                    occurrence_id: String::new(),
+                    set_at: start.max(scheduled_at),
+                    until: end,
+                    ahead: false,
+                    via: Some(Source::QuietHours),
+                    ended_at,
+                    ended,
+                });
+            }
+        }
+        out.sort_by_key(|v| (v.set_at, v.until));
+        out
+    }
+
     /// Ends the snoozes holding on an occurrence that closed at `at`.
     fn end_snoozes(&mut self, occurrence_id: &str, at: i64) {
         for s in &mut self.snoozes {
@@ -1175,6 +1396,7 @@ impl State {
                     set_at: s.set_at,
                     until: s.until,
                     ahead: s.ahead,
+                    via: None,
                     ended_at,
                     ended,
                 }

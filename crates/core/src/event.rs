@@ -7,12 +7,13 @@ use crate::hlc::Hlc;
 use crate::pause::Pause;
 use crate::place::Place;
 use crate::priority::{AlertStyle, Priority};
+use crate::quiet::{QuietHours, SnoozeAll};
 use crate::schedule::Schedule;
 use crate::sun::SunTrigger;
 
 /// Version of the event format this app reads and writes. Events in a newer
 /// format are kept without being applied (ADR 0005).
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 /// What the window says while a list holds events from a newer app.
 pub const UPDATE_NOTICE: &str = "Update the app to see recent changes to this list";
@@ -163,6 +164,17 @@ pub enum Event {
     /// use. Only the personal list's counts. Of several, the one with the
     /// latest `hlc` counts (ADR 0012). Format 11.
     HomeSet { hlc: Hlc, place: Option<Place> },
+    /// The user snoozed all their reminders, or a list's, until a time: a
+    /// hold on what is open and what fires before it ends (ADR 0013). Only
+    /// the personal list's counts. Format 12.
+    SnoozeAllStarted { snooze: SnoozeAll },
+    /// The snooze-all `snooze_id` was ended early, as of when this event was
+    /// recorded: what it held back alerts at its current level. Format 12.
+    SnoozeAllEnded { snooze_id: String },
+    /// The user's quiet hours, all the rules as one value (empty is none),
+    /// in their personal settings. Only the personal list's counts. Of
+    /// several, the one with the latest `hlc` counts (ADR 0013). Format 12.
+    QuietHoursSet { hlc: Hlc, rules: Vec<QuietHours> },
     /// The reminder moved into this list from `from_list_id`, keeping its
     /// settings, occurrences and history, which this device finds in the list
     /// it came from. Of several moves of one reminder, the one with the latest
@@ -294,6 +306,12 @@ impl Event {
     /// still format 1, so apps that read only that keep working with them.
     pub fn format(&self) -> u32 {
         match self {
+            // Snooze all and quiet hours arrived in format 12: an older app
+            // keeps them without applying them, so it goes on alerting
+            // through them until it is updated.
+            Event::SnoozeAllStarted { .. }
+            | Event::SnoozeAllEnded { .. }
+            | Event::QuietHoursSet { .. } => 12,
             // Sun events, conditions and the home location arrived in format
             // 11: an older app keeps them without applying them, so it goes
             // on firing a reminder whose conditions it hasn't heard of.

@@ -16,6 +16,11 @@ import {
   type Inbox as InboxSections,
   onOpenOccurrence,
   onOpenSettings,
+  onOpenSnoozeAll,
+  holding as loadHolding,
+  quietHours as loadQuietHours,
+  type SnoozeAllView,
+  type QuietHours,
   onStateChanged,
   skipOccurrence,
   snapshot,
@@ -31,6 +36,8 @@ import { SnoozeMenu } from "./SnoozeMenu";
 import { OccurrencePanel, type PanelTarget } from "./OccurrencePanel";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
+import { SnoozeAllChips, SnoozeAllDialog } from "./SnoozeAll";
+import { quietLine } from "./quiet";
 import { earlierLabel } from "./closing";
 import { untilText } from "./pause";
 import { filterInbox, filterSnapshot, hiddenCount, isFiltering, noFilters, pruned } from "./filters";
@@ -178,8 +185,22 @@ function Inbox() {
   const edit = (reminderId: string) => setEditing({ reminderId });
   // The occurrence details panel: open, expected or closed.
   const [panel, setPanel] = useState<PanelTarget | null>(null);
+  // Snooze all: what is holding now, the quiet hours, and the dialog.
+  const [holding, setHolding] = useState<SnoozeAllView[]>([]);
+  const [quiet, setQuiet] = useState<QuietHours[]>([]);
+  const [snoozingAll, setSnoozingAll] = useState(false);
+
+  // The tray's Snooze all, More choices….
+  useEffect(() => {
+    const unlisten = onOpenSnoozeAll(() => setSnoozingAll(true));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   const refresh = () => {
+    loadHolding().then(setHolding).catch(() => {});
+    loadQuietHours().then(setQuiet).catch(() => {});
     snapshot().then(setSnap).catch((e) => setError(String(e)));
     inbox().then(setSections).catch((e) => setError(String(e)));
     loadLists().then(setLists).catch((e) => setError(String(e)));
@@ -237,12 +258,17 @@ function Inbox() {
       onFilters={changeFilters}
       onChanged={refresh}
       onError={setError}
+      quietLine={quietLine(quiet, holding, Math.floor(Date.now() / 1000))}
     />
     <main>
       <h1>Inbox</h1>
+      <button type="button" onClick={() => setSnoozingAll(true)}>
+        Snooze all…
+      </button>
       <button type="button" onClick={() => setEditing({ reminderId: null })}>
         New reminder
       </button>
+      <SnoozeAllChips holding={holding} onError={setError} />
       {error && <p class="error" role="alert">{error}</p>}
       {isFiltering(filters) && (
         <p class="muted" role="status">
@@ -414,6 +440,9 @@ function Inbox() {
           onClose={() => setPanel(null)}
           onEdit={edit}
         />
+      )}
+      {snoozingAll && (
+        <SnoozeAllDialog lists={lists} onClose={() => setSnoozingAll(false)} onError={setError} />
       )}
       {editing && (
         <ReminderEditor reminderId={editing.reminderId} onClose={() => setEditing(null)} />

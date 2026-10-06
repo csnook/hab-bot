@@ -213,6 +213,9 @@ _Avoid_: Alarm, notification (each is one kind of alert)
 To quiet an occurrence's alerts for yourself until a chosen time or trigger. The occurrence stays open and still goes overdue on schedule. An expected occurrence can be snoozed ahead of time. Snoozing all of a user's reminders, or one reminder list, at once also covers anything that fires before the snooze ends.
 _Avoid_: Postpone, delay
 
+**Snooze all**:
+A time-boxed hold on all of a user's reminders, or one reminder list, that quiets what is open and anything that fires before it ends. Maximum priority is left out unless included. It can be ended early, and then everything held back alerts at its current level. It is a personal setting, so it holds on all the user's devices; each affected occurrence's history shows it as a snooze made by the snooze-all.
+
 **Acknowledge**:
 To silence an occurrence's current alert for yourself, on all your devices, without closing it. The occurrence stays open and can still become overdue or missed.
 _Avoid_: Dismiss

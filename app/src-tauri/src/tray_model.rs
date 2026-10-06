@@ -30,9 +30,18 @@
 //!   so the badge, the tooltip and the menu see nothing, and the Waiting
 //!   section stays empty until conditions that can't be predicted (places,
 //!   weather) exist.
+//! - **Snooze all doesn't lower the badge.** A held occurrence is open and
+//!   still counts, exactly as a single snoozed one does (see above); the
+//!   badge says how many are open, and the toolbar chip and the menu's
+//!   "End snooze all" say that they are being held.
+//! - **The menu's Snooze all offers lengths, not everything the dialog
+//!   does.** Everything, Maximum left out, for 30 minutes, an hour, two hours
+//!   or until tomorrow morning; "More choices…" opens the dialog for one list,
+//!   a time of day or "include maximum". While one holds, each is listed to
+//!   end early. Quiet hours aren't in the menu: they are set in Settings.
 //! - **Overdue means `overdue_at <= now`,** the Inbox's own test.
 
-use hab_core::{DueItem, Inbox, Priority};
+use hab_core::{DueItem, Inbox, Priority, Scope, SnoozeAllChoice, SnoozeAllView, Source};
 
 /// The badge's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +115,12 @@ pub enum TrayAction {
     /// The third button. Today every occurrence is personal, so it is Skip;
     /// Claim and Release come with sharing.
     Skip(String),
+    /// Snooze everything, Maximum left out, for a length.
+    SnoozeAll(SnoozeAllChoice),
+    /// End the snooze-all with this id early.
+    EndSnoozeAll(String),
+    /// Open the window at the Snooze all dialog.
+    SnoozeAllDialog,
     Settings,
     Quit,
 }
@@ -169,18 +184,60 @@ fn row(item: &DueItem, overdue: bool, now: i64, clock: &dyn Fn(i64) -> String) -
     }
 }
 
+/// The Snooze all submenu: the ones holding now to end early, then the
+/// lengths, then the dialog.
+fn snooze_all_menu(holding: &[SnoozeAllView], clock: &dyn Fn(i64) -> String) -> Entry {
+    let mut children = Vec::new();
+    for h in holding.iter().filter(|h| h.source == Source::SnoozeAll) {
+        let Some(id) = &h.id else { continue };
+        let what = match (&h.scope, &h.list_name) {
+            (Scope::All, _) => "All".to_string(),
+            (Scope::List(_), Some(name)) => shorten(name),
+            (Scope::List(_), None) => "List".to_string(),
+        };
+        children.push(Entry::Item {
+            label: format!("End: {what} snoozed until {}", clock(h.until)),
+            action: TrayAction::EndSnoozeAll(id.clone()),
+        });
+    }
+    if !children.is_empty() {
+        children.push(Entry::Separator);
+    }
+    for (label, choice) in [
+        ("For 30 minutes", SnoozeAllChoice::Minutes(30)),
+        ("For 1 hour", SnoozeAllChoice::Minutes(60)),
+        ("For 2 hours", SnoozeAllChoice::Minutes(120)),
+        ("Until tomorrow morning", SnoozeAllChoice::TomorrowMorning),
+    ] {
+        children.push(Entry::Item {
+            label: label.into(),
+            action: TrayAction::SnoozeAll(choice),
+        });
+    }
+    children.push(Entry::Separator);
+    children.push(Entry::Item {
+        label: "More choices…".into(),
+        action: TrayAction::SnoozeAllDialog,
+    });
+    Entry::Submenu {
+        label: "Snooze all".into(),
+        children,
+    }
+}
+
 /// The menu: Open Reminders; each open occurrence as a submenu with Done,
 /// Snooze and its third button (overdue first, highest priority first, then
-/// the Inbox's Due order); a Waiting section; Settings; Quit.
+/// the Inbox's Due order); a Waiting section; Snooze all; Settings; Quit.
 ///
 /// Every open occurrence is listed, Minimum included (only the badge skips
 /// those). `clock` writes a time of day for "snoozed until".
 ///
-/// Snooze all and Quiet this device are added by their own tickets, between
-/// Waiting and Settings (see the spec's menu order).
+/// Quiet this device is added by its own ticket, after Snooze all (see the
+/// spec's menu order).
 pub fn menu(
     inbox: &Inbox,
     waiting: &[WaitingItem],
+    holding: &[SnoozeAllView],
     now: i64,
     clock: &dyn Fn(i64) -> String,
 ) -> Vec<Entry> {
@@ -216,6 +273,7 @@ pub fn menu(
         }
     }
     entries.push(Entry::Separator);
+    entries.push(snooze_all_menu(holding, clock));
     entries.push(Entry::Item {
         label: "Settings".into(),
         action: TrayAction::Settings,
@@ -265,6 +323,13 @@ mod tests {
         format!("t{t}")
     }
 
+    /// The submenus that are an occurrence's row (not Snooze all).
+    fn rows(m: &[Entry]) -> Vec<&Entry> {
+        m.iter()
+            .filter(|e| matches!(e, Entry::Submenu { label, .. } if label != "Snooze all"))
+            .collect()
+    }
+
     #[test]
     fn a_paused_occurrence_is_not_counted_or_listed() {
         let mut i = inbox(vec![], vec![item("a", Priority::Low)]);
@@ -280,12 +345,8 @@ mod tests {
         let b = badge(&i);
         assert_eq!((b.count, b.tone), (1, Tone::Blue));
         assert_eq!(tooltip(&i), "1 due");
-        let m = menu(&i, &[], 10, &clock);
-        let rows = m
-            .iter()
-            .filter(|e| matches!(e, Entry::Submenu { .. }))
-            .count();
-        assert_eq!(rows, 1);
+        let m = menu(&i, &[], &[], 10, &clock);
+        assert_eq!(rows(&m).len(), 1);
         assert!(!m.contains(&Entry::Heading("Waiting".into())));
     }
 
@@ -320,8 +381,8 @@ mod tests {
             let b = badge(&i);
             assert_eq!((b.count, b.tone), (0, Tone::Blue));
             assert_eq!(tooltip(&i), "Nothing due");
-            let m = menu(&i, &[], t, &clock);
-            assert!(!m.iter().any(|e| matches!(e, Entry::Submenu { .. })));
+            let m = menu(&i, &[], &[], t, &clock);
+            assert!(rows(&m).is_empty());
             assert!(!m.contains(&Entry::Heading("Waiting".into())));
         }
         // Monday it fires and counts like any occurrence.
@@ -382,7 +443,7 @@ mod tests {
             vec![item("o", Priority::High)],
             vec![item("d", Priority::Minimum)],
         );
-        let m = menu(&i, &[], 10, &clock);
+        let m = menu(&i, &[], &[], 10, &clock);
         assert_eq!(
             m.first(),
             Some(&Entry::Item {
@@ -390,10 +451,7 @@ mod tests {
                 action: TrayAction::OpenWindow
             })
         );
-        let rows: Vec<&Entry> = m
-            .iter()
-            .filter(|e| matches!(e, Entry::Submenu { .. }))
-            .collect();
+        let rows = rows(&m);
         assert_eq!(rows.len(), 2, "Minimum is listed too");
         let Entry::Submenu { label, children } = rows[0] else {
             unreachable!()
@@ -416,8 +474,9 @@ mod tests {
         );
         let n = m.len();
         assert_eq!(
-            &m[n - 2..],
+            &m[n - 3..],
             &[
+                m[n - 3].clone(),
                 Entry::Item {
                     label: "Settings".into(),
                     action: TrayAction::Settings
@@ -438,7 +497,7 @@ mod tests {
             reminder_id: "r1".into(),
             title: "Water the plants".into(),
         }];
-        let m = menu(&inbox(vec![], vec![]), &w, 0, &clock);
+        let m = menu(&inbox(vec![], vec![]), &w, &[], 0, &clock);
         let at = m
             .iter()
             .position(|e| *e == Entry::Heading("Waiting".into()))
@@ -469,7 +528,7 @@ mod tests {
         let mut s = item("a", Priority::Medium);
         s.snoozed_until = Some(500);
         s.title = "x".repeat(100);
-        let m = menu(&inbox(vec![], vec![s]), &[], 10, &clock);
+        let m = menu(&inbox(vec![], vec![s]), &[], &[], 10, &clock);
         let Entry::Submenu { label, .. } = &m[2] else {
             panic!("{m:?}")
         };
@@ -482,15 +541,152 @@ mod tests {
         let many: Vec<DueItem> = (0..15)
             .map(|n| item(&n.to_string(), Priority::Low))
             .collect();
-        let m = menu(&inbox(vec![], many), &[], 0, &clock);
-        let rows = m
-            .iter()
-            .filter(|e| matches!(e, Entry::Submenu { .. }))
-            .count();
-        assert_eq!(rows, MAX_ROWS);
+        let m = menu(&inbox(vec![], many), &[], &[], 0, &clock);
+        assert_eq!(rows(&m).len(), MAX_ROWS);
         assert!(m.contains(&Entry::Item {
             label: "3 more…".into(),
             action: TrayAction::OpenWindow
         }));
+    }
+
+    fn holding_view(
+        id: Option<&str>,
+        source: Source,
+        scope: Scope,
+        name: Option<&str>,
+    ) -> SnoozeAllView {
+        SnoozeAllView {
+            id: id.map(String::from),
+            source,
+            scope,
+            list_name: name.map(String::from),
+            include_maximum: false,
+            from: 0,
+            until: 900,
+        }
+    }
+
+    fn snooze_all_children(m: &[Entry]) -> Vec<Entry> {
+        m.iter()
+            .find_map(|e| match e {
+                Entry::Submenu { label, children } if label == "Snooze all" => {
+                    Some(children.clone())
+                }
+                _ => None,
+            })
+            .expect("a Snooze all submenu")
+    }
+
+    #[test]
+    fn snooze_all_sits_between_waiting_and_settings_with_the_lengths_and_the_dialog() {
+        let w = [WaitingItem {
+            reminder_id: "r1".into(),
+            title: "Water".into(),
+        }];
+        let m = menu(&inbox(vec![], vec![]), &w, &[], 0, &clock);
+        let at = |f: &dyn Fn(&Entry) -> bool| m.iter().position(f).unwrap();
+        let waiting = at(&|e| *e == Entry::Heading("Waiting".into()));
+        let snooze = at(&|e| matches!(e, Entry::Submenu { label, .. } if label == "Snooze all"));
+        let settings = at(&|e| {
+            matches!(
+                e,
+                Entry::Item {
+                    action: TrayAction::Settings,
+                    ..
+                }
+            )
+        });
+        assert!(waiting < snooze && snooze + 1 == settings);
+        let actions: Vec<TrayAction> = snooze_all_children(&m)
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item { action, .. } => Some(action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                TrayAction::SnoozeAll(SnoozeAllChoice::Minutes(30)),
+                TrayAction::SnoozeAll(SnoozeAllChoice::Minutes(60)),
+                TrayAction::SnoozeAll(SnoozeAllChoice::Minutes(120)),
+                TrayAction::SnoozeAll(SnoozeAllChoice::TomorrowMorning),
+                TrayAction::SnoozeAllDialog,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_snooze_all_holding_is_listed_to_end_early_but_quiet_hours_are_not() {
+        let holding = [
+            holding_view(Some("s1"), Source::SnoozeAll, Scope::All, None),
+            holding_view(
+                Some("s2"),
+                Source::SnoozeAll,
+                Scope::List("l".into()),
+                Some("Household"),
+            ),
+            holding_view(None, Source::QuietHours, Scope::All, None),
+        ];
+        let m = menu(&inbox(vec![], vec![]), &[], &holding, 0, &clock);
+        let children = snooze_all_children(&m);
+        assert_eq!(
+            children[..3],
+            [
+                Entry::Item {
+                    label: "End: All snoozed until t900".into(),
+                    action: TrayAction::EndSnoozeAll("s1".into())
+                },
+                Entry::Item {
+                    label: "End: Household snoozed until t900".into(),
+                    action: TrayAction::EndSnoozeAll("s2".into())
+                },
+                Entry::Separator,
+            ]
+        );
+        let ends = children
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Entry::Item {
+                        action: TrayAction::EndSnoozeAll(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(ends, 2);
+    }
+
+    #[test]
+    fn snooze_all_leaves_the_badge_and_tooltip_counting_what_is_held() {
+        let mut held = item("a", Priority::High);
+        held.snoozed_until = Some(1_000);
+        let i = inbox(vec![held], vec![]);
+        assert_eq!(badge(&i).count, 1);
+        assert_eq!(tooltip(&i), "1 overdue");
+    }
+
+    #[test]
+    fn a_snooze_all_in_the_core_shows_in_the_menu_and_on_the_row() {
+        use hab_core::Core;
+        let t = 1_790_000_000;
+        let mut c = Core::open_in_memory().unwrap();
+        c.set_device_zone("UTC").unwrap();
+        let id = c.create_reminder("Bins", t, t - 100).unwrap();
+        c.tick(t).unwrap();
+        let sa = c.snooze_all(Scope::All, t + 3_600, false, t + 1).unwrap();
+        let i = c.inbox(t + 2);
+        let m = menu(&i, &[], &c.holding(t + 2), t + 2, &clock);
+        let Entry::Submenu { label, .. } = &m[2] else {
+            panic!("{m:?}")
+        };
+        assert!(label.contains("snoozed until"), "{label}");
+        assert!(snooze_all_children(&m).contains(&Entry::Item {
+            label: format!("End: All snoozed until t{}", t + 3_600),
+            action: TrayAction::EndSnoozeAll(sa)
+        }));
+        let _ = id;
     }
 }
