@@ -12,7 +12,13 @@ import {
   type Filters,
   type ListInfo,
   dismissNotice,
+  agenda as loadAgenda,
   inbox,
+  setView as saveView,
+  setViewTipSeen,
+  view as loadView,
+  viewTipSeen,
+  type Agenda as AgendaData,
   type Inbox as InboxSections,
   onOpenOccurrence,
   onOpenSettings,
@@ -37,6 +43,8 @@ import { SnoozeMenu } from "./SnoozeMenu";
 import { OccurrencePanel, type PanelTarget } from "./OccurrencePanel";
 import { FirstStart } from "./FirstStart";
 import { Sidebar } from "./Sidebar";
+import { Agenda } from "./Agenda";
+import { openingView, tipText, viewTitle, VIEWS, type View } from "./views";
 import { SnoozeAllChips, SnoozeAllDialog } from "./SnoozeAll";
 import { quietLine } from "./quiet";
 import { earlierLabel } from "./closing";
@@ -50,6 +58,11 @@ export function App() {
   const [settings, setSettings] = useState<Section | null>(null);
   // The device a "Not you? Remove it" notice was about, until it is dealt with.
   const [removing, setRemoving] = useState<string | null>(null);
+  // The first-run tip about the view switcher: shown until "Got it"; Help shows it again.
+  const [tip, setTip] = useState(false);
+  useEffect(() => {
+    viewTipSeen().then((seen) => setTip(!seen)).catch(() => {});
+  }, []);
 
   // The tray's Settings entry.
   useEffect(() => {
@@ -70,8 +83,18 @@ export function App() {
   if (setup === null) return <FirstStart onDone={setSetup} />;
   return (
     <>
-      <nav class="tabs" aria-label="Views">
-        <button aria-pressed="true">Inbox</button>
+      <nav class="tabs" aria-label="Help and settings">
+        <button
+          type="button"
+          aria-label="Help"
+          title="Help"
+          onClick={() => {
+            setTip(true);
+            setViewTipSeen(false).catch(() => {});
+          }}
+        >
+          ?
+        </button>
         <button aria-label="Settings" title="Settings" onClick={() => setSettings("priorities")}>
           ⚙
         </button>
@@ -83,7 +106,13 @@ export function App() {
           }}
         />}
       {setup.mode === "joined" && <ReconciliationBanners />}
-      <Inbox />
+      <Inbox
+        tip={tip}
+        onGotIt={() => {
+          setTip(false);
+          setViewTipSeen(true).catch(() => {});
+        }}
+      />
       {settings && (
         <Settings
           setup={setup}
@@ -160,7 +189,25 @@ function ReconciliationBanners() {
   );
 }
 
-function Inbox() {
+/** The window: the toolbar with its view switcher, the sidebar, and the current view. */
+function Inbox({ tip, onGotIt }: { tip: boolean; onGotIt: () => void }) {
+  // The view the window opens on is the last one used; Inbox the very first time.
+  const [view, setViewState] = useState<View>("inbox");
+  useEffect(() => {
+    loadView().then((v) => setViewState(openingView(v))).catch(() => {});
+  }, []);
+  const switchTo = (v: View) => {
+    setViewState(v);
+    saveView(v).catch((e) => setError(String(e)));
+  };
+  const [agendaData, setAgendaData] = useState<AgendaData>({
+    overdue: [],
+    due: [],
+    paused: [],
+    days: [],
+    expected: [],
+    closed: [],
+  });
   const [snap, setSnap] = useState<Snapshot>({
     due: [],
     upcoming: [],
@@ -206,6 +253,7 @@ function Inbox() {
     loadHolding().then(setHolding).catch(() => {});
     loadQuietHours().then(setQuiet).catch(() => {});
     snapshot().then(setSnap).catch((e) => setError(String(e)));
+    loadAgenda().then(setAgendaData).catch((e) => setError(String(e)));
     inbox().then(setSections).catch((e) => setError(String(e)));
     loadLists().then(setLists).catch((e) => setError(String(e)));
     deletedReminders().then(setDeleted).catch(() => {});
@@ -265,7 +313,26 @@ function Inbox() {
       quietLine={quietLine(quiet, holding, Math.floor(Date.now() / 1000))}
     />
     <main>
-      <h1>Inbox</h1>
+      <div class="toolbar">
+        <nav class="views" aria-label="Views">
+          {VIEWS.map((v) => (
+            <button
+              type="button"
+              key={v.id}
+              aria-pressed={view === v.id}
+              onClick={() => switchTo(v.id)}
+            >
+              {v.label}
+            </button>
+          ))}
+        </nav>
+        <h1>{viewTitle(view)}</h1>
+      </div>
+      {tip && (
+        <p class="notice tip" role="status">
+          {tipText()} <button type="button" onClick={onGotIt}>Got it</button>
+        </p>
+      )}
       <button type="button" onClick={() => setSnoozingAll(true)}>
         Snooze all…
       </button>
@@ -283,6 +350,18 @@ function Inbox() {
       )}
       {snap.update_notice && <p class="notice" role="status">{snap.update_notice}</p>}
 
+      {view === "agenda" && (
+        <Agenda
+          data={agendaData}
+          filters={filters}
+          dot={dot}
+          onDetails={setPanel}
+          onEdit={edit}
+          onError={setError}
+        />
+      )}
+      {view === "inbox" && (
+        <>
       <section aria-labelledby="overdue">
         <h2 id="overdue">Overdue</h2>
         {shown.overdue.length === 0 && <p class="empty">Nothing overdue.</p>}
@@ -436,6 +515,9 @@ function Inbox() {
             ))}
           </ul>
         </details>
+      )}
+
+        </>
       )}
 
       {panel && (

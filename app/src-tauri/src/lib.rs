@@ -542,6 +542,47 @@ fn inbox(app: tauri::State<'_, App>) -> hab_core::Inbox {
     core.inbox(now())
 }
 
+/// The Agenda: open occurrences, and what is expected or closed from
+/// yesterday to the end of tomorrow. Unfiltered, like the Inbox.
+#[tauri::command]
+fn agenda(app: tauri::State<'_, App>) -> hab_core::Agenda {
+    let core = app.core.lock().unwrap();
+    let _ = core.use_system_zone();
+    core.agenda(now())
+}
+
+/// The view the window was last left on (Inbox the first time).
+#[tauri::command]
+fn view(app: tauri::State<'_, App>) -> String {
+    app.core.lock().unwrap().view()
+}
+
+/// Remembers the view on this device.
+#[tauri::command]
+fn set_view(app: tauri::State<'_, App>, view: String) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_view(&view)
+        .map_err(|e| e.to_string())
+}
+
+/// Whether the first-run tip about the view switcher was dismissed.
+#[tauri::command]
+fn view_tip_seen(app: tauri::State<'_, App>) -> bool {
+    app.core.lock().unwrap().view_tip_seen()
+}
+
+/// "Got it" (`true`) dismisses the tip; Help (`false`) shows it again.
+#[tauri::command]
+fn set_view_tip_seen(app: tauri::State<'_, App>, seen: bool) -> Result<(), String> {
+    app.core
+        .lock()
+        .unwrap()
+        .set_view_tip_seen(seen)
+        .map_err(|e| e.to_string())
+}
+
 /// The list a new reminder goes in: the one the editor chose, or the
 /// personal list.
 fn list_or_personal(core: &Core, list_id: Option<String>) -> String {
@@ -1896,6 +1937,11 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            agenda,
+            view,
+            set_view,
+            view_tip_seen,
+            set_view_tip_seen,
             snooze_all,
             end_snooze_all,
             holding,

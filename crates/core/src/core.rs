@@ -204,6 +204,11 @@ pub struct Filters {
 }
 
 const FILTERS: &str = "filters";
+/// The view the window was last left on.
+const VIEW: &str = "view";
+const VIEWS: [&str; 5] = ["inbox", "calendar", "agenda", "board", "history"];
+/// "1" once the first-run tip about the view switcher is dismissed.
+const VIEW_TIP_SEEN: &str = "view_tip_seen";
 /// The loudest alert style this device uses, as its snake_case name.
 const LOUDEST_STYLE: &str = "loudest_style";
 /// "1" when the loudest style caps Maximum too.
@@ -452,6 +457,27 @@ pub struct Inbox {
     /// can be acted on, but they are not in Overdue or Due, never alert and
     /// don't count in the tray's badge: pausing is for being left alone.
     pub paused: Vec<PausedOpen>,
+}
+
+/// The Agenda: the open occurrences for its "Now" band, and everything
+/// expected or closed from the start of yesterday to the end of tomorrow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Agenda {
+    /// Open occurrences past their overdue time, as in the Inbox.
+    pub overdue: Vec<DueItem>,
+    /// Open occurrences not yet overdue.
+    pub due: Vec<DueItem>,
+    /// Open occurrences of paused reminders.
+    pub paused: Vec<PausedOpen>,
+    /// Yesterday, today and tomorrow in the device's zone, as `[start, end)`
+    /// unix seconds. A day can be 23 or 25 hours long, so the views group by
+    /// these rather than by adding 86 400.
+    pub days: Vec<(i64, i64)>,
+    /// Expected occurrences from now to the end of tomorrow, earliest first.
+    pub expected: Vec<ExpectedItem>,
+    /// Occurrences closed from the start of yesterday until now (missed ones
+    /// included), by when they were scheduled.
+    pub closed: Vec<EarlierItem>,
 }
 
 /// An open occurrence of a paused reminder, and what pauses it.
@@ -2483,11 +2509,9 @@ impl Core {
         out
     }
 
-    /// The Inbox's Later today and Earlier today, for the day `now` falls in
-    /// on this device (in the device's time zone).
-    pub fn inbox(&self, now: i64) -> Inbox {
-        let zone = schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC);
-        let (start, end) = schedule::day_bounds(&zone, now);
+    /// Occurrences closed at or after `start` and before `end`, latest
+    /// closing first.
+    fn closed_between(&self, start: i64, end: i64) -> Vec<EarlierItem> {
         let mut earlier: Vec<EarlierItem> = self
             .states()
             .flat_map(|(_, s)| {
@@ -2511,6 +2535,12 @@ impl Core {
             .collect();
         earlier
             .sort_by(|a, b| (b.closed_at, &b.occurrence_id).cmp(&(a.closed_at, &a.occurrence_id)));
+        earlier
+    }
+
+    /// Open occurrences as the Inbox and Agenda list them: overdue (highest
+    /// priority first, then longest overdue), due, and those of paused reminders.
+    fn open_sections(&self, now: i64) -> (Vec<DueItem>, Vec<DueItem>, Vec<PausedOpen>) {
         // Open occurrences of paused reminders are set aside, quiet.
         let mut paused: Vec<PausedOpen> = Vec::new();
         let mut open: Vec<DueItem> = Vec::new();
@@ -2546,6 +2576,70 @@ impl Core {
         });
         let mut due = due;
         due.sort_by(|a, b| (a.fired_at, &a.occurrence_id).cmp(&(b.fired_at, &b.occurrence_id)));
+        (overdue, due, paused)
+    }
+
+    /// The Agenda's data at `now`: see [`Agenda`]. Like the Inbox it is
+    /// unfiltered; the window applies the sidebar's filters.
+    pub fn agenda(&self, now: i64) -> Agenda {
+        let zone = schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC);
+        let (today_start, today_end) = schedule::day_bounds(&zone, now);
+        let (yesterday_start, _) = schedule::day_bounds(&zone, today_start - 1);
+        let (tomorrow_start, tomorrow_end) = schedule::day_bounds(&zone, today_end);
+        let (overdue, due, paused) = self.open_sections(now);
+        let mut closed = self.closed_between(yesterday_start, now.saturating_add(1));
+        closed.sort_by(|a, b| {
+            (a.scheduled_at, &a.occurrence_id).cmp(&(b.scheduled_at, &b.occurrence_id))
+        });
+        Agenda {
+            overdue,
+            due,
+            paused,
+            days: vec![
+                (yesterday_start, today_start),
+                (today_start, today_end),
+                (tomorrow_start, tomorrow_end),
+            ],
+            expected: self.expected(now, tomorrow_end - 1),
+            closed,
+        }
+    }
+
+    /// The view the window opens on, as this device last left it: `inbox`,
+    /// `calendar`, `agenda`, `board` or `history`. Inbox the first time.
+    pub fn view(&self) -> String {
+        self.device_setting(VIEW)
+            .ok()
+            .flatten()
+            .filter(|v| VIEWS.contains(&v.as_str()))
+            .unwrap_or_else(|| "inbox".to_string())
+    }
+
+    /// Remembers the view, on this device only.
+    pub fn set_view(&self, view: &str) -> Result<()> {
+        if !VIEWS.contains(&view) {
+            return Err(Error::BadView(view.to_string()));
+        }
+        self.set_device_setting(VIEW, view)
+    }
+
+    /// Whether the first-run tip about the view switcher was dismissed.
+    pub fn view_tip_seen(&self) -> bool {
+        self.device_setting(VIEW_TIP_SEEN).ok().flatten().as_deref() == Some("1")
+    }
+
+    /// "Got it" dismisses the tip; Help shows it again (`false`).
+    pub fn set_view_tip_seen(&self, seen: bool) -> Result<()> {
+        self.set_device_setting(VIEW_TIP_SEEN, if seen { "1" } else { "" })
+    }
+
+    /// The Inbox's Later today and Earlier today, for the day `now` falls in
+    /// on this device (in the device's time zone).
+    pub fn inbox(&self, now: i64) -> Inbox {
+        let zone = schedule::zone(&self.device_zone()).unwrap_or(TimeZone::UTC);
+        let (start, end) = schedule::day_bounds(&zone, now);
+        let earlier = self.closed_between(start, end);
+        let (overdue, due, paused) = self.open_sections(now);
         Inbox {
             overdue,
             due,

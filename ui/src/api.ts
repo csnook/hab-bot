@@ -234,6 +234,19 @@ export interface Inbox {
   paused: PausedOpen[];
 }
 
+/** The Agenda's data: unfiltered, like the Inbox. */
+export interface Agenda {
+  overdue: DueItem[];
+  due: DueItem[];
+  paused: PausedOpen[];
+  /** Yesterday, today and tomorrow in the device's zone, as [start, end) unix seconds. */
+  days: Array<[number, number]>;
+  /** Expected occurrences from now to the end of tomorrow. */
+  expected: ExpectedItem[];
+  /** Occurrences closed from the start of yesterday, by scheduled time. */
+  closed: EarlierItem[];
+}
+
 /** The patterns the editor offers; anything else is a written rule. */
 export type Pattern =
   | { kind: "daily" }
@@ -253,6 +266,14 @@ export const createReminder = (
 export const priorities = () => invoke<PriorityInfo[]>("priorities");
 export const appVersion = () => invoke<string>("app_version");
 export const inbox = () => invoke<Inbox>("inbox");
+export const agenda = () => invoke<Agenda>("agenda");
+/** The view the window was last left on ("inbox" the first time). */
+export const view = () => invoke<string>("view");
+export const setView = (view: string) => invoke<void>("set_view", { view });
+/** Whether the first-run tip about the view switcher was dismissed. */
+export const viewTipSeen = () => invoke<boolean>("view_tip_seen");
+/** "Got it" is true; Help shows the tip again with false. */
+export const setViewTipSeen = (seen: boolean) => invoke<void>("set_view_tip_seen", { seen });
 /** `date` is "2026-10-03", `time` "09:30". No `zone` makes it floating. */
 export const createRecurringReminder = (
   title: string,

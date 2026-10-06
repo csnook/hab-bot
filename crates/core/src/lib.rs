@@ -27,11 +27,11 @@ mod store;
 mod sun;
 
 pub use crate::core::{
-    ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice, EarlierItem,
-    EditReminder, ExpectedItem, Filters, Fired, Inbox, ListInfo, OccurrenceView, Outcome,
-    PausedOpen, PausedReminder, ReconciliationNotice, ReminderView, ScheduleView, SecurityNotice,
-    SignInNotice, Snapshot, SnoozeAllChoice, SnoozeAllView, SnoozeKind, SnoozeOption, SnoozePicker,
-    TriggerView,
+    Agenda, ClosedEntry, ClosedView, Core, CountdownItem, DeletedReminder, DeviceNotice,
+    EarlierItem, EditReminder, ExpectedItem, Filters, Fired, Inbox, ListInfo, OccurrenceView,
+    Outcome, PausedOpen, PausedReminder, ReconciliationNotice, ReminderView, ScheduleView,
+    SecurityNotice, SignInNotice, Snapshot, SnoozeAllChoice, SnoozeAllView, SnoozeKind,
+    SnoozeOption, SnoozePicker, TriggerView,
 };
 pub use alerter::{
     Alerter, Command, NoServer, Notification, ServerCheck, Urgency, ACTION_ACKNOWLEDGE,
@@ -74,6 +74,8 @@ pub enum Error {
     BadSchedule(String),
     #[error("{0} is not a time zone this device knows")]
     BadZone(String),
+    #[error("{0} is not a view")]
+    BadView(String),
     #[error("the countdown can't be used: {0}")]
     BadCountdown(String),
     #[error("{0} is not a countdown reminder")]

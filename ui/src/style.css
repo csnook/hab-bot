@@ -124,3 +124,26 @@ dialog.panel details { display: inline-block; }
 .quiet-rule { margin: 8px 0; }
 .side-footer { margin-top: 16px; font-size: 0.9em; }
 dialog.snooze-all form { display: grid; gap: 8px; max-width: 28em; }
+
+/* The toolbar, its view switcher and the first-run tip (#52). */
+.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.toolbar h1 { margin: 0; font-size: 1.2rem; }
+.views { display: flex; gap: 4px; }
+.views button[aria-pressed="true"] { font-weight: 700; }
+.tip { border: 1px solid #888; padding: 8px; border-radius: 6px; }
+
+/* The Agenda. */
+.agenda ul { list-style: none; padding: 0; margin: 0; }
+.agenda-row { border-bottom: 1px solid #8884; }
+.agenda-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: 0; padding: 6px 0; font: inherit; cursor: pointer; }
+.agenda-head .when { min-width: 5.5em; color: #888; }
+.agenda-head .title { flex: 1; }
+.agenda-head .tag { font-size: 0.8rem; color: #888; }
+.agenda-row.overdue .agenda-head { border-left: 3px solid #c33; padding-left: 6px; }
+.agenda-row.paused .agenda-head, .agenda-row.closed .agenda-head { opacity: 0.65; }
+.agenda-row.expected .agenda-head .title { font-weight: 400; }
+.agenda-detail { padding: 4px 0 8px 1.5rem; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.agenda-detail p { flex-basis: 100%; margin: 0; }
+.now-rule { display: flex; align-items: center; gap: 8px; color: #c33; font-size: 0.8rem; margin: 2px 0; }
+.now-rule::before, .now-rule::after { content: ""; height: 1px; background: #c33; flex: 1; }
+.now-rule::before { flex: 0 0 8px; }
